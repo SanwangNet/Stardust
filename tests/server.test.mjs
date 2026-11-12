@@ -47,6 +47,9 @@ test("WebUI 首页与静态脚本由同一进程提供", async () => {
   const js = await fetch(`${origin}/main.js`);
   assert.equal(js.status, 200);
   assert.match(await js.text(), /api\/health/);
+  const motion = await fetch(`${origin}/navigation-motion.js`);
+  assert.equal(motion.status, 200);
+  assert.match(await motion.text(), /getNavigationDirection/);
   const css = await fetch(`${origin}/style.css`);
   assert.equal(css.status, 200);
   assert.match(css.headers.get("content-type"), /text\/css/);

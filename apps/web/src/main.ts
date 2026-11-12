@@ -1,4 +1,5 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
+import { getNavigationDirection, getStaggerTiming, NavigationMotion, navigationMotion, type NavigationDirection } from "./navigation-motion.js";
 
 interface HealthResponse {
   status: "ok";
@@ -42,36 +43,114 @@ const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
 const menuToggle = getElement<HTMLButtonElement>("menu-toggle");
 const pageTitle = getElement<HTMLElement>("page-title");
 const breadcrumb = getElement<HTMLElement>("page-breadcrumb");
+const sidebarHeading = getElement<HTMLElement>("sidebar-heading");
+const menuToggleLabel = getElement<HTMLElement>("menu-toggle-label");
+const pageStage = getElement<HTMLElement>("page-stage");
 const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
 const expanded = new Set<string>();
 const lastVisited = new Map<string, string>();
+const routeStates = new Map<string, { scrollX: number; scrollY: number; sidebarScrollTop: number; focus?: HTMLElement }>();
+const motion = new NavigationMotion();
+const primaryIndicator = document.createElement("span");
+primaryIndicator.className = "primary-indicator";
+primaryIndicator.setAttribute("aria-hidden", "true");
+const secondaryIndicator = document.createElement("span");
+secondaryIndicator.className = "secondary-indicator";
+secondaryIndicator.setAttribute("aria-hidden", "true");
+const primaryLinks = new Map<MenuCategory, HTMLAnchorElement>();
 let currentTitle = "运行概况";
 let webTitle = "Stardust";
+let currentPath = "";
+let activeCategory: MenuCategory | null = null;
+let pendingNavigationOrigin: "click" | null = null;
+let activeNavigationToken = 0;
+let navigationAnimating = false;
 
 function pages(category: MenuCategory): MenuPage[] {
   return category.items.flatMap((item) => "children" in item ? item.children : [item]);
+}
+function visiblePageIndex(category: MenuCategory, path: string): number {
+  let index = 0;
+  for (const item of category.items) {
+    if (!("children" in item)) {
+      if (item.path === path) return index;
+      index += 1;
+      continue;
+    }
+    index += 1;
+    for (const child of item.children) {
+      if (child.path === path) return index;
+      index += 1;
+    }
+  }
+  return index;
 }
 function closeMenu(): void {
   sidebar.classList.remove("is-open");
   menuToggle.setAttribute("aria-expanded", "false");
 }
-function createPageLink(page: MenuPage, currentPath: string, className: string): HTMLAnchorElement {
+function markNavigationIntent(path: string, event: MouseEvent): void {
+  if (location.hash.slice(1) === path) {
+    event.preventDefault();
+    pageTitle.focus({ preventScroll: true });
+    return;
+  }
+  pendingNavigationOrigin = "click";
+}
+function createPageLink(page: MenuPage, path: string, className: string, order: number): HTMLAnchorElement {
   const link = document.createElement("a");
   link.href = `#${page.path}`;
   link.className = className;
   link.textContent = page.label;
-  if (page.path === currentPath) link.setAttribute("aria-current", "page");
+  link.dataset.transitionOrder = String(order);
+  if (page.path === path) link.setAttribute("aria-current", "page");
   link.addEventListener("click", (event) => {
     closeMenu();
-    if (location.hash.slice(1) === page.path) { event.preventDefault(); pageTitle.focus(); }
+    markNavigationIntent(page.path, event);
   });
   return link;
 }
-function renderSecondary(category: MenuCategory, currentPath: string): void {
-  secondaryNav.replaceChildren();
+function createPrimaryNavigation(): void {
+  primaryNav.replaceChildren(primaryIndicator);
+  for (const item of menu) {
+    const link = document.createElement("a");
+    link.href = `#${pages(item)[0]!.path}`;
+    link.textContent = item.label;
+    link.addEventListener("click", (event) => {
+      closeMenu();
+      markNavigationIntent(link.hash.slice(1), event);
+    });
+    primaryLinks.set(item, link);
+    primaryNav.append(link);
+  }
+}
+function setGroupExpanded(groupId: string, isExpanded: boolean, category: MenuCategory, path: string): void {
+  if (isExpanded) expanded.add(groupId); else expanded.delete(groupId);
+  const button = document.getElementById(`nav-toggle-${groupId}`) as HTMLButtonElement | null;
+  const children = document.getElementById(`nav-children-${groupId}`) as HTMLDivElement | null;
+  if (!button || !children) return;
+  button.setAttribute("aria-expanded", String(isExpanded));
+  const arrow = button.querySelector<HTMLElement>("[data-nav-arrow]");
+  if (arrow) arrow.textContent = isExpanded ? "−" : "+";
+  children.dataset.expanded = String(isExpanded);
+  children.setAttribute("aria-hidden", String(!isExpanded));
+  children.inert = !isExpanded;
+  const currentChild = category.items.find((item): item is MenuGroup => "children" in item && item.id === groupId)?.children.some((child) => child.path === path);
+  if (currentChild && !isExpanded) moveSecondaryIndicator(true, activeNavigationToken, button);
+  if (currentChild && isExpanded) {
+    const complete = (): void => moveSecondaryIndicator(true, activeNavigationToken);
+    children.addEventListener("transitionend", (event) => {
+      if (event.propertyName === "grid-template-rows") complete();
+    }, { once: true });
+    window.setTimeout(complete, navigationMotion.submenuDurationMs + 32);
+  }
+}
+function createSecondaryNavigation(category: MenuCategory, path: string, animate: boolean, direction: NavigationDirection, token: number): Promise<boolean[]> {
+  secondaryNav.replaceChildren(secondaryIndicator);
+  let order = 0;
   for (const item of category.items) {
     if (!("children" in item)) {
-      secondaryNav.append(createPageLink(item, currentPath, "secondary-link"));
+      secondaryNav.append(createPageLink(item, path, "secondary-link", order++));
       continue;
     }
     const group = document.createElement("div");
@@ -80,57 +159,292 @@ function renderSecondary(category: MenuCategory, currentPath: string): void {
     button.type = "button";
     button.id = `nav-toggle-${item.id}`;
     button.className = "nav-group-toggle";
+    button.dataset.transitionOrder = String(order++);
     button.setAttribute("aria-expanded", String(expanded.has(item.id)));
     button.setAttribute("aria-controls", `nav-children-${item.id}`);
-    if (item.children.some((page) => page.path === currentPath)) button.classList.add("has-current");
+    if (item.children.some((page) => page.path === path)) button.classList.add("has-current");
     const label = document.createElement("span"); label.textContent = item.label;
-    const arrow = document.createElement("span"); arrow.textContent = expanded.has(item.id) ? "−" : "+"; arrow.setAttribute("aria-hidden", "true");
+    const arrow = document.createElement("span"); arrow.dataset.navArrow = "true"; arrow.textContent = expanded.has(item.id) ? "−" : "+"; arrow.setAttribute("aria-hidden", "true");
     button.append(label, arrow);
     button.addEventListener("click", () => {
-      if (expanded.has(item.id)) expanded.delete(item.id); else expanded.add(item.id);
-      renderSecondary(category, currentPath);
-      document.getElementById(`nav-toggle-${item.id}`)?.focus();
+      setGroupExpanded(item.id, !expanded.has(item.id), category, currentPath);
+      button.focus({ preventScroll: true });
+      moveSecondaryIndicator(true, activeNavigationToken);
     });
     group.append(button);
     const children = document.createElement("div");
     children.id = `nav-children-${item.id}`;
     children.className = "nav-children";
-    children.hidden = !expanded.has(item.id);
-    for (const page of item.children) children.append(createPageLink(page, currentPath, "secondary-link child-link"));
+    children.dataset.expanded = String(expanded.has(item.id));
+    children.setAttribute("aria-hidden", String(!expanded.has(item.id)));
+    children.inert = !expanded.has(item.id);
+    const inner = document.createElement("div");
+    inner.className = "nav-children-inner";
+    for (const page of item.children) inner.append(createPageLink(page, path, "secondary-link child-link", order++));
+    children.append(inner);
     group.append(children);
     secondaryNav.append(group);
   }
+  const sideItems = Array.from(secondaryNav.querySelectorAll<HTMLElement>("[data-transition-order]"));
+  const entering = animate ? animateElements(sideItems, "enter", direction, "x", token, navigationMotion.sidebarEnterPx, true) : Promise.resolve([]);
+  moveSecondaryIndicator(animate, token);
+  return entering;
 }
-function renderNavigation(): void {
+function updateSecondarySelection(category: MenuCategory, path: string, animate: boolean, token: number): void {
+  secondaryNav.querySelectorAll<HTMLAnchorElement>("a.secondary-link").forEach((link) => {
+    if (link.hash.slice(1) === path) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  for (const item of category.items) {
+    if (!("children" in item)) continue;
+    const currentChild = item.children.some((child) => child.path === path);
+    document.getElementById(`nav-toggle-${item.id}`)?.classList.toggle("has-current", currentChild);
+    if (currentChild && !expanded.has(item.id)) setGroupExpanded(item.id, true, category, path);
+  }
+  moveSecondaryIndicator(animate, token);
+}
+function movePrimaryIndicator(animate: boolean, token: number): Promise<boolean> {
+  if (!activeCategory) return Promise.resolve(false);
+  const link = primaryLinks.get(activeCategory);
+  if (!link) return Promise.resolve(false);
+  const navRect = primaryNav.getBoundingClientRect();
+  const linkRect = link.getBoundingClientRect();
+  const x = linkRect.left - navRect.left + primaryNav.scrollLeft;
+  const width = linkRect.width;
+  if (!animate || motion.isReducedMotion()) {
+    primaryIndicator.style.transform = `translateX(${x}px)`;
+    primaryIndicator.style.width = `${width}px`;
+    return Promise.resolve(true);
+  }
+  const computed = getComputedStyle(primaryIndicator);
+  const transform = computed.transform === "none" ? "translateX(0px)" : computed.transform;
+  return motion.animate(primaryIndicator, [
+    { transform, width: computed.width },
+    { transform: `translateX(${x}px)`, width: `${width}px` },
+  ], {
+    token,
+    duration: navigationMotion.navigationDurationMs,
+    properties: ["transform", "width"],
+    onFinish: () => { primaryIndicator.style.transform = `translateX(${x}px)`; primaryIndicator.style.width = `${width}px`; },
+  });
+}
+function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: HTMLElement): void {
+  const selected = forcedTarget ?? secondaryNav.querySelector<HTMLElement>('[aria-current="page"]');
+  if (!selected) return;
+  const closedGroup = selected.closest<HTMLElement>(".nav-children[data-expanded='false']");
+  const target = closedGroup?.previousElementSibling as HTMLElement | null ?? selected;
+  const navRect = secondaryNav.getBoundingClientRect();
+  const rect = target.getBoundingClientRect();
+  const y = rect.top - navRect.top + secondaryNav.scrollTop;
+  const height = rect.height;
+  if (!animate || motion.isReducedMotion()) {
+    secondaryIndicator.style.transform = `translateY(${y}px)`;
+    secondaryIndicator.style.height = `${height}px`;
+    return;
+  }
+  const computed = getComputedStyle(secondaryIndicator);
+  const transform = computed.transform === "none" ? "translateY(0px)" : computed.transform;
+  void motion.animate(secondaryIndicator, [
+    { transform, height: computed.height },
+    { transform: `translateY(${y}px)`, height: `${height}px` },
+  ], {
+    token,
+    duration: navigationMotion.navigationDurationMs,
+    properties: ["transform", "height"],
+    onFinish: () => { secondaryIndicator.style.transform = `translateY(${y}px)`; secondaryIndicator.style.height = `${height}px`; },
+  });
+}
+function orderedTransitionItems(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-transition-order]"))
+    .filter((element) => !element.hidden)
+    .sort((left, right) => Number(left.dataset.transitionOrder) - Number(right.dataset.transitionOrder));
+}
+function motionTranslate(axis: "x" | "y", amount: number): string {
+  return axis === "x" ? `${amount}px 0px` : `0px ${amount}px`;
+}
+function animateElements(elements: HTMLElement[], mode: "enter" | "exit", direction: NavigationDirection, axis: "x" | "y", token: number, distance: number, initialize: boolean): Promise<boolean[]> {
+  const selected = [...new Set(elements)];
+  return Promise.all(selected.map((element, index) => {
+    const timing = getStaggerTiming(index);
+    const computed = getComputedStyle(element);
+    let translate = computed.translate === "none" ? "0px 0px" : computed.translate;
+    let opacity = computed.opacity;
+    if (mode === "enter" && initialize) {
+      translate = motionTranslate(axis, direction * distance);
+      opacity = "0";
+      element.style.translate = translate;
+      element.style.opacity = opacity;
+    }
+    const targetTranslate = mode === "enter" ? "0px 0px" : motionTranslate(axis, -direction * distance);
+    const targetOpacity = mode === "enter" ? "1" : "0";
+    return motion.animate(element, [
+      { translate, opacity },
+      { translate: targetTranslate, opacity: targetOpacity },
+    ], {
+      token,
+      duration: timing.duration,
+      delay: timing.delay,
+      properties: ["translate", "opacity"],
+      onFinish: mode === "enter" ? () => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); } : undefined,
+    });
+  }));
+}
+function createHeadingGhost(element: HTMLElement): HTMLElement {
+  const ghost = element.cloneNode(true) as HTMLElement;
+  ghost.removeAttribute("id");
+  ghost.removeAttribute("tabindex");
+  ghost.removeAttribute("data-transition-order");
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.classList.add("transition-ghost");
+  ghost.style.top = `${element.offsetTop}px`;
+  ghost.style.left = `${element.offsetLeft}px`;
+  ghost.style.width = `${element.offsetWidth}px`;
+  element.parentElement!.append(ghost);
+  return ghost;
+}
+function saveRouteState(path: string): void {
+  if (!path) return;
+  const previous = routeStates.get(path);
+  const active = document.activeElement;
+  const section = navPages.find((page) => page.dataset.page === path);
+  const focus = active instanceof HTMLElement && section?.contains(active) ? active : previous?.focus;
+  routeStates.set(path, { scrollX: window.scrollX, scrollY: window.scrollY, sidebarScrollTop: sidebar.scrollTop, ...(focus ? { focus } : {}) });
+}
+function restoreRouteState(path: string, origin: "click" | "history" | "programmatic" | "initial"): void {
+  if (origin === "initial") return;
+  const state = routeStates.get(path);
+  const section = navPages.find((page) => page.dataset.page === path);
+  if (origin === "history" && state?.focus?.isConnected && section?.contains(state.focus)) state.focus.focus({ preventScroll: true });
+  else pageTitle.focus({ preventScroll: true });
+  if (origin === "history" && state) {
+    window.scrollTo({ left: state.scrollX, top: state.scrollY, behavior: "instant" });
+    sidebar.scrollTop = state.sidebarScrollTop;
+  }
+}
+function renderNavigation(origin: "click" | "history" | "programmatic" | "initial" = "history"): void {
   let path = location.hash.slice(1) || "/overview/status";
   let category = menu.find((item) => pages(item).some((page) => page.path === path));
   if (!category) {
     path = "/overview/status";
     category = menu[0]!;
     history.replaceState(null, "", `#${path}`);
-  }
+  } else if (!location.hash) history.replaceState(null, "", `#${path}`);
   const page = pages(category).find((item) => item.path === path)!;
+  if (currentPath === path && currentPath) {
+    if (origin === "programmatic") pageTitle.focus({ preventScroll: true });
+    return;
+  }
+
+  const previousPath = currentPath;
+  const previousCategory = activeCategory;
+  if (previousPath) saveRouteState(previousPath);
+  const animate = Boolean(previousPath);
+  const token = animate ? motion.begin() : activeNavigationToken;
+  if (animate) activeNavigationToken = token;
+  navigationAnimating = animate;
+  const axis: "x" | "y" = previousCategory && previousCategory !== category ? "x" : "y";
+  const fromIndex = axis === "x" && previousCategory ? menu.indexOf(previousCategory) : previousCategory ? visiblePageIndex(previousCategory, previousPath) : 0;
+  const toIndex = axis === "x" ? menu.indexOf(category) : visiblePageIndex(category, path);
+  const direction = getNavigationDirection(fromIndex, toIndex);
+  const oldVisible = navPages.filter((section) => !section.hidden && section.dataset.page !== path);
+  const targetSection = navPages.find((section) => section.dataset.page === path)!;
+  const targetWasVisible = !targetSection.hidden;
+  const stageHeight = pageStage.getBoundingClientRect().height;
+  if (animate) pageStage.style.height = `${stageHeight}px`;
+  const refreshWasVisible = !refreshButton.hidden;
+  const headingGhosts = animate ? [
+    ...Array.from(document.querySelectorAll<HTMLElement>(".heading-copy > .transition-ghost")),
+    ...(pageTitle.textContent !== page.label ? [createHeadingGhost(pageTitle)] : []),
+    ...(breadcrumb.textContent !== `STARDUST / ${category.label}` ? [createHeadingGhost(breadcrumb)] : []),
+  ] : [];
+
+  currentPath = path;
+  activeCategory = category;
+  currentTitle = page.label;
   lastVisited.set(category.label, path);
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
-  currentTitle = page.label;
   pageTitle.textContent = page.label;
   breadcrumb.textContent = `STARDUST / ${category.label}`;
-  getElement<HTMLElement>("sidebar-heading").textContent = category.label;
-  getElement<HTMLElement>("menu-toggle-label").textContent = `${category.label} / ${page.label}`;
+  sidebarHeading.textContent = category.label;
+  menuToggleLabel.textContent = `${category.label} / ${page.label}`;
   document.title = `${currentTitle} · ${webTitle}`;
-  navPages.forEach((section) => { section.hidden = section.dataset.page !== path; });
-  refreshButton.hidden = path !== "/overview/status";
-  primaryNav.replaceChildren();
-  for (const item of menu) {
-    const link = document.createElement("a");
-    link.href = `#${lastVisited.get(item.label) ?? pages(item)[0]!.path}`;
-    link.textContent = item.label;
-    if (item === category) link.setAttribute("aria-current", "true");
-    link.addEventListener("click", closeMenu);
-    primaryNav.append(link);
+  for (const section of navPages) {
+    if (section.dataset.page === path) {
+      section.hidden = false;
+      section.removeAttribute("aria-hidden");
+      section.inert = animate;
+    } else if (!section.hidden) {
+      section.setAttribute("aria-hidden", "true");
+      section.inert = true;
+    }
   }
-  renderSecondary(category, path);
+  if (path === "/overview/status") refreshButton.hidden = false;
+  primaryLinks.forEach((link, item) => {
+    const targetPath = lastVisited.get(item.label) ?? pages(item)[0]!.path;
+    link.href = `#${targetPath}`;
+    if (item === category) link.setAttribute("aria-current", "true");
+    else link.removeAttribute("aria-current");
+  });
+  const sameCategory = previousCategory === category;
+  const sideAnimation = !sameCategory
+    ? createSecondaryNavigation(category, path, animate, direction, token)
+    : (updateSecondarySelection(category, path, animate, token), Promise.resolve([]));
   closeMenu();
+
+  if (!animate) {
+    navPages.forEach((section) => { section.hidden = section.dataset.page !== path; section.inert = section.hidden; section.removeAttribute("aria-hidden"); });
+    refreshButton.hidden = path !== "/overview/status";
+    void movePrimaryIndicator(false, token);
+    moveSecondaryIndicator(false, token);
+    return;
+  }
+
+  const heading = document.querySelector<HTMLElement>(".page-heading")!;
+  const enteringHeading = orderedTransitionItems(heading).filter((element) => element !== refreshButton || path === "/overview/status");
+  const enteringContent = orderedTransitionItems(targetSection);
+  const enterItems = [...enteringHeading, ...enteringContent, sidebarHeading, menuToggleLabel];
+  sidebarHeading.dataset.transitionOrder = "0";
+  menuToggleLabel.dataset.transitionOrder = "0";
+  const exiting = [
+    ...oldVisible.flatMap((section) => orderedTransitionItems(section)),
+    ...headingGhosts,
+    ...(refreshWasVisible && path !== "/overview/status" ? [refreshButton] : []),
+  ];
+  const entering = animateElements(enterItems, "enter", direction, axis, token, navigationMotion.contentEnterPx, !targetWasVisible);
+  const exitingAnimation = animateElements(exiting, "exit", direction, axis, token, navigationMotion.contentExitPx, false);
+  const primary = movePrimaryIndicator(true, token);
+  if (!targetWasVisible) targetSection.style.opacity = "0";
+  const fadePage = (section: HTMLElement, opacity: string): Promise<boolean> => motion.animate(section, [
+    { opacity: getComputedStyle(section).opacity }, { opacity },
+  ], { token, duration: navigationMotion.pageDurationMs, properties: ["opacity"] });
+  const pageFades = [fadePage(targetSection, "1"), ...oldVisible.map((section) => fadePage(section, "0"))];
+  const heightAnimation = motion.animate(pageStage, [
+    { height: `${stageHeight}px` }, { height: `${targetSection.offsetHeight}px` },
+  ], { token, duration: navigationMotion.pageDurationMs, properties: ["height"] });
+  void Promise.all([entering, exitingAnimation, primary, sideAnimation, heightAnimation, ...pageFades]).then(() => {
+    if (!motion.isCurrent(token)) return;
+    for (const section of oldVisible) {
+      section.hidden = true;
+      section.removeAttribute("aria-hidden");
+      section.style.removeProperty("opacity");
+      section.querySelectorAll<HTMLElement>("[data-transition-order]").forEach((element) => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); });
+    }
+    for (const element of exiting) {
+      if (element.classList.contains("transition-ghost")) element.remove();
+      else { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); }
+    }
+    targetSection.querySelectorAll<HTMLElement>("[data-transition-order]").forEach((element) => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); });
+    targetSection.style.removeProperty("opacity");
+    targetSection.inert = false;
+    pageStage.style.removeProperty("height");
+    sidebarHeading.style.removeProperty("translate"); sidebarHeading.style.removeProperty("opacity");
+    menuToggleLabel.style.removeProperty("translate"); menuToggleLabel.style.removeProperty("opacity");
+    refreshButton.hidden = path !== "/overview/status";
+    navigationAnimating = false;
+    void movePrimaryIndicator(false, token);
+    moveSecondaryIndicator(false, token);
+    restoreRouteState(path, origin);
+  });
 }
 function setWebTitle(title: string): void {
   webTitle = title;
@@ -139,15 +453,41 @@ function setWebTitle(title: string): void {
 }
 function goToOverview(): void {
   history.replaceState(null, "", "#/overview/status");
-  renderNavigation();
+  renderNavigation("programmatic");
 }
 menuToggle.addEventListener("click", () => {
   const open = sidebar.classList.toggle("is-open");
   menuToggle.setAttribute("aria-expanded", String(open));
 });
-window.addEventListener("hashchange", () => { renderNavigation(); pageTitle.focus(); });
+window.addEventListener("hashchange", () => {
+  const origin = pendingNavigationOrigin ?? "history";
+  pendingNavigationOrigin = null;
+  renderNavigation(origin);
+});
+document.addEventListener("focusin", (event) => {
+  const target = event.target;
+  const section = navPages.find((item) => item.dataset.page === currentPath);
+  if (target instanceof HTMLElement && section?.contains(target)) {
+    const previous = routeStates.get(currentPath);
+    routeStates.set(currentPath, { ...previous, scrollX: window.scrollX, scrollY: window.scrollY, sidebarScrollTop: sidebar.scrollTop, focus: target });
+  }
+});
+window.addEventListener("scroll", () => saveRouteState(currentPath), { passive: true });
+const indicatorResize = new ResizeObserver(() => {
+  if (!activeCategory || navigationAnimating) return;
+  void movePrimaryIndicator(false, activeNavigationToken);
+  moveSecondaryIndicator(false, activeNavigationToken);
+});
+indicatorResize.observe(primaryNav);
+indicatorResize.observe(secondaryNav);
+window.addEventListener("resize", () => {
+  if (navigationAnimating) return;
+  void movePrimaryIndicator(false, activeNavigationToken);
+  moveSecondaryIndicator(false, activeNavigationToken);
+});
 getElement<HTMLElement>("settings-access-url").textContent = location.origin;
-renderNavigation();
+createPrimaryNavigation();
+renderNavigation("initial");
 
 function formatUptime(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
