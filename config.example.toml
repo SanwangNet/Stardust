@@ -1,3 +1,5 @@
+initialized = false
+
 [service]
 name = "Stardust"
 description = ""

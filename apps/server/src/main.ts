@@ -13,7 +13,7 @@ server.on("error", () => {
 server.listen(port, host, () => {
   console.log("\n  Stardust v0.1.0");
   console.log("  ──────────────────────────────────");
-  console.log("  已启动基础服务（尚无初始化、模型及 Agent）\n");
+  console.log("  已启动基础服务（尚无初始化向导、模型及 Agent）\n");
 });
 
 let closing = false;

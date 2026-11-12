@@ -5,13 +5,29 @@ import TOML from "@iarna/toml";
 import { projectConfigRoot, type EnvValues } from "./env.js";
 
 export interface StardustConfig {
+  initialized: boolean;
   service: { name: string; description: string };
   server: { host: string; port: number };
   web: { title: string };
 }
 
+export type ConfigUpdate = {
+  service?: Partial<StardustConfig["service"]>;
+  server?: Partial<StardustConfig["server"]>;
+  web?: Partial<StardustConfig["web"]>;
+};
+
+export class AlreadyInitializedError extends Error {
+  readonly code = "ALREADY_INITIALIZED";
+  constructor() {
+    super("ALREADY_INITIALIZED");
+    this.name = "AlreadyInitializedError";
+  }
+}
+
 function defaults(): StardustConfig {
   return {
+    initialized: false,
     service: { name: "Stardust", description: "" },
     server: { host: "127.0.0.1", port: 8347 },
     web: { title: "Stardust" },
@@ -36,16 +52,19 @@ function stringValue(value: unknown, fallback: string, label: string, allowEmpty
 }
 
 function validateConfig(value: unknown): StardustConfig {
-  const config = table(value, "config.toml", ["service", "server", "web"]);
+  const config = table(value, "config.toml", ["initialized", "service", "server", "web"]);
   const service = table(config.service === undefined ? {} : config.service, "service", ["name", "description"]);
   const server = table(config.server === undefined ? {} : config.server, "server", ["host", "port"]);
   const web = table(config.web === undefined ? {} : config.web, "web", ["title"]);
   const fallback = defaults();
+  const initialized = config.initialized === undefined ? false : config.initialized;
+  if (typeof initialized !== "boolean") throw new Error("initialized 必须是布尔值");
   const port = server.port === undefined ? fallback.server.port : server.port;
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("server.port 必须是 1–65535 之间的整数");
   }
   return {
+    initialized,
     service: {
       name: stringValue(service.name, fallback.service.name, "service.name"),
       description: stringValue(service.description, fallback.service.description, "service.description", true),
@@ -53,6 +72,21 @@ function validateConfig(value: unknown): StardustConfig {
     server: { host: stringValue(server.host, fallback.server.host, "server.host"), port },
     web: { title: stringValue(web.title, fallback.web.title, "web.title") },
   };
+}
+
+function mergeUpdate(current: StardustConfig, value: ConfigUpdate): StardustConfig {
+  const update = table(value, "配置更新", ["service", "server", "web"]);
+  const service = table(update.service === undefined ? {} : update.service, "service", ["name", "description"]);
+  const server = table(update.server === undefined ? {} : update.server, "server", ["host", "port"]);
+  const web = table(update.web === undefined ? {} : update.web, "web", ["title"]);
+  // Treat undefined as absent, so omitted values retain their current setting.
+  const defined = (fields: Record<string, unknown>) => Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+  return validateConfig({
+    initialized: current.initialized,
+    service: { ...current.service, ...defined(service) },
+    server: { ...current.server, ...defined(server) },
+    web: { ...current.web, ...defined(web) },
+  });
 }
 
 export function createConfigStore(configRoot: string = projectConfigRoot) {
@@ -76,11 +110,8 @@ export function createConfigStore(configRoot: string = projectConfigRoot) {
     return validateConfig(parsed);
   }
 
-  function saveConfig(value: StardustConfig): void {
-    const config = validateConfig(value);
-    // Do not silently replace a malformed or unsupported existing configuration.
-    loadConfig();
-    const serialized = TOML.stringify({ service: { ...config.service }, server: { ...config.server }, web: { ...config.web } });
+  function writeConfig(config: StardustConfig): void {
+    const serialized = TOML.stringify({ initialized: config.initialized, service: { ...config.service }, server: { ...config.server }, web: { ...config.web } });
     const temporaryPath = join(configRoot, `.config.toml.${randomUUID()}.tmp`);
     let fd: number | undefined;
     let temporaryCreated = false;
@@ -101,7 +132,26 @@ export function createConfigStore(configRoot: string = projectConfigRoot) {
     }
   }
 
-  return { loadConfig, saveConfig };
+  function saveConfig(value: Omit<StardustConfig, "initialized"> & { initialized?: boolean }): void {
+    const candidate = validateConfig(value);
+    // Do not silently replace a malformed or unsupported existing configuration.
+    const current = loadConfig();
+    if (value.initialized !== undefined && candidate.initialized !== current.initialized) {
+      throw new Error("普通设置不能修改 initialized");
+    }
+    writeConfig({ ...candidate, initialized: current.initialized });
+  }
+
+  function initializeConfig(input: ConfigUpdate): StardustConfig {
+    // Synchronous read, check and atomic write form one critical section in this process.
+    const current = loadConfig();
+    if (current.initialized) throw new AlreadyInitializedError();
+    const config = { ...mergeUpdate(current, input), initialized: true };
+    writeConfig(config);
+    return config;
+  }
+
+  return { loadConfig, saveConfig, initializeConfig };
 }
 
 export const { loadConfig, saveConfig } = createConfigStore();

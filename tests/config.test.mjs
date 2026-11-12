@@ -12,6 +12,7 @@ import { createConfigStore, resolveConfig } from "../apps/server/dist/config.js"
 let root;
 let store;
 const expectedDefaults = {
+  initialized: false,
   service: { name: "Stardust", description: "" },
   server: { host: "127.0.0.1", port: 8347 },
   web: { title: "Stardust" },
@@ -70,7 +71,7 @@ test("保存并重新读取配置，拒绝未知和敏感字段", async () => {
     web: { title: "星尘" },
   };
   store.saveConfig(value);
-  assert.deepEqual(store.loadConfig(), value);
+  assert.deepEqual(store.loadConfig(), { initialized: false, ...value });
   const original = await readFile(join(root, "config.toml"), "utf8");
   assert.throws(() => store.saveConfig({ ...value, apiKey: "do-not-store" }), /未知配置字段/);
   assert.throws(() => store.saveConfig({ ...value, service: { ...value.service, secret: "do-not-store" } }), /未知配置字段/);

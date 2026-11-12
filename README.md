@@ -1,6 +1,6 @@
 # Stardust / 星尘
 
-**第一个可运行的项目骨架。** 独立 TypeScript 后端 + 简单 TypeScript WebUI；不包含 TenBot 旧代码，也不实现初始化、模型、Agent、数据库或 QQ。
+**第一个可运行的项目骨架。** 独立 TypeScript 后端 + 简单 TypeScript WebUI；不包含 TenBot 旧代码，也不实现初始化向导、模型、Agent、数据库或 QQ。
 
 ## 环境要求
 
@@ -36,6 +36,7 @@ npm run dev
 - 可将根目录 `.env.example` 复制为 `.env` 设置 Core 的监听地址；进程环境变量优先于文件。不要提交真实 `.env`。
 - 普通设置可写入项目根目录的 `config.toml`（可参考 `config.example.toml`）；文件不存在时使用内置默认值，不会自动创建。监听设置优先级为进程环境变量 > 根 `.env` > `config.toml` > 内置默认值。
 - 程序内部可使用 `loadConfig()` 读取配置、`resolveConfig()` 合并环境变量，以及 `saveConfig()` 校验并保存配置。保存使用同目录临时文件替换原文件，不保留手写 TOML 注释；`server.host` 和 `server.port` 修改后需重启生效。仅支持已定义的普通配置字段，密钥、Token 等敏感信息应保存在 `.env` 中。
+- 内部 `SetupService` 通过 `getInitializationState()` 和 `completeInitialization(input)` 读取并完成一次性初始化。缺少文件或 `initialized` 字段时视为未初始化；服务启动不会自动初始化。普通设置保存不能更改初始化状态；目前没有 CLI、WebUI 或 HTTP 初始化入口。
 - 扩展配置位于可选的 `env/<extension-id>/.env`，各扩展独立读取；目录或文件缺失时视为未配置，读取时不会创建它们。扩展 ID 使用小写字母、数字及连接符。
 - 安装扩展时不一定创建配置目录，只有扩展确实需要保存配置时才创建；禁用扩展不删除配置。未来卸载扩展时，将由扩展管理器提供保留或删除配置的选择。
 - 未来扩展将通过 Manifest 声明配置字段，由扩展管理器负责创建和管理配置；这些功能目前尚未实现。
