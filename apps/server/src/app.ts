@@ -6,6 +6,7 @@ import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, t
 import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
+import { logger, type LogService, type LogEntry } from "./logger.js";
 
 export interface AppOptions {
   version?: string;
@@ -14,6 +15,7 @@ export interface AppOptions {
   setupService?: SetupService;
   modelService?: ModelService;
   extensionManager?: ExtensionManager;
+  logService?: LogService;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -80,7 +82,9 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const staticDir = options.staticDir ?? defaultStaticDir;
   const setup = options.setupService ?? setupService;
   const model = options.modelService ?? modelService;
-  const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, []);
+  const logs = options.logService ?? logger;
+  const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [], logs);
+  const streams = new Set<ServerResponse>();
 
   const server = createServer(async (request, response) => {
     let pathname: string;
@@ -88,6 +92,64 @@ export function createStardustServer(options: AppOptions = {}): Server {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     } catch {
       sendJson(response, 400, { error: "INVALID_URL" });
+      return;
+    }
+
+    if (pathname === "/api/v1/logs" || pathname === "/api/v1/logs/stream") {
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const lastEventId = request.headers["last-event-id"];
+      const rawAfter = pathname.endsWith("/stream") ? ((typeof lastEventId === "string" ? lastEventId : "") || url.searchParams.get("after") || "0") : (url.searchParams.get("after") || "0");
+      const rawLimit = url.searchParams.get("limit") ?? "200";
+      if (!/^\d{1,15}$/.test(rawAfter) || !/^\d{1,4}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 1000 || !Number.isSafeInteger(Number(rawAfter))) { sendJson(response, 400, { error: "INVALID_CURSOR" }); return; }
+      const after = Number(rawAfter);
+      if (pathname === "/api/v1/logs") { sendJson(response, 200, logs.read(after, Number(rawLimit))); return; }
+      if (streams.size >= 32) { sendJson(response, 503, { error: "TOO_MANY_SUBSCRIBERS" }); return; }
+      response.writeHead(200, { ...securityHeaders, "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+      streams.add(response);
+      let closed = false;
+      let unsubscribe = (): void => {};
+      let blocked = false;
+      let timeout: NodeJS.Timeout | undefined;
+      let queuedBytes = 0;
+      const queued: string[] = [];
+      const close = (): void => { if (closed) return; closed = true; clearInterval(heartbeat); if (timeout) clearTimeout(timeout); unsubscribe(); streams.delete(response); };
+      const disconnect = (): void => { close(); response.destroy(); };
+      const send = (text: string): void => {
+        if (closed || response.destroyed) { disconnect(); return; }
+        try {
+          if (!response.write(text)) {
+            blocked = true;
+            timeout = setTimeout(disconnect, 10_000); timeout.unref();
+          }
+        } catch { disconnect(); }
+      };
+      const format = (entry: LogEntry): string => `id: ${entry.id}\ndata: ${JSON.stringify(entry)}\n\n`;
+      const snapshot = logs.read(after, 1000);
+      if ((url.searchParams.has("instance") && url.searchParams.get("instance") !== logs.instanceId) || after > snapshot.latest) {
+        response.end(`event: reset\ndata: {}\n\n`); streams.delete(response); return;
+      }
+      let replayIndex = 0;
+      const pump = (): void => {
+        while (!closed && !blocked && replayIndex < snapshot.entries.length) send(format(snapshot.entries[replayIndex++]!));
+        while (!closed && !blocked && queued.length) { const frame = queued.shift()!; queuedBytes -= Buffer.byteLength(frame); send(frame); }
+      };
+      const heartbeat = setInterval(() => { if (!blocked && !closed) send(": keepalive\n\n"); }, 20_000);
+      heartbeat.unref();
+      response.on("close", close);
+      response.on("drain", () => { if (timeout) clearTimeout(timeout); timeout = undefined; blocked = false; pump(); });
+      unsubscribe = logs.subscribe((entry) => {
+        const frame = format(entry);
+        if (blocked || replayIndex < snapshot.entries.length || queued.length) {
+          queuedBytes += Buffer.byteLength(frame);
+          if (queuedBytes > 64 * 1024) { disconnect(); return; }
+          queued.push(frame); pump();
+        } else send(frame);
+      });
+      if (snapshot.gap) send(`event: gap\ndata: ${JSON.stringify({ oldest: snapshot.oldest, latest: snapshot.latest })}\n\n`);
+      if (!blocked) send(": connected\n\n");
+      pump();
       return;
     }
 
@@ -202,7 +264,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         if (response.destroyed) return;
         if (error instanceof ModelError) sendJson(response, error.status, { error: error.diagnostic });
         else {
-          console.error("[Stardust] 模型服务内部错误，无法安全提供详细信息。");
+          logs.write("ERROR", "server", "模型服务内部错误，无法安全提供详细信息。");
           sendJson(response, 500, { error: { source: "stardust", category: "MODEL_SERVICE_FAILED", code: "MODEL_SERVICE_FAILED" } });
         }
       }
@@ -247,11 +309,13 @@ export function createStardustServer(options: AppOptions = {}): Server {
       });
       response.end(request.method === "HEAD" ? undefined : file);
     } catch (error) {
-      console.error("[Stardust] Failed to serve static file:", staticFile.filename, error);
+      logs.write("ERROR", "server", "静态资源读取失败。");
       sendJson(response, 500, { error: "STATIC_FILE_UNAVAILABLE" });
     }
   });
-  server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => {}); } catch {} });
+  server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
   server.on("close", () => { void extensions.shutdown(); });
+  const closeServer = server.close.bind(server);
+  server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;
 }

@@ -14,6 +14,7 @@ import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { createQQBotExtension } from "../apps/server/dist/extensions/qq-bot.js";
 import { SetupService } from "../apps/server/dist/setup.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
+import { LogService } from "../apps/server/dist/logger.js";
 
 function mockBot() {
   const handlers = new Map();
@@ -23,7 +24,7 @@ function mockBot() {
     on(name, handler) { handlers.set(name, handler); return this; },
     start() { handlers.get("ready")?.(); return new Promise((resolve) => { finish = resolve; }); },
     stop() { this.stopped = true; finish?.(); },
-    async sendText(target, text) { if (this.failSend) throw new Error("secret-and-message"); this.sent.push({ target, text }); return { id: `sent-${this.sent.length}` }; },
+    async sendText(target, text) { if (this.failSend) throw Object.assign(new Error("secret-and-message"), { bizCode: 11281, httpStatus: 429 }); this.sent.push({ target, text }); return { id: `sent-${this.sent.length}` }; },
     emit(name, value) { return handlers.get(name)?.({}, value); },
   };
 }
@@ -33,9 +34,10 @@ async function fixture(t) {
   const bots = [];
   const model = { fail: false, calls: [], async chat(content, signal) { this.calls.push(content); if (this.fail) throw new Error("secret-and-message"); if (signal.aborted) throw new Error("aborted"); return `reply:${content}`; } };
   const extension = createQQBotExtension(async () => { const bot = mockBot(); bots.push(bot); return bot; });
-  const manager = new ExtensionManager(root, model, [extension]);
+  const logs = new LogService(100, () => {});
+  const manager = new ExtensionManager(root, model, [extension], logs);
   t.after(async () => { manager.shutdown(); await rm(root, { recursive: true, force: true }); });
-  return { root, model, manager, extension, bots };
+  return { root, model, manager, extension, bots, logs };
 }
 async function waitFor(predicate) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
@@ -74,7 +76,7 @@ test("installation, isolated credentials, restore, disable and uninstall", async
 });
 
 test("QQ events reach the model once and reply to the original conversation", async (t) => {
-  const { manager, model, bots } = await fixture(t);
+  const { manager, model, bots, logs } = await fixture(t);
   await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "secret" }); await manager.enable("qq-bot");
   await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
   const bot = bots[0];
@@ -91,6 +93,11 @@ test("QQ events reach the model once and reply to the original conversation", as
   assert.equal(manager.list()[0].state, "connected"); assert.match(manager.list()[0].error, /模型/); assert.doesNotMatch(JSON.stringify(manager.list()), /secret-and-message|hello/);
   model.fail = false; bot.failSend = true; await bot.emit("message", message("c2c", "four"));
   assert.equal(manager.list()[0].state, "connected"); assert.match(manager.list()[0].error, /发送/); assert.equal(bot.sent.length, 2);
+  const records = logs.read().entries;
+  assert.ok(records.some((entry) => entry.message.includes("消息已接受")));
+  assert.ok(records.some((entry) => entry.details?.reason === "unsupported_or_not_mentioned"));
+  assert.ok(records.some((entry) => entry.message.includes("回复发送失败") && entry.details?.code === "11281" && entry.details?.status === 429));
+  assert.doesNotMatch(JSON.stringify(records), /secret-and-message|hello|conversation|sender/);
   await manager.disable("qq-bot"); await bot.emit("message", message("c2c", "five")); assert.equal(model.calls.length, 4);
 });
 

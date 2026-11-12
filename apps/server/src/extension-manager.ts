@@ -5,6 +5,7 @@ import { parseEnv } from "node:util";
 import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import type { ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus } from "./channel.js";
+import { logger, type LogService } from "./logger.js";
 
 type Installed = Record<string, { enabled: boolean }>;
 type Runtime = { state: ExtensionStatus; error?: string; instance?: ChannelInstance; controller?: AbortController };
@@ -17,7 +18,7 @@ export class ExtensionManager {
   private readonly runtimes = new Map<string, Runtime>();
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
-  constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = []) {
+  constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
     this.packages = new Map(packages.map((item) => [item.manifest.id, item]));
     for (const id of this.packages.keys()) this.validateId(id);
@@ -111,8 +112,11 @@ export class ExtensionManager {
     this.queue = next.catch(() => undefined);
     return next;
   }
-  install(id: string): Promise<void> { return this.exclusive(() => { this.item(id); const state = this.readInstalled(); if (state[id]) throw new ExtensionError("ALREADY_INSTALLED", 409); state[id] = { enabled: false }; this.writeInstalled(state); }); }
-  saveConfig(id: string, input: unknown): Promise<void> { return this.exclusive(async () => {
+  private operation<T>(id: string, operation: string, action: () => T | Promise<T>): Promise<T> {
+    return this.exclusive(action).then((result) => { this.logs.write("INFO", "extensions", `扩展${operation}成功。`, { code: this.packages.has(id) ? id : undefined }); return result; }, (error: unknown) => { this.logs.write("ERROR", "extensions", `扩展${operation}失败。`, { code: error instanceof ExtensionError ? error.code : "EXTENSION_FAILED" }); throw error; });
+  }
+  install(id: string): Promise<void> { return this.operation(id, "安装", () => { this.item(id); const state = this.readInstalled(); if (state[id]) throw new ExtensionError("ALREADY_INSTALLED", 409); state[id] = { enabled: false }; this.writeInstalled(state); }); }
+  saveConfig(id: string, input: unknown): Promise<void> { return this.operation(id, "配置保存", async () => {
     const item = this.item(id); const state = this.readInstalled(); if (!state[id]) throw new ExtensionError("NOT_INSTALLED", 404);
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new ExtensionError("INVALID_INPUT");
     const fields = input as Record<string, unknown>;
@@ -130,14 +134,14 @@ export class ExtensionManager {
     catch (error) { if (error instanceof ExtensionError) throw error; throw new ExtensionError("SAVE_FAILED", 500); }
     if (state[id]!.enabled) { await this.stop(id); if (!this.closed) this.launch(item); }
   }); }
-  enable(id: string): Promise<void> { return this.exclusive(() => {
+  enable(id: string): Promise<void> { return this.operation(id, "启用", () => {
     const item = this.item(id); const state = this.readInstalled(); if (!state[id]) throw new ExtensionError("NOT_INSTALLED", 404);
     const values = this.values(id); if (item.manifest.fields.some((field) => field.required && !values[field.env])) throw new ExtensionError("NOT_CONFIGURED");
     if (!state[id]!.enabled) { state[id]!.enabled = true; this.writeInstalled(state); }
     if (!this.runtimes.get(id)?.instance) this.launch(item);
   }); }
-  disable(id: string): Promise<void> { return this.exclusive(async () => { this.item(id); const state = this.readInstalled(); if (!state[id]) throw new ExtensionError("NOT_INSTALLED", 404); state[id]!.enabled = false; this.writeInstalled(state); await this.stop(id); }); }
-  uninstall(id: string, deleteConfig: boolean): Promise<void> { return this.exclusive(async () => {
+  disable(id: string): Promise<void> { return this.operation(id, "停用", async () => { this.item(id); const state = this.readInstalled(); if (!state[id]) throw new ExtensionError("NOT_INSTALLED", 404); state[id]!.enabled = false; this.writeInstalled(state); await this.stop(id); }); }
+  uninstall(id: string, deleteConfig: boolean): Promise<void> { return this.operation(id, "卸载", async () => {
     this.item(id); const state = this.readInstalled(); if (!state[id]) throw new ExtensionError("NOT_INSTALLED", 404);
     if (deleteConfig) {
       try { const env = this.directory(this.root, "env", false); const dir = env && this.directory(env, id, false); if (dir) { const path = join(dir, ".env"); this.safeFile(path); try { fs.unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } try { fs.rmdirSync(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error; } } }
@@ -148,9 +152,10 @@ export class ExtensionManager {
   restore(): Promise<void> { return this.exclusive(() => { const state = this.readInstalled(); for (const item of this.packages.values()) if (state[item.manifest.id]?.enabled && !this.runtimes.get(item.manifest.id)?.instance) this.launch(item); }); }
   private launch(item: ExtensionPackage): void {
     const id = item.manifest.id;
+    this.logs.write("INFO", "extensions", "扩展启动中。", { code: id });
     let values: Record<string, string>;
-    try { values = this.values(id); } catch { this.runtimes.set(id, { state: "error", error: "无法读取扩展配置。" }); return; }
-    if (item.manifest.fields.some((field) => field.required && !values[field.env])) { this.runtimes.set(id, { state: "error", error: "扩展配置不完整。" }); return; }
+    try { values = this.values(id); } catch { this.logs.write("ERROR", "extensions", "扩展配置读取失败。", { code: id }); this.runtimes.set(id, { state: "error", error: "无法读取扩展配置。" }); return; }
+    if (item.manifest.fields.some((field) => field.required && !values[field.env])) { this.logs.write("WARN", "extensions", "扩展配置不完整，未启动。", { code: id }); this.runtimes.set(id, { state: "error", error: "扩展配置不完整。" }); return; }
     const config = Object.fromEntries(item.manifest.fields.map((field) => [field.key, values[field.env] ?? ""]));
     const controller = new AbortController();
     const runtime: Runtime = { state: "connecting", controller };
@@ -158,11 +163,12 @@ export class ExtensionManager {
     try {
       runtime.instance = item.create(config, {
         status: (state, error) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) { runtime.state = state; if (error) runtime.error = "扩展连接失败，请检查配置、网络和平台权限。"; } },
+        log: (level, message, details) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) this.logs.write(level, id, message, details, item.manifest.fields.filter((field) => field.sensitive).map((field) => config[field.key] ?? "")); },
         reportError: (code) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) runtime.error = code === "MODEL_FAILED" ? runtime.error ?? "模型请求失败，请检查模型配置和服务状态。" : "渠道发送失败，请检查平台权限和连接状态。"; },
         message: async (message: ChannelMessage, signal: AbortSignal) => {
           if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
           runtime.error = undefined;
-          try { return await this.model.chat(message.content, AbortSignal.any([controller.signal, signal])); }
+          try { return await this.model.chat(message.content, AbortSignal.any([controller.signal, signal]), { eventId: message.eventId }); }
           catch (error) {
             if (!controller.signal.aborted && !signal.aborted) {
               const categories: Record<string, string> = { NOT_CONFIGURED: "模型未配置。", AUTH_FAILED: "模型认证失败。", MODEL_NOT_FOUND: "模型不存在。", RATE_LIMITED: "模型请求受到限流。", TIMEOUT: "模型请求超时。" };
@@ -173,7 +179,7 @@ export class ExtensionManager {
         },
       });
       runtime.instance.start();
-    } catch { controller.abort(); runtime.instance = undefined; runtime.state = "error"; runtime.error = "扩展启动失败，请检查配置。"; }
+    } catch { this.logs.write("ERROR", "extensions", "扩展启动异常。", { code: id }); controller.abort(); runtime.instance = undefined; runtime.state = "error"; runtime.error = "扩展启动失败，请检查配置。"; }
   }
   private async stop(id: string): Promise<void> { const runtime = this.runtimes.get(id); if (!runtime) return; runtime.controller?.abort(); let pending: void | Promise<void> = undefined; try { pending = runtime.instance?.stop(); } catch {} this.runtimes.set(id, { state: "disconnected" }); try { await pending; } catch {} }
   async shutdown(): Promise<void> { this.closed = true; await Promise.all([...this.runtimes.keys()].map((id) => this.stop(id))); }

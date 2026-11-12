@@ -44,6 +44,12 @@
             <div id="chat-messages" class="chat-messages" data-transition-order="2" aria-live="polite"></div>
             <form id="chat-form"><label data-transition-order="3" for="chat-input">消息</label><textarea data-transition-order="4" id="chat-input" rows="4" maxlength="16000" required></textarea><button data-transition-order="5" class="setup-primary" type="submit" id="chat-send">发送</button><p data-transition-order="6" id="chat-status" class="model-feedback" role="status" aria-live="polite"></p></form>
           </section>
+          <section class="nav-page content-section" data-page="/model/logs" hidden>
+            <div data-transition-order="2" class="log-panel">
+              <div class="log-toolbar"><span id="log-connection" role="status">日志服务未连接</span><div class="log-actions"><button id="log-pause" type="button" class="setup-secondary">暂停更新</button><button id="log-copy" type="button" class="setup-secondary">复制日志</button><button id="log-clear" type="button" class="setup-secondary">清空显示</button></div></div>
+              <div id="log-list" class="log-list" tabindex="0" aria-label="运行日志"></div>
+            </div>
+          </section>
 
           <section class="nav-page content-section model-settings" data-page="/model/service/config" hidden>
             <form id="model-form">

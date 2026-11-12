@@ -33,7 +33,7 @@ type MenuGroup = { label: string; id: string; children: MenuPage[] };
 type MenuCategory = { label: string; items: (MenuPage | MenuGroup)[] };
 const menu: MenuCategory[] = [
   { label: "概览", items: [{ label: "运行概况", path: "/overview/status" }] },
-  { label: "模型", items: [{ label: "对话", path: "/model/chat" }, { label: "模型服务", id: "model-service", children: [{ label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }] },
+  { label: "模型", items: [{ label: "对话", path: "/model/chat" }, { label: "模型服务", id: "model-service", children: [{ label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
   { label: "扩展", items: [{ label: "已安装扩展", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
 ];
@@ -454,6 +454,7 @@ function setWebTitle(title: string): void {
 function goToOverview(): void {
   history.replaceState(null, "", "#/overview/status");
   renderNavigation("programmatic");
+  syncLogPage();
 }
 menuToggle.addEventListener("click", () => {
   const open = sidebar.classList.toggle("is-open");
@@ -948,3 +949,105 @@ function showExtensions(): void {
   extensionsLoaded = true; void refreshExtensions();
   setInterval(() => { if (!document.hidden) void refreshExtensions(); }, 5000);
 }
+
+type BrowserLog = { id: number; timestamp: string; level: string; source: string; message: string; details?: Record<string, unknown> };
+type LogHistory = { entries: BrowserLog[]; oldest: number; latest: number; gap: boolean; instanceId: string };
+const logList = getElement<HTMLElement>("log-list");
+const logConnection = getElement<HTMLElement>("log-connection");
+const logPause = getElement<HTMLButtonElement>("log-pause");
+const logCopy = getElement<HTMLButtonElement>("log-copy");
+const logClear = getElement<HTMLButtonElement>("log-clear");
+const maxVisibleLogs = 500;
+let displayedLogs: BrowserLog[] = [];
+let pendingLogs: BrowserLog[] = [];
+let logCursor = 0;
+let logInstance = "";
+let logStream: EventSource | undefined;
+let logGeneration = 0;
+let logActive = false;
+let logPaused = false;
+let logFollow = true;
+let logGap = false;
+let logFrame = 0;
+function logLine(entry: BrowserLog): string {
+  return `${new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false })} ${entry.level} [${entry.source}] ${entry.message}`;
+}
+function renderQueuedLogs(): void {
+  logFrame = 0;
+  if (logPaused || !pendingLogs.length) return;
+  const batch = pendingLogs; pendingLogs = [];
+  const fragment = document.createDocumentFragment();
+  for (const entry of batch) {
+    const row = document.createElement("div"); row.className = "log-entry"; row.dataset.level = entry.level;
+    const line = document.createElement("div"); line.textContent = logLine(entry); row.append(line);
+    if (entry.level === "ERROR" && entry.details && Object.keys(entry.details).length) {
+      const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "诊断详情";
+      const pre = document.createElement("pre"); pre.textContent = JSON.stringify(entry.details, null, 2); details.append(summary, pre); row.append(details);
+    }
+    fragment.append(row); displayedLogs.push(entry);
+  }
+  logList.append(fragment);
+  while (displayedLogs.length > maxVisibleLogs) { displayedLogs.shift(); logList.firstElementChild?.remove(); }
+  if (logFollow) logList.scrollTop = logList.scrollHeight;
+}
+function acceptLog(entry: BrowserLog): void {
+  if (!Number.isSafeInteger(entry.id) || entry.id <= logCursor) return;
+  logCursor = entry.id;
+  pendingLogs.push(entry);
+  if (pendingLogs.length > maxVisibleLogs) { pendingLogs.shift(); logGap = true; logConnection.textContent = "显示缓冲已满，部分较早日志已被丢弃"; }
+  if (!logPaused && !logFrame) logFrame = requestAnimationFrame(renderQueuedLogs);
+}
+async function startLogStream(): Promise<void> {
+  const generation = ++logGeneration;
+  logConnection.textContent = "正在连接日志服务…";
+  try {
+    const response = await fetch(`/api/v1/logs?after=${logCursor}&limit=${logCursor ? 1000 : 200}`, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error();
+    const history = await response.json() as LogHistory;
+    if (!logActive || generation !== logGeneration) return;
+    if (!Array.isArray(history.entries) || typeof history.instanceId !== "string") throw new Error();
+    if ((logInstance && logInstance !== history.instanceId) || logCursor > history.latest) {
+      logCursor = 0; displayedLogs = []; pendingLogs = []; logList.replaceChildren();
+      logInstance = history.instanceId; void startLogStream(); return;
+    }
+    logInstance = history.instanceId;
+    if (history.gap) logGap = true;
+    for (const entry of history.entries) acceptLog(entry);
+    logCursor = Math.max(logCursor, history.latest);
+    const stream = new EventSource(`/api/v1/logs/stream?after=${logCursor}&instance=${encodeURIComponent(logInstance)}`);
+    logStream = stream;
+    stream.onopen = () => { if (generation === logGeneration) logConnection.textContent = logGap ? "日志服务已连接；部分较早日志已被淘汰" : "日志服务已连接"; };
+    stream.onmessage = (event) => { try { acceptLog(JSON.parse(event.data) as BrowserLog); } catch { logConnection.textContent = "收到无法识别的日志"; } };
+    stream.addEventListener("gap", () => { logGap = true; logConnection.textContent = "部分较早日志已被淘汰"; });
+    stream.addEventListener("reset", () => {
+      if (generation !== logGeneration) return;
+      stream.close(); logStream = undefined; logCursor = 0; logInstance = ""; displayedLogs = []; pendingLogs = []; logList.replaceChildren();
+      void startLogStream();
+    });
+    stream.onerror = () => { if (generation === logGeneration) logConnection.textContent = "日志连接中断，正在重连…"; };
+  } catch {
+    if (logActive && generation === logGeneration) {
+      logConnection.textContent = "无法连接日志服务，正在重试…";
+      window.setTimeout(() => { if (logActive && generation === logGeneration) void startLogStream(); }, 3000);
+    }
+  }
+}
+function syncLogPage(): void {
+  const active = location.hash.slice(1) === "/model/logs";
+  if (active === logActive) return;
+  logActive = active;
+  if (active) void startLogStream();
+  else { logGeneration++; logStream?.close(); logStream = undefined; logConnection.textContent = "日志服务未连接"; }
+}
+logList.addEventListener("scroll", () => { logFollow = logList.scrollHeight - logList.clientHeight - logList.scrollTop < 20; });
+logPause.addEventListener("click", () => { logPaused = !logPaused; logPause.textContent = logPaused ? "恢复更新" : "暂停更新"; if (!logPaused && !logFrame) logFrame = requestAnimationFrame(renderQueuedLogs); });
+logClear.addEventListener("click", () => { displayedLogs = []; pendingLogs = []; logList.replaceChildren(); logFollow = true; });
+logCopy.addEventListener("click", () => {
+  const text = displayedLogs.map((entry) => `${logLine(entry)}${entry.level === "ERROR" && entry.details ? `\n${JSON.stringify(entry.details, null, 2)}` : ""}`).join("\n");
+  if (!navigator.clipboard) { logConnection.textContent = "无法复制日志"; return; }
+  void navigator.clipboard.writeText(text).then(() => { logConnection.textContent = "日志已复制"; }).catch(() => { logConnection.textContent = "无法复制日志"; });
+});
+window.addEventListener("hashchange", syncLogPage);
+window.addEventListener("pagehide", () => { logGeneration++; logStream?.close(); logStream = undefined; logActive = false; });
+window.addEventListener("pageshow", syncLogPage);
+syncLogPage();

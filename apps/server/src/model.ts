@@ -2,6 +2,8 @@ import { createConfigStore, ConfigValidationError, type StardustConfig } from ".
 import { createSecretStore } from "./model-secret.js";
 import { networkDiagnostic, safeTarget, upstreamDiagnostic, type ModelDiagnostic } from "./model-diagnostics.js";
 import { collectModelStream } from "./model-stream.js";
+import { randomUUID } from "node:crypto";
+import { logger, type LogService } from "./logger.js";
 
 export class ModelError extends Error {
   readonly diagnostic: ModelDiagnostic;
@@ -19,6 +21,7 @@ export class ModelService {
     private readonly store: ReturnType<typeof createConfigStore> = createConfigStore(),
     private readonly secrets: ReturnType<typeof createSecretStore> = createSecretStore(),
     private readonly request: typeof fetch = fetch,
+    private readonly logs: LogService = logger,
   ) {}
 
   getConfig() {
@@ -53,13 +56,29 @@ export class ModelService {
       this.store.saveConfig({ ...current, model });
       if (data.keyAction !== "keep") this.secrets.saveKey(data.keyAction === "set" ? newKey : "");
     } catch {
-      console.warn("[Stardust] 模型配置保存失败；部分修改可能已写入。");
+      this.logs.write("ERROR", "model", "模型配置保存失败；部分修改可能已写入。");
       throw new ModelError("SAVE_FAILED", 500, { source: "stardust", category: "SAVE_FAILED", code: "SAVE_FAILED", message: "保存失败，部分修改可能已写入，请重新加载后检查。" });
     }
     return this.getConfig();
   }
 
-  async chat(message: unknown, cancellation?: AbortSignal): Promise<string> {
+  async chat(message: unknown, cancellation?: AbortSignal, context?: { eventId?: string }): Promise<string> {
+    const requestId = randomUUID();
+    const started = Date.now();
+    this.logs.write("DEBUG", "model", "模型请求开始。", { requestId, eventId: context?.eventId });
+    try {
+      const reply = await this.performChat(message, cancellation);
+      this.logs.write("INFO", "model", "模型请求完成。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started });
+      return reply;
+    } catch (error) {
+      let secrets: string[] = typeof message === "string" ? [message] : [];
+      try { const keys = this.secrets.getKey(); secrets = [...secrets, keys.key, keys.fileKey]; } catch {}
+      const diagnostic = error instanceof ModelError ? error.diagnostic : undefined;
+      this.logs.write("ERROR", "model", "模型请求失败。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started, status: diagnostic?.status, code: diagnostic?.code, category: diagnostic?.category, message: diagnostic?.message }, secrets);
+      throw error;
+    }
+  }
+  private async performChat(message: unknown, cancellation?: AbortSignal): Promise<string> {
     if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > maxMessage) throw new ModelError("INVALID_INPUT", 400);
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
     if (!baseUrl || !modelId) throw new ModelError("NOT_CONFIGURED", 400);
@@ -126,7 +145,10 @@ export class ModelService {
       throw new ModelError(diagnostic.category, diagnostic.category === "TIMEOUT" ? 504 : 502, diagnostic);
     }
   }
-  async testConnection(cancellation?: AbortSignal): Promise<void> { await this.chat("Hello", cancellation); }
+  async testConnection(cancellation?: AbortSignal): Promise<void> {
+    try { await this.chat("Hello", cancellation); this.logs.write("INFO", "model", "模型连接测试成功。"); }
+    catch (error) { this.logs.write("WARN", "model", "模型连接测试失败。"); throw error; }
+  }
 }
 
 export const modelService = new ModelService();

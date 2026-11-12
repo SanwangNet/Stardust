@@ -112,7 +112,6 @@ export async function upstreamDiagnostic(response: Response, endpoint: string, s
       if (!/^\s*[<{\[]/.test(raw)) diagnostic.message = safeText(raw, secrets, prompt);
     }
   }
-  if (!diagnostic.message) console.warn(`[Stardust] 上游错误详情不可安全获取 (HTTP ${response.status}, ${category})。`);
   return diagnostic;
 }
 
@@ -135,6 +134,5 @@ export function networkDiagnostic(error: unknown, timedOut: boolean, endpoint: s
   else if (codes.some((code) => ["ECONNRESET", "ECONNABORTED", "EPIPE", "UND_ERR_SOCKET"].includes(code))) category = "CONNECTION_INTERRUPTED";
   else if (codes.some((code) => ["EHOSTUNREACH", "ENETUNREACH"].includes(code))) category = "CONNECTION_FAILED";
   const knownCode = codes.find((code) => ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "ENOTFOUND", "EAI_AGAIN", "EAI_FAIL", "EAI_NONAME", "ENODATA", "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "EPIPE", "UND_ERR_SOCKET", "EHOSTUNREACH", "ENETUNREACH", "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "ERR_TLS_CERT_ALTNAME_INVALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT"].includes(code));
-  console.warn(`[Stardust] 模型连接失败：${category}${knownCode ? ` (${knownCode})` : ""}。`);
   return { source: "stardust", category, code: knownCode, target: safeTarget(endpoint, secrets, prompt) };
 }

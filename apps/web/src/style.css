@@ -219,4 +219,14 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .extension-form input:not([type="checkbox"]) { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 0; background: var(--background); color: var(--text); font: inherit; }
 .extension-form input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .extension-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.log-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+.log-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.log-actions button { min-height: 36px; padding: 0 12px; font-size: 12px; }
+.log-list { height: min(60vh, 560px); min-height: 240px; overflow: auto; margin-top: 18px; padding: 12px; border: 1px solid var(--line); background: var(--surface); font: 12px/1.6 Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+.log-entry { padding: 5px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+.log-entry:last-child { border-bottom: 0; }
+.log-entry[data-level="ERROR"] { color: var(--offline); }
+.log-entry details { margin-top: 4px; }
+.log-entry summary { cursor: pointer; }
+.log-entry pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 @media (max-width: 440px) { .settings-list div { grid-template-columns: 1fr; gap: 8px; } }
