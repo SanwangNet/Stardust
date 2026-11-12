@@ -27,6 +27,128 @@ const setupThemeSelect = getElement<HTMLSelectElement>("setup-theme-select");
 const mainStatus = getElement<HTMLElement>("main-status");
 const statusDescription = getElement<HTMLElement>("status-description");
 
+type MenuPage = { label: string; path: string };
+type MenuGroup = { label: string; id: string; children: MenuPage[] };
+type MenuCategory = { label: string; items: (MenuPage | MenuGroup)[] };
+const menu: MenuCategory[] = [
+  { label: "概览", items: [{ label: "运行概况", path: "/overview/status" }] },
+  { label: "模型", items: [{ label: "对话", path: "/model/chat" }, { label: "模型服务", id: "model-service", children: [{ label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }] },
+  { label: "扩展", items: [{ label: "已安装扩展", path: "/extensions/installed" }] },
+  { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
+];
+const primaryNav = getElement<HTMLElement>("primary-nav");
+const secondaryNav = getElement<HTMLElement>("secondary-nav");
+const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
+const menuToggle = getElement<HTMLButtonElement>("menu-toggle");
+const pageTitle = getElement<HTMLElement>("page-title");
+const breadcrumb = getElement<HTMLElement>("page-breadcrumb");
+const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
+const expanded = new Set<string>();
+const lastVisited = new Map<string, string>();
+let currentTitle = "运行概况";
+let webTitle = "Stardust";
+
+function pages(category: MenuCategory): MenuPage[] {
+  return category.items.flatMap((item) => "children" in item ? item.children : [item]);
+}
+function closeMenu(): void {
+  sidebar.classList.remove("is-open");
+  menuToggle.setAttribute("aria-expanded", "false");
+}
+function createPageLink(page: MenuPage, currentPath: string, className: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.href = `#${page.path}`;
+  link.className = className;
+  link.textContent = page.label;
+  if (page.path === currentPath) link.setAttribute("aria-current", "page");
+  link.addEventListener("click", (event) => {
+    closeMenu();
+    if (location.hash.slice(1) === page.path) { event.preventDefault(); pageTitle.focus(); }
+  });
+  return link;
+}
+function renderSecondary(category: MenuCategory, currentPath: string): void {
+  secondaryNav.replaceChildren();
+  for (const item of category.items) {
+    if (!("children" in item)) {
+      secondaryNav.append(createPageLink(item, currentPath, "secondary-link"));
+      continue;
+    }
+    const group = document.createElement("div");
+    group.className = "nav-group";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = `nav-toggle-${item.id}`;
+    button.className = "nav-group-toggle";
+    button.setAttribute("aria-expanded", String(expanded.has(item.id)));
+    button.setAttribute("aria-controls", `nav-children-${item.id}`);
+    if (item.children.some((page) => page.path === currentPath)) button.classList.add("has-current");
+    const label = document.createElement("span"); label.textContent = item.label;
+    const arrow = document.createElement("span"); arrow.textContent = expanded.has(item.id) ? "−" : "+"; arrow.setAttribute("aria-hidden", "true");
+    button.append(label, arrow);
+    button.addEventListener("click", () => {
+      if (expanded.has(item.id)) expanded.delete(item.id); else expanded.add(item.id);
+      renderSecondary(category, currentPath);
+      document.getElementById(`nav-toggle-${item.id}`)?.focus();
+    });
+    group.append(button);
+    const children = document.createElement("div");
+    children.id = `nav-children-${item.id}`;
+    children.className = "nav-children";
+    children.hidden = !expanded.has(item.id);
+    for (const page of item.children) children.append(createPageLink(page, currentPath, "secondary-link child-link"));
+    group.append(children);
+    secondaryNav.append(group);
+  }
+}
+function renderNavigation(): void {
+  let path = location.hash.slice(1) || "/overview/status";
+  let category = menu.find((item) => pages(item).some((page) => page.path === path));
+  if (!category) {
+    path = "/overview/status";
+    category = menu[0]!;
+    history.replaceState(null, "", `#${path}`);
+  }
+  const page = pages(category).find((item) => item.path === path)!;
+  lastVisited.set(category.label, path);
+  for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
+  currentTitle = page.label;
+  pageTitle.textContent = page.label;
+  breadcrumb.textContent = `STARDUST / ${category.label}`;
+  getElement<HTMLElement>("sidebar-heading").textContent = category.label;
+  getElement<HTMLElement>("menu-toggle-label").textContent = `${category.label} / ${page.label}`;
+  document.title = `${currentTitle} · ${webTitle}`;
+  navPages.forEach((section) => { section.hidden = section.dataset.page !== path; });
+  refreshButton.hidden = path !== "/overview/status";
+  primaryNav.replaceChildren();
+  for (const item of menu) {
+    const link = document.createElement("a");
+    link.href = `#${lastVisited.get(item.label) ?? pages(item)[0]!.path}`;
+    link.textContent = item.label;
+    if (item === category) link.setAttribute("aria-current", "true");
+    link.addEventListener("click", closeMenu);
+    primaryNav.append(link);
+  }
+  renderSecondary(category, path);
+  closeMenu();
+}
+function setWebTitle(title: string): void {
+  webTitle = title;
+  getElement<HTMLElement>("settings-web-title").textContent = title;
+  document.title = `${currentTitle} · ${webTitle}`;
+}
+function goToOverview(): void {
+  history.replaceState(null, "", "#/overview/status");
+  renderNavigation();
+}
+menuToggle.addEventListener("click", () => {
+  const open = sidebar.classList.toggle("is-open");
+  menuToggle.setAttribute("aria-expanded", String(open));
+});
+window.addEventListener("hashchange", () => { renderNavigation(); pageTitle.focus(); });
+getElement<HTMLElement>("settings-access-url").textContent = location.origin;
+renderNavigation();
+
 function formatUptime(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   const hours = Math.floor(seconds / 3600);
@@ -197,8 +319,9 @@ async function refreshSetupState(): Promise<void> {
     setupStateError.hidden = true;
     if (state.initialized) {
       setupFinished = true;
-      if (typeof state.webTitle === "string") document.title = state.webTitle;
+      if (typeof state.webTitle === "string") setWebTitle(state.webTitle);
       if (setupDialog.open) setupDialog.close();
+      if (setupLoaded) goToOverview();
       showModel();
     } else if (!setupLoaded && state.config) {
       setupDescription.value = state.config.service.description;
@@ -247,6 +370,7 @@ setupForm.addEventListener("submit", (event) => {
         await refreshSetupState();
         setupFinished = true;
         if (setupDialog.open) setupDialog.close();
+        goToOverview();
         showModel();
         return;
       }
@@ -255,8 +379,9 @@ setupForm.addEventListener("submit", (event) => {
         throw new Error(response.status === 400 ? data.message || "请检查填写的配置。" : "保存失败，请重试。");
       }
       setupFinished = true;
-      document.title = setupTitle.value;
+      setWebTitle(setupTitle.value);
       setupDialog.close();
+      goToOverview();
       showModel();
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : "保存失败，请重试。");
@@ -272,7 +397,6 @@ void refreshSetupState();
 setInterval(() => { if (!document.hidden) void refreshSetupState(); }, 3000);
 
 type ModelView = { baseUrl: string; modelId: string; timeoutMs: number; stream: boolean; keyConfigured: boolean; keySource: "process" | "file" | "none"; fileKeyConfigured: boolean; processOverride: boolean };
-const modelSection = getElement<HTMLElement>("model-section");
 const modelForm = getElement<HTMLFormElement>("model-form");
 const modelUrl = getElement<HTMLInputElement>("model-url");
 const modelId = getElement<HTMLInputElement>("model-id");
@@ -282,6 +406,7 @@ const modelKey = getElement<HTMLInputElement>("model-key");
 const modelClearKey = getElement<HTMLInputElement>("model-clear-key");
 const modelKeyStatus = getElement<HTMLElement>("model-key-status");
 const modelStatus = getElement<HTMLElement>("model-status");
+const modelTestStatus = getElement<HTMLElement>("model-test-status");
 const modelSave = getElement<HTMLButtonElement>("model-save");
 const modelTest = getElement<HTMLButtonElement>("model-test");
 const chatForm = getElement<HTMLFormElement>("chat-form");
@@ -326,7 +451,6 @@ function renderModelConfig(config: ModelView): void {
   }
 }
 function showModel(): void {
-  modelSection.hidden = false;
   if (modelLoaded) return;
   modelLoaded = true;
   void modelRequest("/api/v1/model/config").then((value) => renderModelConfig(value as ModelView)).catch((error: unknown) => {
@@ -353,9 +477,9 @@ modelForm.addEventListener("submit", (event) => {
 modelTest.addEventListener("click", () => {
   if (modelTest.disabled) return;
   setModelBusy(true);
-  modelStatus.textContent = "正在测试已保存的配置…";
-  void modelRequest("/api/v1/model/test", {}).then(() => { modelStatus.textContent = "连接测试成功。"; })
-    .catch((error: unknown) => { modelStatus.textContent = error instanceof Error ? error.message : "连接测试失败。"; })
+  modelTestStatus.textContent = "正在测试已保存的配置…";
+  void modelRequest("/api/v1/model/test", {}).then(() => { modelTestStatus.textContent = "连接测试成功。"; })
+    .catch((error: unknown) => { modelTestStatus.textContent = error instanceof Error ? error.message : "连接测试失败。"; })
     .finally(() => setModelBusy(false));
 });
 function addMessage(role: string, message: string): void {

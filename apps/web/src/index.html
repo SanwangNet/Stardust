@@ -12,87 +12,64 @@
   <body>
     <div class="app-shell">
       <header class="site-header">
-        <a class="brand" href="/" aria-label="Stardust 首页">
-          <span class="brand-mark" aria-hidden="true">✦</span>
-          <span>STARDUST</span>
-        </a>
+        <a class="brand" href="#/overview/status" aria-label="Stardust 概览"><span class="brand-mark" aria-hidden="true">✦</span><span>STARDUST</span></a>
+        <nav id="primary-nav" class="primary-nav" aria-label="一级分类"></nav>
         <div class="header-controls">
-          <div class="connection" role="status">
-            <span class="status-dot" id="connection-dot" aria-hidden="true"></span>
-            <span id="connection-label">正在检测连接</span>
-          </div>
-          <label class="theme-control" for="theme-select">
-            <span>主题</span>
-            <select id="theme-select" aria-label="主题">
-              <option value="system">跟随系统</option>
-              <option value="light">浅色</option>
-              <option value="dark">深色</option>
-            </select>
-          </label>
+          <div class="connection" role="status"><span class="status-dot" id="connection-dot" aria-hidden="true"></span><span id="connection-label">正在检测连接</span></div>
+          <label class="theme-control" for="theme-select"><span>主题</span><select id="theme-select" aria-label="主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
         </div>
       </header>
 
-      <main class="main">
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow"><span aria-hidden="true"></span> STARDUST / STATUS</p>
-            <h1>服务状态</h1>
-          </div>
-          <button type="button" id="refresh-button" class="refresh-button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 12-1.8L20 12M4 12l1.9 2.8A7 7 0 0 0 18 15"/></svg>
-            <span id="refresh-label">刷新状态</span>
-          </button>
-        </div>
+      <div class="workspace">
+        <aside class="sidebar" aria-label="分类菜单">
+          <button id="menu-toggle" class="menu-toggle" type="button" aria-expanded="false" aria-controls="secondary-nav"><span id="menu-toggle-label">菜单</span><span aria-hidden="true">⌄</span></button>
+          <div id="sidebar-heading" class="sidebar-heading"></div>
+          <nav id="secondary-nav" class="secondary-nav" aria-label="当前分类菜单"></nav>
+        </aside>
 
-        <section class="status-section" aria-labelledby="main-status">
-          <div class="section-label"><span>服务连接</span><span aria-hidden="true">01 / 01</span></div>
-          <div class="status-main">
-            <div class="status-symbol" aria-hidden="true"><span></span></div>
-            <div class="status-copy" role="status" aria-live="polite">
-              <h2 id="main-status">正在检查服务</h2>
-              <p id="status-description">正在请求服务状态</p>
-            </div>
+        <main class="main" id="main-content">
+          <div class="page-heading">
+            <div><p class="eyebrow"><span aria-hidden="true"></span><span id="page-breadcrumb">STARDUST / 概览</span></p><h1 id="page-title" tabindex="-1">运行概况</h1></div>
+            <button type="button" id="refresh-button" class="refresh-button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 12-1.8L20 12M4 12l1.9 2.8A7 7 0 0 0 18 15"/></svg><span id="refresh-label">刷新状态</span></button>
           </div>
-          <dl class="metrics">
-            <div class="metric"><dt>后端版本</dt><dd id="server-version">—</dd></div>
-            <div class="metric"><dt>运行时间</dt><dd id="server-uptime">—</dd></div>
-            <div class="metric"><dt>最近检查</dt><dd id="last-checked">—</dd></div>
-          </dl>
-        </section>
-        <section id="model-section" class="model-section" aria-labelledby="model-heading" hidden>
-          <div class="section-label"><span>模型服务</span></div>
-          <div class="model-grid">
-            <div class="model-settings">
-              <h2 id="model-heading">模型配置</h2>
-              <form id="model-form">
-                <label>API Base URL<input id="model-url" type="url" placeholder="https://example.com/v1" required></label>
-                <label>模型 ID<input id="model-id" required></label>
-                <label>请求超时（毫秒）<input id="model-timeout" type="number" min="1000" max="120000" step="1" required></label>
-                <label class="model-check"><input id="model-stream" type="checkbox"> 流式请求</label>
-                <label>API Key<input id="model-key" type="password" autocomplete="new-password" placeholder="留空以保留已保存的密钥"></label>
-                <p id="model-key-status" class="model-note"></p>
-                <label class="model-check"><input id="model-clear-key" type="checkbox"> 清除文件中保存的 API Key</label>
-                <div class="model-actions"><button class="setup-primary" type="submit" id="model-save">保存配置</button><button class="setup-secondary" type="button" id="model-test">测试连接</button></div>
-                <p id="model-status" class="model-feedback" role="status" aria-live="polite"></p>
-              </form>
-            </div>
-            <div class="model-chat">
-              <h2>对话</h2>
-              <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
-              <form id="chat-form">
-                <label for="chat-input">消息</label>
-                <textarea id="chat-input" rows="3" maxlength="16000" required></textarea>
-                <button class="setup-primary" type="submit" id="chat-send">发送</button>
-                <p id="chat-status" class="model-feedback" role="status" aria-live="polite"></p>
-              </form>
-            </div>
-          </div>
-        </section>
-        <div class="end-mark" aria-hidden="true"><span></span> STARDUST</div>
-        <div id="setup-state-error" class="setup-state-error" role="alert" hidden>
-          无法读取初始化状态。<button type="button" id="setup-retry">重试</button>
-        </div>
-      </main>
+
+          <section id="page-overview" class="status-section nav-page" data-page="/overview/status" aria-labelledby="main-status">
+            <div class="section-label"><span>服务连接</span></div>
+            <div class="status-main"><div class="status-symbol" aria-hidden="true"><span></span></div><div class="status-copy" role="status" aria-live="polite"><h2 id="main-status">正在检查服务</h2><p id="status-description">正在请求服务状态</p></div></div>
+            <dl class="metrics"><div class="metric"><dt>后端版本</dt><dd id="server-version">—</dd></div><div class="metric"><dt>运行时间</dt><dd id="server-uptime">—</dd></div><div class="metric"><dt>最近检查</dt><dd id="last-checked">—</dd></div></dl>
+          </section>
+
+          <section class="nav-page content-section model-chat" data-page="/model/chat" hidden>
+            <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+            <form id="chat-form"><label for="chat-input">消息</label><textarea id="chat-input" rows="4" maxlength="16000" required></textarea><button class="setup-primary" type="submit" id="chat-send">发送</button><p id="chat-status" class="model-feedback" role="status" aria-live="polite"></p></form>
+          </section>
+
+          <section class="nav-page content-section model-settings" data-page="/model/service/config" hidden>
+            <form id="model-form">
+              <label>API Base URL<input id="model-url" type="url" placeholder="https://example.com/v1" required></label>
+              <label>模型 ID<input id="model-id" required></label>
+              <label>请求超时（毫秒）<input id="model-timeout" type="number" min="1000" max="120000" step="1" required></label>
+              <label class="model-check"><input id="model-stream" type="checkbox"> 流式请求</label>
+              <label>API Key<input id="model-key" type="password" autocomplete="new-password" placeholder="留空以保留已保存的密钥"></label>
+              <p id="model-key-status" class="model-note"></p>
+              <label class="model-check"><input id="model-clear-key" type="checkbox"> 清除文件中保存的 API Key</label>
+              <div class="model-actions"><button class="setup-primary" type="submit" id="model-save">保存配置</button></div>
+              <p id="model-status" class="model-feedback" role="status" aria-live="polite"></p>
+            </form>
+          </section>
+
+          <section class="nav-page content-section" data-page="/model/service/test" hidden>
+            <p class="section-copy">测试当前已保存的模型配置。</p>
+            <button class="setup-primary" type="button" id="model-test">测试连接</button>
+            <p id="model-test-status" class="model-feedback" role="status" aria-live="polite"></p>
+          </section>
+          <section class="nav-page content-section" data-page="/extensions/installed" hidden><p class="section-copy">扩展管理尚未开放。</p></section>
+          <section class="nav-page content-section" data-page="/settings/general" hidden><dl class="settings-list"><div><dt>产品名称</dt><dd>Stardust</dd></div><div><dt>WebUI 标题</dt><dd id="settings-web-title">—</dd></div></dl></section>
+          <section class="nav-page content-section" data-page="/settings/server" hidden><dl class="settings-list"><div><dt>当前访问地址</dt><dd id="settings-access-url">—</dd></div></dl></section>
+          <div class="end-mark" aria-hidden="true"><span></span> STARDUST</div>
+          <div id="setup-state-error" class="setup-state-error" role="alert" hidden>无法读取初始化状态。<button type="button" id="setup-retry">重试</button></div>
+        </main>
+      </div>
     </div>
     <dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-heading">
       <form id="setup-form" novalidate>
