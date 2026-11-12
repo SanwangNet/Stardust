@@ -207,10 +207,12 @@ export function createStardustServer(options: AppOptions = {}): Server {
       try {
         if (!setup.getInitializationState().initialized) throw new ExtensionError("SETUP_REQUIRED", 403);
         if (pathname === "/api/v1/extensions" && request.method === "GET") { sendJson(response, 200, { extensions: extensions.list() }); return; }
+        const targetsMatch = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/capability-targets$/.exec(pathname);
+        if (targetsMatch && request.method === "GET") { sendJson(response, 200, { targets: extensions.capabilityTargets(targetsMatch[1]!) }); return; }
         if (request.method !== "POST") throw new ExtensionError("METHOD_NOT_ALLOWED", 405);
         if (!isSameOrigin(request)) throw new ExtensionError("INVALID_ORIGIN", 403);
         if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
-        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall)$/.exec(pathname);
+        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test)$/.exec(pathname);
         if (!match) throw new ExtensionError("EXTENSION_NOT_FOUND", 404);
         let body: unknown;
         try { body = await readSetupBody(request, 32 * 1024); } catch (error) { throw error instanceof RangeError ? new ExtensionError("BODY_TOO_LARGE", 413) : new ExtensionError("INVALID_INPUT"); }
@@ -223,6 +225,11 @@ export function createStardustServer(options: AppOptions = {}): Server {
           case "enable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.enable(id); break;
           case "disable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.disable(id); break;
           case "uninstall": if (Object.keys(fields).length !== 1 || typeof fields.deleteConfig !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.uninstall(id, fields.deleteConfig); break;
+          case "capability-test": {
+            if (Object.keys(fields).length !== 3 || typeof fields.targetId !== "string" || typeof fields.kind !== "string" || typeof fields.requestId !== "string") throw new ExtensionError("INVALID_INPUT");
+            const result = await extensions.runCapabilityTest(id, { targetId: fields.targetId, kind: fields.kind, requestId: fields.requestId });
+            sendJson(response, 200, { result }); return;
+          }
         }
         sendJson(response, 200, { ok: true });
       } catch (error) {

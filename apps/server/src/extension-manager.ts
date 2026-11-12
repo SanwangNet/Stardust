@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { parseEnv } from "node:util";
 import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
-import type { ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus } from "./channel.js";
+import type { CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
 
 type Installed = Record<string, { enabled: boolean }>;
@@ -106,6 +106,19 @@ export class ExtensionManager {
       const runtime = this.runtimes.get(manifest.id);
       return { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description, type: manifest.type, installed: Boolean(entry), enabled: entry?.enabled ?? false, state: runtime?.state ?? "disconnected", ...(runtime?.error ? { error: runtime.error } : {}), fields };
     });
+  }
+  capabilityTargets(id: string) {
+    this.item(id);
+    if (!this.readInstalled()[id]) throw new ExtensionError("NOT_INSTALLED", 404);
+    return this.runtimes.get(id)?.instance?.getCapabilityTargets?.() ?? [];
+  }
+  runCapabilityTest(id: string, input: CapabilityTestInput) {
+    this.item(id);
+    const state = this.readInstalled()[id];
+    if (!state) throw new ExtensionError("NOT_INSTALLED", 404);
+    const runtime = this.runtimes.get(id);
+    if (!state.enabled || runtime?.state !== "connected" || !runtime.instance?.runCapabilityTest) throw new ExtensionError("EXTENSION_NOT_CONNECTED", 409);
+    return runtime.instance.runCapabilityTest(input);
   }
   private exclusive<T>(action: () => T | Promise<T>): Promise<T> {
     const next = this.queue.then(() => { if (this.closed) throw new ExtensionError("SHUTTING_DOWN", 503); return action(); });

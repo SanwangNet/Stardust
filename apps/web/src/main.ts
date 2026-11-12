@@ -862,13 +862,105 @@ async function extensionRequest(path: string, body?: unknown): Promise<unknown> 
   catch { throw new Error("无法连接 Stardust 服务端。"); }
   const data = await response.json() as { error?: string };
   if (!response.ok) {
-    const messages: Record<string, string> = { NOT_CONFIGURED: "请先保存必填配置。", INVALID_INPUT: "配置无效，请检查输入。", SAVE_FAILED: "保存失败，请重试。", DELETE_CONFIG_FAILED: "删除配置失败，请重试。", NOT_INSTALLED: "扩展尚未安装。", ALREADY_INSTALLED: "扩展已安装。" };
+    const messages: Record<string, string> = { NOT_CONFIGURED: "请先保存必填配置。", INVALID_INPUT: "输入无效，请检查。", SAVE_FAILED: "保存失败，请重试。", DELETE_CONFIG_FAILED: "删除配置失败，请重试。", NOT_INSTALLED: "扩展尚未安装。", ALREADY_INSTALLED: "扩展已安装。", EXTENSION_NOT_CONNECTED: "请先启用并连接 QQ 扩展。", INVALID_TARGET: "目标无效或已过期，请刷新测试目标。", TEST_IN_PROGRESS: "另一项测试正在进行。", TEST_LIMIT_REACHED: "本次运行的测试记录已达上限。" };
     throw new Error(messages[data.error ?? ""] ?? `操作失败（HTTP ${response.status}）。`);
   }
   return data;
 }
 function extensionButton(label: string): HTMLButtonElement {
   const button = document.createElement("button"); button.type = "button"; button.className = "setup-secondary"; button.textContent = label; return button;
+}
+function buildQQCapabilityTests(): HTMLElement {
+  const section = document.createElement("section"); section.className = "capability-tests";
+  const heading = document.createElement("h3"); heading.textContent = "能力测试";
+  const introduction = document.createElement("p"); introduction.textContent = "腾讯公开文档标注主动推送已停止、普通文件暂未开放；手动测试可能被平台拒绝。每次确认后最多发送一次，媒体测试会先上传再发送，不自动重试。";
+  const sources = document.createElement("p");
+  const link = (label: string, href: string) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = label; return a; };
+  sources.append(link("发送消息文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md"), document.createTextNode(" · "), link("富媒体文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md"));
+  const targetsHeading = document.createElement("h4"); targetsHeading.textContent = "最近接收的测试目标";
+  const note = document.createElement("p"); note.textContent = "仅显示本次运行中实际接收并接受的消息。被动回复通常为私聊 60 分钟、群聊 5 分钟，每条消息最多回复 5 次，实际以 QQ 平台为准。";
+  type Target = { id: string; scope: "private" | "group"; receivedAt: string; replyExpiresAt: string | null };
+  type Result = { state: "success" | "rejected" | "network_failure" | "unavailable"; interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string; serverAccepted: boolean; clientReceived: "unconfirmed" };
+  let entries: Target[] = []; let busy = false;
+  const selectLabel = document.createElement("label"); selectLabel.className = "capability-select"; selectLabel.textContent = "测试目标";
+  const select = document.createElement("select"); selectLabel.append(select);
+  const targetStatus = document.createElement("p"); targetStatus.setAttribute("role", "status");
+  const refresh = extensionButton("刷新测试目标");
+  const list = document.createElement("div"); list.className = "capability-test-list";
+  const tests: { kind: string; scope: Target["scope"]; media: boolean; button: HTMLButtonElement; result: HTMLElement }[] = [];
+  function selectedTarget(): Target | undefined { return entries.find((entry) => entry.id === select.value); }
+  function updateTargets(): void {
+    const selected = selectedTarget();
+    if (!entries.length) targetStatus.textContent = "请先向机器人发送一条私聊消息，或在群聊中 @机器人，然后刷新测试目标。";
+    else if (selected) {
+      const remaining = selected.replyExpiresAt ? Math.max(0, Math.ceil((Date.parse(selected.replyExpiresAt) - Date.now()) / 1000)) : 0;
+      targetStatus.textContent = selected.replyExpiresAt ? `被动回复剩余 ${Math.floor(remaining / 60)} 分 ${remaining % 60} 秒；实际以平台为准。` : "无法确认被动回复有效期。";
+    }
+    for (const test of tests) test.button.disabled = busy || !selected || selected.scope !== test.scope || (test.media && (!selected.replyExpiresAt || Date.parse(selected.replyExpiresAt) <= Date.now()));
+  }
+  select.addEventListener("change", updateTargets);
+  function refreshTargets(): void {
+    refresh.disabled = true; targetStatus.textContent = "正在读取…";
+    void extensionRequest("/api/v1/extensions/qq-bot/capability-targets").then((value) => {
+      const current = select.value; entries = (value as { targets: Target[] }).targets.slice().reverse();
+      select.replaceChildren();
+      for (const [index, target] of entries.entries()) {
+        const option = document.createElement("option"); option.value = target.id;
+        option.textContent = `${target.scope === "private" ? "私聊" : "群聊"} · ${new Date(target.receivedAt).toLocaleTimeString()} · 消息 ${index + 1}`;
+        select.append(option);
+      }
+      if (entries.some((target) => target.id === current)) select.value = current;
+      updateTargets();
+    }).catch((error: unknown) => { targetStatus.textContent = error instanceof Error ? error.message : "无法读取测试目标。"; }).finally(() => { refresh.disabled = false; });
+  }
+  refresh.addEventListener("click", refreshTargets);
+  for (const [kind, title, scope, media, warning] of [
+    ["private-text", "私聊主动文本", "private", false, "主动推送已停止提供，可能被平台拒绝。"],
+    ["group-text", "群聊主动文本", "group", false, "主动推送已停止提供，可能被平台拒绝。"],
+    ["private-file", "私聊被动普通文件", "private", true, "普通文件在公开文档中标记为暂未开放。"],
+    ["group-file", "群聊被动普通文件", "group", true, "普通文件在公开文档中标记为暂未开放。"],
+    ["private-png", "私聊被动 PNG 图片", "private", true, "实际能力取决于机器人权限和平台返回。"],
+    ["group-png", "群聊被动 PNG 图片", "group", true, "实际能力取决于机器人权限和平台返回。"],
+  ] as const) {
+    const row = document.createElement("div"); row.className = "capability-test";
+    const name = document.createElement("strong"); name.textContent = title;
+    const details = document.createElement("p"); details.textContent = warning;
+    const result = document.createElement("p"); result.setAttribute("role", "status"); result.textContent = "未测试";
+    const button = extensionButton("执行测试"); button.setAttribute("aria-label", `执行${title}`);
+    const dialog = document.createElement("dialog"); dialog.className = "setup-dialog capability-confirm"; dialog.setAttribute("aria-label", `确认${title}`);
+    const confirmation = document.createElement("p");
+    const confirmActions = document.createElement("div"); confirmActions.className = "extension-actions";
+    const cancel = extensionButton("取消"); const confirm = extensionButton("确认发送");
+    confirmActions.append(cancel, confirm); dialog.append(confirmation, confirmActions);
+    let pendingTarget: Target | undefined;
+    cancel.addEventListener("click", () => dialog.close());
+    tests.push({ kind, scope, media, button, result });
+    button.addEventListener("click", () => {
+      const target = selectedTarget(); if (!target || busy || button.disabled) return;
+      const targetLabel = select.selectedOptions[0]?.textContent ?? title;
+      pendingTarget = target;
+      confirmation.textContent = `确认向${targetLabel}执行“${title}”？这会向 QQ 平台提交真实请求。${warning}`;
+      dialog.showModal(); cancel.focus();
+    });
+    confirm.addEventListener("click", () => {
+      const target = pendingTarget; pendingTarget = undefined; dialog.close();
+      if (!target || busy) return;
+      busy = true; updateTargets(); result.textContent = "测试中…";
+      void extensionRequest("/api/v1/extensions/qq-bot/capability-test", { targetId: target.id, kind, requestId: crypto.randomUUID() }).then((data) => {
+        const value = (data as { result: Result }).result;
+        const states: Record<Result["state"], string> = { success: "请求成功", rejected: "平台拒绝", network_failure: "网络失败", unavailable: "不可执行" };
+        result.textContent = `${states[value.state]} · 接口：${value.interface} · 请求时间：${new Date(value.requestedAt).toLocaleString()} · 阶段：${value.stage} · HTTP：${value.httpStatus ?? "无响应"} · QQ 业务码：${value.businessCode ?? "无"} · 信息：${value.message ?? "无"} · 发送接口成功响应：${value.serverAccepted ? "是" : "否或未确认"} · 客户端接收：未确认`;
+      }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "请求失败";
+        result.textContent = message === "无法连接 Stardust 服务端。" ? `网络失败：${message}发送结果未知，请先检查 QQ 客户端。` : `不可执行：${message}`;
+      }).finally(() => { busy = false; updateTargets(); });
+    });
+    row.append(name, details, result, button, dialog); list.append(row);
+  }
+  section.append(heading, introduction, sources, targetsHeading, note, selectLabel, refresh, targetStatus, list);
+  updateTargets(); queueMicrotask(refreshTargets);
+  const timer = setInterval(() => { if (!section.isConnected) clearInterval(timer); else updateTargets(); }, 1000);
+  return section;
 }
 async function extensionAction(id: string, action: string, body: unknown): Promise<boolean> {
   if (extensionsBusy) return false;
@@ -926,7 +1018,9 @@ function buildExtensionCards(items: ExtensionView[]): void {
     enable.addEventListener("click", () => { void extensionAction(item.id, "enable", {}); });
     disable.addEventListener("click", () => { void extensionAction(item.id, "disable", {}); });
     uninstall.addEventListener("click", () => { void extensionAction(item.id, "uninstall", { deleteConfig: deleteConfig.checked }); });
-    node.append(status, error, form); extensionList.append(node); extensionCards.set(item.id, { node, status, error, fields, enable, disable });
+    node.append(status, error, form);
+    if (item.id === "qq-bot") node.append(buildQQCapabilityTests());
+    extensionList.append(node); extensionCards.set(item.id, { node, status, error, fields, enable, disable });
   }
 }
 async function refreshExtensions(): Promise<void> {
@@ -972,6 +1066,9 @@ let logFrame = 0;
 function logLine(entry: BrowserLog): string {
   return `${new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false })} ${entry.level} [${entry.source}] ${entry.message}`;
 }
+function hasVisibleLogDetails(entry: BrowserLog): boolean {
+  return Boolean(entry.details && Object.keys(entry.details).length && (entry.level === "ERROR" || (entry.source === "qq-bot" && typeof entry.details.rawEventType === "string")));
+}
 function renderQueuedLogs(): void {
   logFrame = 0;
   if (logPaused || !pendingLogs.length) return;
@@ -980,7 +1077,7 @@ function renderQueuedLogs(): void {
   for (const entry of batch) {
     const row = document.createElement("div"); row.className = "log-entry"; row.dataset.level = entry.level;
     const line = document.createElement("div"); line.textContent = logLine(entry); row.append(line);
-    if (entry.level === "ERROR" && entry.details && Object.keys(entry.details).length) {
+    if (hasVisibleLogDetails(entry)) {
       const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "诊断详情";
       const pre = document.createElement("pre"); pre.textContent = JSON.stringify(entry.details, null, 2); details.append(summary, pre); row.append(details);
     }
@@ -1043,7 +1140,7 @@ logList.addEventListener("scroll", () => { logFollow = logList.scrollHeight - lo
 logPause.addEventListener("click", () => { logPaused = !logPaused; logPause.textContent = logPaused ? "恢复更新" : "暂停更新"; if (!logPaused && !logFrame) logFrame = requestAnimationFrame(renderQueuedLogs); });
 logClear.addEventListener("click", () => { displayedLogs = []; pendingLogs = []; logList.replaceChildren(); logFollow = true; });
 logCopy.addEventListener("click", () => {
-  const text = displayedLogs.map((entry) => `${logLine(entry)}${entry.level === "ERROR" && entry.details ? `\n${JSON.stringify(entry.details, null, 2)}` : ""}`).join("\n");
+  const text = displayedLogs.map((entry) => `${logLine(entry)}${hasVisibleLogDetails(entry) ? `\n${JSON.stringify(entry.details, null, 2)}` : ""}`).join("\n");
   if (!navigator.clipboard) { logConnection.textContent = "无法复制日志"; return; }
   void navigator.clipboard.writeText(text).then(() => { logConnection.textContent = "日志已复制"; }).catch(() => { logConnection.textContent = "无法复制日志"; });
 });

@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { randomUUID } from "node:crypto";
 import { createConfigStore } from "../apps/server/dist/config.js";
 import { createSecretStore } from "../apps/server/dist/model-secret.js";
 import { ModelService } from "../apps/server/dist/model.js";
@@ -15,12 +16,14 @@ import { createQQBotExtension } from "../apps/server/dist/extensions/qq-bot.js";
 import { SetupService } from "../apps/server/dist/setup.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
 import { LogService } from "../apps/server/dist/logger.js";
+import { dispatchEvent } from "@tencent-connect/qqbot-nodejs/protocol";
 
 function mockBot() {
   const handlers = new Map();
   let finish;
   return {
     sent: [], stopped: false, failSend: false,
+    tokenManager: { async getAccessToken() { return "private-token"; } },
     on(name, handler) { handlers.set(name, handler); return this; },
     start() { handlers.get("ready")?.(); return new Promise((resolve) => { finish = resolve; }); },
     stop() { this.stopped = true; finish?.(); },
@@ -28,12 +31,12 @@ function mockBot() {
     emit(name, value) { return handlers.get(name)?.({}, value); },
   };
 }
-const message = (kind, id, extra = {}) => ({ kind, rawEventType: kind === "c2c" ? "C2C_MESSAGE_CREATE" : "GROUP_AT_MESSAGE_CREATE", senderId: "sender", messageId: id, timestamp: new Date().toISOString(), content: "hello", replyTarget: { scope: kind, targetId: "conversation", msgId: id }, ...extra });
-async function fixture(t) {
+const message = (kind, id, extra = {}) => ({ kind, rawEventType: kind === "c2c" ? "C2C_MESSAGE_CREATE" : "GROUP_AT_MESSAGE_CREATE", senderId: "sender", messageId: id, timestamp: new Date().toISOString(), content: "hello", ...(kind === "group" ? { groupOpenid: "conversation" } : {}), replyTarget: { scope: kind, targetId: "conversation", msgId: id }, ...extra });
+async function fixture(t, diagnosticFetch) {
   const root = await mkdtemp(join(tmpdir(), "stardust-extensions-"));
   const bots = [];
   const model = { fail: false, calls: [], async chat(content, signal) { this.calls.push(content); if (this.fail) throw new Error("secret-and-message"); if (signal.aborted) throw new Error("aborted"); return `reply:${content}`; } };
-  const extension = createQQBotExtension(async () => { const bot = mockBot(); bots.push(bot); return bot; });
+  const extension = createQQBotExtension(async () => { const bot = mockBot(); bots.push(bot); return bot; }, diagnosticFetch);
   const logs = new LogService(100, () => {});
   const manager = new ExtensionManager(root, model, [extension], logs);
   t.after(async () => { manager.shutdown(); await rm(root, { recursive: true, force: true }); });
@@ -95,10 +98,65 @@ test("QQ events reach the model once and reply to the original conversation", as
   assert.equal(manager.list()[0].state, "connected"); assert.match(manager.list()[0].error, /发送/); assert.equal(bot.sent.length, 2);
   const records = logs.read().entries;
   assert.ok(records.some((entry) => entry.message.includes("消息已接受")));
-  assert.ok(records.some((entry) => entry.details?.reason === "unsupported_or_not_mentioned"));
+  assert.ok(records.some((entry) => entry.details?.reason === "group_no_self_mention"));
   assert.ok(records.some((entry) => entry.message.includes("回复发送失败") && entry.details?.code === "11281" && entry.details?.status === 429));
-  assert.doesNotMatch(JSON.stringify(records), /secret-and-message|hello|conversation|sender/);
+  assert.doesNotMatch(JSON.stringify(records), /secret-and-message|hello|conversation|"sender"/);
   await manager.disable("qq-bot"); await bot.emit("message", message("c2c", "five")); assert.equal(model.calls.length, 4);
+});
+
+test("SDK group events require an authoritative or explicit self-mention and log only safe diagnostics", async (t) => {
+  const { manager, model, bots, logs } = await fixture(t);
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "sensitive-secret-value" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
+  const bot = bots[0];
+  const sdkMessage = (eventType, id, content, mentions) => {
+    const raw = { id, content, timestamp: new Date().toISOString(), author: { member_openid: "private-user-openid" }, group_openid: "private-group-openid", message_type: 103, ...(mentions === undefined ? {} : { mentions }) };
+    const dispatched = dispatchEvent(eventType, raw, "test");
+    assert.equal(dispatched.action, "message");
+    return { ...dispatched.msg, replyTarget: { scope: "group", targetId: dispatched.msg.groupOpenid, msgId: dispatched.msg.messageId } };
+  };
+  await bot.emit("message", sdkMessage("GROUP_AT_MESSAGE_CREATE", "one", "private-content-one"));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "two", "private-content-two", [{ is_you: true, member_openid: "private-mentioned-openid" }]));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "three", "<@!123> private-content-three"));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "six", "<@123> private-content-six", []));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "four", "private-content-four"));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "five", "<@!999> private-content-five", [{ is_you: false, bot: true }]));
+  await bot.emit("message", sdkMessage("GROUP_MESSAGE_CREATE", "seven", "private-content-seven", []));
+  await bot.emit("message", sdkMessage("GROUP_AT_MESSAGE_CREATE", "one", "private-content-one"));
+  assert.equal(model.calls.length, 4);
+  assert.deepEqual(bot.sent.map((item) => item.target.msgId), ["one", "two", "three", "six"]);
+  const entries = logs.read().entries;
+  const received = entries.filter((entry) => entry.message === "收到 QQ 消息事件。");
+  assert.deepEqual(received.map((entry) => entry.details.mentionBranch), ["official_at_event", "mentions_is_you", "content_appid_marker", "content_appid_marker", "no_self_mention", "no_self_mention", "no_self_mention", "official_at_event"]);
+  assert.equal(received[0].details.rawEventType, "GROUP_AT_MESSAGE_CREATE");
+  assert.equal(received[1].details.rawEventType, "GROUP_MESSAGE_CREATE");
+  assert.equal(received[1].details.kind, "group"); assert.equal(received[1].details.msgType, 103);
+  assert.equal(received[0].details.mentionsPresent, false); assert.equal(received[0].details.mentionCount, 0);
+  assert.equal(received[1].details.mentionsPresent, true); assert.equal(received[1].details.mentionCount, 1);
+  assert.equal(received[3].details.mentionsPresent, true); assert.equal(received[3].details.mentionCount, 0);
+  assert.equal(received[1].details.hasGroupOpenid, true);
+  assert.equal(entries.filter((entry) => entry.details?.reason === "group_no_self_mention").length, 3);
+  assert.ok(entries.some((entry) => entry.details?.reason === "duplicate"));
+  assert.doesNotMatch(JSON.stringify(entries), /private-user-openid|private-group-openid|private-mentioned-openid|private-content|sensitive-secret-value/);
+});
+
+test("malformed group events have precise, privacy-safe filtering diagnostics", async (t) => {
+  const { manager, bots, logs } = await fixture(t);
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
+  const bot = bots[0];
+  await bot.emit("message", message("group", "one", { groupOpenid: "" }));
+  await bot.emit("message", message("group", "two", { groupOpenid: "elsewhere" }));
+  await bot.emit("message", message("group", "three", { rawEventType: "AT_MESSAGE_CREATE" }));
+  await bot.emit("message", message("c2c", "four", { rawEventType: "GROUP_MESSAGE_CREATE" }));
+  await bot.emit("message", message("group", "five", { rawEventType: "GROUP_MESSAGE_CREATE", mentions: { is_you: true } }));
+  const rejected = logs.read().entries.filter((entry) => entry.message === "QQ 消息已过滤。");
+  assert.deepEqual(rejected.map((entry) => entry.details.reason), ["missing_group_openid", "group_reply_target_mismatch", "group_unsupported_event_type", "private_unexpected_event_type", "group_no_self_mention"]);
+  assert.equal(rejected[0].details.hasGroupOpenid, false);
+  assert.equal(rejected[0].details.msgType, null);
+  assert.equal(rejected[4].details.mentionsPresent, true); assert.equal(rejected[4].details.mentionCount, 0);
+  assert.equal(bot.sent.length, 0);
+  assert.doesNotMatch(JSON.stringify(rejected), /elsewhere|conversation|sender|secret/);
 });
 
 test("mock QQ and a mock model HTTP server complete the channel-to-model reply path", async (t) => {
@@ -202,4 +260,143 @@ test("extension HTTP management is initialization-gated, origin-checked and does
   await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
   server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
   assert.equal(bots[0].stopped, true);
+});
+
+test("capability targets contain only accepted real events and never expose identifiers or messages", async (t) => {
+  const { manager, model, bots, logs } = await fixture(t);
+  assert.throws(() => manager.capabilityTargets("qq-bot"), { code: "NOT_INSTALLED" });
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "private-secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
+  model.fail = true;
+  const old = new Date(Date.now() - 10 * 60_000).toISOString();
+  await bots[0].emit("message", message("c2c", "private-message-id", { timestamp: old, content: "private-message-content" }));
+  await bots[0].emit("message", message("c2c", "private-message-id", { timestamp: old, content: "private-message-content" }));
+  await bots[0].emit("message", message("group", "filtered-id", { rawEventType: "GROUP_MESSAGE_CREATE" }));
+  await bots[0].emit("message", message("group", "group-message-id", { timestamp: old }));
+  const targets = manager.capabilityTargets("qq-bot");
+  assert.equal(targets.length, 2);
+  assert.deepEqual(targets.map((entry) => entry.scope), ["private", "group"]);
+  assert.ok(Date.parse(targets[0].replyExpiresAt) > Date.now());
+  assert.ok(Date.parse(targets[1].replyExpiresAt) < Date.now());
+  assert.doesNotMatch(JSON.stringify(targets), /private-message|group-message|conversation|sender|private-secret/);
+  assert.equal(bots[0].sent.length, 0);
+  assert.doesNotMatch(JSON.stringify(logs.read()), /private-message-content|conversation|private-secret/);
+  await manager.disable("qq-bot");
+  assert.deepEqual(manager.capabilityTargets("qq-bot"), []);
+});
+
+test("capability target API is initialization gated and has no send operation", async (t) => {
+  const { root, manager, model, bots } = await fixture(t);
+  const setup = new SetupService(createConfigStore(root));
+  const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/extensions/qq-bot/capability-targets`;
+  assert.equal((await fetch(url)).status, 403);
+  await setup.completeInitialization({});
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
+  model.fail = true;
+  await bots[0].emit("message", message("c2c", "sensitive-msgid"));
+  const response = await fetch(url); assert.equal(response.status, 200);
+  const text = await response.text(); assert.doesNotMatch(text, /sensitive-msgid|conversation|sender|secret|hello/);
+  assert.equal(JSON.parse(text).targets.length, 1);
+  assert.notEqual((await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status, 200);
+  assert.equal(bots[0].sent.length, 0);
+});
+
+test("manual QQ tests address only received targets, use passive msg_id, and never retry", async (t) => {
+  const calls = [];
+  const mockFetch = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    return Response.json(url.endsWith("/files") ? { file_info: "uploaded-file-info" } : { id: `outgoing-${calls.length}` }, { status: 200 });
+  };
+  const { manager, model, bots, logs } = await fixture(t, mockFetch);
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "private-secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected");
+  model.fail = true;
+  await bots[0].emit("message", message("c2c", "private-msg-id", { replyTarget: { scope: "c2c", targetId: "private-openid", msgId: "private-msg-id" } }));
+  await bots[0].emit("message", message("group", "group-msg-id", { groupOpenid: "group-openid", replyTarget: { scope: "group", targetId: "group-openid", msgId: "group-msg-id" } }));
+  const targets = manager.capabilityTargets("qq-bot");
+  const privateTarget = targets.find((entry) => entry.scope === "private");
+  const groupTarget = targets.find((entry) => entry.scope === "group");
+  assert.doesNotMatch(JSON.stringify(targets), /private-openid|group-openid|private-msg-id|group-msg-id|private-secret/);
+  assert.throws(() => manager.runCapabilityTest("qq-bot", { targetId: privateTarget.id, kind: "group-text", requestId: randomUUID() }), { code: "INVALID_TARGET" });
+  assert.throws(() => manager.runCapabilityTest("qq-bot", { targetId: randomUUID(), kind: "private-text", requestId: randomUUID() }), { code: "INVALID_TARGET" });
+  const requestId = randomUUID();
+  const input = { targetId: privateTarget.id, kind: "private-text", requestId };
+  const [result, duplicate] = await Promise.all([manager.runCapabilityTest("qq-bot", input), manager.runCapabilityTest("qq-bot", input)]);
+  assert.deepEqual(result, duplicate); assert.equal(calls.length, 1);
+  assert.equal(result.state, "success"); assert.equal(result.httpStatus, 200); assert.equal(result.serverAccepted, true); assert.equal(result.clientReceived, "unconfirmed");
+  assert.equal(calls[0].url, "https://api.sgroup.qq.com/v2/users/private-openid/messages");
+  assert.equal(calls[0].body.msg_type, 0); assert.ok(!("msg_id" in calls[0].body));
+  assert.throws(() => manager.runCapabilityTest("qq-bot", { ...input, kind: "private-file" }), { code: "INVALID_INPUT" });
+  await manager.runCapabilityTest("qq-bot", { targetId: groupTarget.id, kind: "group-text", requestId: randomUUID() });
+  assert.match(calls[1].url, /groups\/group-openid\/messages$/); assert.ok(!("msg_id" in calls[1].body));
+  for (const [kind, target, msgId, fileType] of [
+    ["private-file", privateTarget, "private-msg-id", 4], ["group-file", groupTarget, "group-msg-id", 4],
+    ["private-png", privateTarget, "private-msg-id", 1], ["group-png", groupTarget, "group-msg-id", 1],
+  ]) {
+    const before = calls.length;
+    const output = await manager.runCapabilityTest("qq-bot", { targetId: target.id, kind, requestId: randomUUID() });
+    assert.equal(output.state, "success"); assert.equal(calls.length, before + 2);
+    const upload = calls[before].body, send = calls[before + 1].body;
+    assert.equal(upload.file_type, fileType); assert.equal(upload.srv_send_msg, false);
+    if (fileType === 4) { assert.equal(upload.file_name, "hello-stardust.txt"); assert.equal(Buffer.from(upload.file_data, "base64").toString(), "Hello, Stardust!\n"); }
+    else assert.deepEqual([...Buffer.from(upload.file_data, "base64").subarray(0, 8)], [137,80,78,71,13,10,26,10]);
+    assert.equal(send.msg_type, 7); assert.equal(send.msg_id, msgId); assert.ok(Number.isInteger(send.msg_seq));
+    assert.equal(calls[before + 1].init.redirect, "error");
+  }
+  assert.doesNotMatch(JSON.stringify(logs.read()), /private-openid|group-openid|private-msg-id|group-msg-id|private-secret|private-token|Hello, Stardust/);
+  await manager.disable("qq-bot");
+  assert.throws(() => manager.runCapabilityTest("qq-bot", input), { code: "EXTENSION_NOT_CONNECTED" });
+});
+
+test("manual QQ platform rejections, network failures and expiration do not retry or leak secrets", async (t) => {
+  let calls = 0; let mode = "reject";
+  const mockFetch = async () => {
+    calls++;
+    if (mode === "network") throw new Error("private-token private-secret");
+    return Response.json({ code: 12345, message: "Denied private-secret Authorization: QQBot private-token openid=private-openid" }, { status: 403 });
+  };
+  const { manager, model, bots, logs } = await fixture(t, mockFetch);
+  await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "private-secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected"); model.fail = true;
+  await bots[0].emit("message", message("c2c", "sensitive-msg", { replyTarget: { scope: "c2c", targetId: "private-openid", msgId: "sensitive-msg" } }));
+  await bots[0].emit("message", message("group", "expired-msg", { timestamp: new Date(Date.now() - 360000).toISOString() }));
+  const targets = manager.capabilityTargets("qq-bot");
+  const target = targets.find((item) => item.scope === "private");
+  const rejected = await manager.runCapabilityTest("qq-bot", { targetId: target.id, kind: "private-file", requestId: randomUUID() });
+  assert.equal(calls, 1); assert.equal(rejected.stage, "upload"); assert.equal(rejected.state, "rejected"); assert.equal(rejected.httpStatus, 403); assert.equal(rejected.businessCode, "12345");
+  assert.doesNotMatch(JSON.stringify(rejected), /private-secret|private-token|private-openid|sensitive-msg/);
+  mode = "network";
+  const network = await manager.runCapabilityTest("qq-bot", { targetId: target.id, kind: "private-text", requestId: randomUUID() });
+  assert.equal(calls, 2); assert.equal(network.state, "network_failure"); assert.doesNotMatch(JSON.stringify(network), /private-secret|private-token/);
+  const expired = await manager.runCapabilityTest("qq-bot", { targetId: targets.find((item) => item.scope === "group").id, kind: "group-png", requestId: randomUUID() });
+  assert.equal(expired.state, "unavailable"); assert.equal(calls, 2);
+  assert.doesNotMatch(JSON.stringify(logs.read()), /private-secret|private-token|private-openid|sensitive-msg/);
+});
+
+test("capability HTTP execution enforces origin, validated inputs, enabled state and request idempotency", async (t) => {
+  let calls = 0;
+  const { root, manager, model, bots } = await fixture(t, async () => { calls++; return Response.json({ id: "sent-by-platform" }, { status: 201 }); });
+  const setup = new SetupService(createConfigStore(root));
+  const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
+  const base = `http://127.0.0.1:${server.address().port}/api/v1/extensions/qq-bot`;
+  const post = (body, headers = {}) => fetch(`${base}/capability-test`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+  assert.equal((await post({})).status, 403);
+  await setup.completeInitialization({}); await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "secret" }); await manager.enable("qq-bot");
+  await waitFor(() => bots.length === 1 && manager.list()[0].state === "connected"); model.fail = true;
+  await bots[0].emit("message", message("c2c", "message-private"));
+  const target = (await (await fetch(`${base}/capability-targets`)).json()).targets[0];
+  const body = { targetId: target.id, kind: "private-text", requestId: randomUUID() };
+  assert.equal((await post(body, { Origin: "https://attacker.example" })).status, 403); assert.equal(calls, 0);
+  assert.equal((await post({ ...body, extra: "field" })).status, 400); assert.equal(calls, 0);
+  const first = await post(body); assert.equal(first.status, 200);
+  const result = (await first.json()).result; assert.equal(result.httpStatus, 201); assert.equal(result.state, "success");
+  assert.equal((await post(body)).status, 200); assert.equal(calls, 1);
+  const invalid = await post({ ...body, targetId: randomUUID(), requestId: randomUUID() }); assert.equal(invalid.status, 400); assert.equal(calls, 1);
+  await manager.disable("qq-bot"); assert.equal((await post({ ...body, requestId: randomUUID() })).status, 409); assert.equal(calls, 1);
 });

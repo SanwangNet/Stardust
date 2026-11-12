@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
-export type LogDetails = { status?: number; code?: string; category?: string; message?: string; requestId?: string; eventId?: string; durationMs?: number; reason?: string; scope?: string };
+export type LogDetails = { status?: number; code?: string; category?: string; message?: string; requestId?: string; eventId?: string; durationMs?: number; reason?: string; scope?: string; rawEventType?: string; kind?: string; msgType?: number | null; mentionsPresent?: boolean; mentionCount?: number; hasGroupOpenid?: boolean; mentionBranch?: string };
 export interface LogEntry { id: number; timestamp: string; level: LogLevel; source: string; message: string; details?: LogDetails }
 type Sink = (entry: LogEntry) => void;
 
@@ -32,8 +32,10 @@ export class LogService {
   write(level: LogLevel, source: string, message: string, details?: LogDetails, secrets: string[] = []): void {
     try {
       const safeDetails: LogDetails = {};
-      for (const key of ["status", "durationMs"] as const) if (typeof details?.[key] === "number" && Number.isFinite(details[key])) safeDetails[key] = details[key];
-      for (const key of ["code", "category", "message", "requestId", "eventId", "reason", "scope"] as const) {
+      for (const key of ["status", "durationMs", "msgType", "mentionCount"] as const) if (typeof details?.[key] === "number" && Number.isFinite(details[key])) safeDetails[key] = details[key];
+      if (details?.msgType === null) safeDetails.msgType = null;
+      for (const key of ["mentionsPresent", "hasGroupOpenid"] as const) if (typeof details?.[key] === "boolean") safeDetails[key] = details[key];
+      for (const key of ["code", "category", "message", "requestId", "eventId", "reason", "scope", "rawEventType", "kind", "mentionBranch"] as const) {
         const value = details?.[key];
         if (typeof value !== "string") continue;
         const sanitized = clean(value, key === "message" ? 512 : 128, secrets);
