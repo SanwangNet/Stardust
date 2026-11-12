@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, writeFile, rm, cp, symlink } from "node:fs/promises";
+import { access, mkdtemp, mkdir, writeFile, rm, cp, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,6 +17,29 @@ before(async () => {
   loader = createEnvLoader(root);
 });
 after(async () => { await rm(root, { recursive: true, force: true }); });
+
+async function assertMissing(path) {
+  await assert.rejects(access(path), { code: "ENOENT" });
+}
+
+test("缺失扩展配置的读取不会创建目录或文件", async () => {
+  const project = join(root, "read-only-project");
+  const envRoot = join(project, "env");
+  const extensionRoot = join(envRoot, "test-extension");
+  await mkdir(project);
+  const readOnlyLoader = createEnvLoader(project);
+
+  assert.deepEqual(readOnlyLoader.loadExtensionEnv("test-extension"), { configured: false });
+  await assertMissing(envRoot);
+
+  await mkdir(envRoot);
+  assert.deepEqual(readOnlyLoader.loadExtensionEnv("test-extension"), { configured: false });
+  await assertMissing(extensionRoot);
+
+  await mkdir(extensionRoot);
+  assert.deepEqual(readOnlyLoader.loadExtensionEnv("test-extension"), { configured: false });
+  await assertMissing(join(extensionRoot, ".env"));
+});
 
 test("Core 配置从明确的根目录读取，默认值与进程变量优先级正确", async () => {
   assert.equal(resolve(projectConfigRoot), resolve(fileURLToPath(new URL("..", import.meta.url))));
@@ -69,6 +92,7 @@ test("从其他工作目录启动时使用项目根 .env，缺失扩展配置不
   await writeFile(join(project, "package.json"), '{"type":"module"}');
   await writeFile(join(project, ".env"), `STARDUST_HOST=127.0.0.1\nSTARDUST_PORT=${port}\nCORE_SECRET=do-not-log-this-secret\n`);
   assert.deepEqual(createEnvLoader(project).loadExtensionEnv("missing"), { configured: false });
+  await assertMissing(join(project, "env"));
   const env = { ...process.env };
   delete env.STARDUST_HOST;
   delete env.STARDUST_PORT;
@@ -86,6 +110,7 @@ test("从其他工作目录启动时使用项目根 .env，缺失扩展配置不
     assert.equal(response.status, 200);
     assert.doesNotMatch(await response.text(), /do-not-log-this-secret/);
     assert.doesNotMatch(output, /do-not-log-this-secret/);
+    await assertMissing(join(project, "env"));
   } finally {
     child.kill();
     if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
