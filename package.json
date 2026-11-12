@@ -1,0 +1,21 @@
+{
+  "name": "stardust",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Stardust — minimal TypeScript server and web client",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p apps/server/tsconfig.json && tsc -p apps/web/tsconfig.json && node scripts/copy-static.mjs",
+    "dev": "npm run build && node apps/server/dist/main.js",
+    "start": "node apps/server/dist/main.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check": "tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "~5.8.3"
+  }
+}

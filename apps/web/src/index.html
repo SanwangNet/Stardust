@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Stardust 服务状态" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+    <title>Stardust · 服务状态</title>
+    <script type="module" src="/main.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="Stardust 首页">
+          <span class="brand-mark" aria-hidden="true">✦</span>
+          <span>STARDUST</span>
+        </a>
+        <div class="header-controls">
+          <div class="connection" role="status">
+            <span class="status-dot" id="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">正在检测连接</span>
+          </div>
+          <label class="theme-control" for="theme-select">
+            <span>主题</span>
+            <select id="theme-select" aria-label="主题">
+              <option value="system">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+        </div>
+      </header>
+
+      <main class="main">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow"><span aria-hidden="true"></span> STARDUST / STATUS</p>
+            <h1>服务状态</h1>
+          </div>
+          <button type="button" id="refresh-button" class="refresh-button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 12-1.8L20 12M4 12l1.9 2.8A7 7 0 0 0 18 15"/></svg>
+            <span id="refresh-label">刷新状态</span>
+          </button>
+        </div>
+
+        <section class="status-section" aria-labelledby="main-status">
+          <div class="section-label"><span>服务连接</span><span aria-hidden="true">01 / 01</span></div>
+          <div class="status-main">
+            <div class="status-symbol" aria-hidden="true"><span></span></div>
+            <div class="status-copy" role="status" aria-live="polite">
+              <h2 id="main-status">正在检查服务</h2>
+              <p id="status-description">正在请求服务状态</p>
+            </div>
+          </div>
+          <dl class="metrics">
+            <div class="metric"><dt>后端版本</dt><dd id="server-version">—</dd></div>
+            <div class="metric"><dt>运行时间</dt><dd id="server-uptime">—</dd></div>
+            <div class="metric"><dt>最近检查</dt><dd id="last-checked">—</dd></div>
+          </dl>
+        </section>
+        <div class="end-mark" aria-hidden="true"><span></span> STARDUST</div>
+      </main>
+    </div>
+  </body>
+</html>
