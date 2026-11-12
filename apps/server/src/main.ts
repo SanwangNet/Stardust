@@ -1,8 +1,8 @@
 import { createStardustServer } from "./app.js";
 import { loadCoreEnv } from "./env.js";
-import { resolveListenConfig } from "./config.js";
+import { loadConfig, resolveConfig } from "./config.js";
 
-const { host, port } = resolveListenConfig(loadCoreEnv());
+const { host, port } = resolveConfig(loadConfig(), loadCoreEnv()).server;
 const server = createStardustServer();
 
 server.on("error", () => {
@@ -32,5 +32,3 @@ function shutdown(signal: string): void {
 
 process.once("SIGINT", () => shutdown("SIGINT"));
 process.once("SIGTERM", () => shutdown("SIGTERM"));
-
-

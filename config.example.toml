@@ -1,0 +1,10 @@
+[service]
+name = "Stardust"
+description = ""
+
+[server]
+host = "127.0.0.1"
+port = 8347
+
+[web]
+title = "Stardust"

@@ -89,6 +89,8 @@ test("从其他工作目录启动时使用项目根 .env，缺失扩展配置不
   const project = join(root, "project");
   await mkdir(join(project, "apps", "server"), { recursive: true });
   await cp(resolve("apps/server/dist"), join(project, "apps", "server", "dist"), { recursive: true });
+  await mkdir(join(project, "node_modules", "@iarna"), { recursive: true });
+  await cp(resolve("node_modules/@iarna/toml"), join(project, "node_modules", "@iarna", "toml"), { recursive: true });
   await writeFile(join(project, "package.json"), '{"type":"module"}');
   await writeFile(join(project, ".env"), `STARDUST_HOST=127.0.0.1\nSTARDUST_PORT=${port}\nCORE_SECRET=do-not-log-this-secret\n`);
   assert.deepEqual(createEnvLoader(project).loadExtensionEnv("missing"), { configured: false });
@@ -116,5 +118,3 @@ test("从其他工作目录启动时使用项目根 .env，缺失扩展配置不
     if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
   }
 });
-
-
