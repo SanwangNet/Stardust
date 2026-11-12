@@ -1,7 +1,6 @@
 initialized = false
 
 [service]
-name = "Stardust"
 description = ""
 
 [server]
@@ -10,3 +9,9 @@ port = 8347
 
 [web]
 title = "Stardust"
+
+[model]
+baseUrl = ""
+modelId = ""
+timeoutMs = 30000
+stream = false

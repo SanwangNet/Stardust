@@ -1,6 +1,6 @@
 # Stardust / 星尘
 
-**第一个可运行的项目骨架。** 独立 TypeScript 后端 + 简单 TypeScript WebUI；不包含 TenBot 旧代码，也不实现初始化向导、模型、Agent、数据库或 QQ。
+**第一个可运行的项目骨架。** 独立 TypeScript 后端 + 简单 TypeScript WebUI；支持单个 OpenAI-compatible 模型，不包含 TenBot 旧代码，也不实现 Agent、数据库或 QQ。
 
 ## 环境要求
 
@@ -15,6 +15,10 @@ npm run dev
 ```
 
 打开 **http://127.0.0.1:8347**，网页会自动请求真实的后端 `GET /api/health`，展示连接状态、版本、运行时间和最近检查时间。
+
+首次启动时，在浏览器打开终端显示的 WebUI 地址并按步骤完成初始化；也可在交互式终端按 Enter 开始向导，直接按 Enter 使用默认值，输入 `:q` 或按 Ctrl+C 取消。两种入口使用同一份配置，先完成的一方生效；初始化后服务继续运行。修改监听地址或端口需要重启，环境变量仍优先于保存的配置。
+
+初始化后可在页面配置 OpenAI-compatible Chat Completions 的 API Base URL（例如服务的 `/v1` 地址）、模型 ID、超时时间和可选 API Key，保存后测试连接并发送单轮消息。每次请求只发送当前消息；页面对话不持久化，连接测试也会发起一次模型请求，可能产生费用。
 
 - `npm run build`：TypeScript 编译并复制前端静态文件
 - `npm start`：运行已构建的后端（需要先构建）
@@ -35,12 +39,15 @@ npm run dev
 
 - 可将根目录 `.env.example` 复制为 `.env` 设置 Core 的监听地址；进程环境变量优先于文件。不要提交真实 `.env`。
 - 普通设置可写入项目根目录的 `config.toml`（可参考 `config.example.toml`）；文件不存在时使用内置默认值，不会自动创建。监听设置优先级为进程环境变量 > 根 `.env` > `config.toml` > 内置默认值。
+- 产品名称固定为 Stardust；旧配置中的 `service.name` 读取时会被忽略，下次保存配置时移除。服务描述和 WebUI 标题仍可配置。
 - 程序内部可使用 `loadConfig()` 读取配置、`resolveConfig()` 合并环境变量，以及 `saveConfig()` 校验并保存配置。保存使用同目录临时文件替换原文件，不保留手写 TOML 注释；`server.host` 和 `server.port` 修改后需重启生效。仅支持已定义的普通配置字段，密钥、Token 等敏感信息应保存在 `.env` 中。
-- 内部 `SetupService` 通过 `getInitializationState()` 和 `completeInitialization(input)` 读取并完成一次性初始化。缺少文件或 `initialized` 字段时视为未初始化；服务启动不会自动初始化。普通设置保存不能更改初始化状态；目前没有 CLI、WebUI 或 HTTP 初始化入口。
+- 模型普通配置保存在 `config.toml` 的 `[model]` 表；API Key 单独保存在根目录 `.env` 的 `STARDUST_MODEL_API_KEY` 中，进程环境变量优先。页面留空密钥会保留文件中已有的值，勾选清除会移除文件中的值；进程变量存在时页面会提示覆盖。保存两份文件并非跨文件事务，若第二步失败，界面会报告部分修改可能已保存，需重新加载核对。
+- 模型地址支持 HTTPS 和仅限本机的 HTTP；不跟随上游重定向。可在模型设置中选择流式上游请求（默认关闭），服务端收齐回复后显示；连接测试使用同一模式。对话不包含历史消息。服务默认仅绑定本机，没有认证，不应开放到不可信网络。
+- `SetupService` 为 CLI、WebUI 和初始化 API 提供同一份状态。缺少文件或 `initialized` 字段时视为未初始化；服务启动不会自动初始化。普通设置保存不能更改初始化状态。
 - 扩展配置位于可选的 `env/<extension-id>/.env`，各扩展独立读取；目录或文件缺失时视为未配置，读取时不会创建它们。扩展 ID 使用小写字母、数字及连接符。
 - 安装扩展时不一定创建配置目录，只有扩展确实需要保存配置时才创建；禁用扩展不删除配置。未来卸载扩展时，将由扩展管理器提供保留或删除配置的选择。
 - 未来扩展将通过 Manifest 声明配置字段，由扩展管理器负责创建和管理配置；这些功能目前尚未实现。
-- 默认仅提供一个真实 API：`GET /api/health`。页面没有伪造 Agent、记忆和模型数据。
+- 提供 `GET /api/health` 以及首次初始化用的状态和提交接口；页面没有伪造 Agent、记忆和模型数据。
 
 ## 目录
 

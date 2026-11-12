@@ -59,8 +59,81 @@
             <div class="metric"><dt>最近检查</dt><dd id="last-checked">—</dd></div>
           </dl>
         </section>
+        <section id="model-section" class="model-section" aria-labelledby="model-heading" hidden>
+          <div class="section-label"><span>模型服务</span></div>
+          <div class="model-grid">
+            <div class="model-settings">
+              <h2 id="model-heading">模型配置</h2>
+              <form id="model-form">
+                <label>API Base URL<input id="model-url" type="url" placeholder="https://example.com/v1" required></label>
+                <label>模型 ID<input id="model-id" required></label>
+                <label>请求超时（毫秒）<input id="model-timeout" type="number" min="1000" max="120000" step="1" required></label>
+                <label class="model-check"><input id="model-stream" type="checkbox"> 流式请求</label>
+                <label>API Key<input id="model-key" type="password" autocomplete="new-password" placeholder="留空以保留已保存的密钥"></label>
+                <p id="model-key-status" class="model-note"></p>
+                <label class="model-check"><input id="model-clear-key" type="checkbox"> 清除文件中保存的 API Key</label>
+                <div class="model-actions"><button class="setup-primary" type="submit" id="model-save">保存配置</button><button class="setup-secondary" type="button" id="model-test">测试连接</button></div>
+                <p id="model-status" class="model-feedback" role="status" aria-live="polite"></p>
+              </form>
+            </div>
+            <div class="model-chat">
+              <h2>对话</h2>
+              <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+              <form id="chat-form">
+                <label for="chat-input">消息</label>
+                <textarea id="chat-input" rows="3" maxlength="16000" required></textarea>
+                <button class="setup-primary" type="submit" id="chat-send">发送</button>
+                <p id="chat-status" class="model-feedback" role="status" aria-live="polite"></p>
+              </form>
+            </div>
+          </div>
+        </section>
         <div class="end-mark" aria-hidden="true"><span></span> STARDUST</div>
+        <div id="setup-state-error" class="setup-state-error" role="alert" hidden>
+          无法读取初始化状态。<button type="button" id="setup-retry">重试</button>
+        </div>
       </main>
     </div>
+    <dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-heading">
+      <form id="setup-form" novalidate>
+        <div class="setup-topline">
+          <span class="setup-kicker">STARDUST / SETUP</span>
+          <label class="theme-control" for="setup-theme-select">主题
+            <select id="setup-theme-select" aria-label="向导主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
+          </label>
+        </div>
+        <div class="setup-step" data-step="0">
+          <h2 id="setup-heading">欢迎您使用星尘！</h2>
+          <p>本设置向导将引导您一步步配置自己的星屑。</p>
+        </div>
+        <div class="setup-step" data-step="1" hidden>
+          <h2>基础设置</h2>
+          <label>服务描述<textarea id="setup-description" name="description" rows="2"></textarea></label>
+          <label>WebUI 标题<input id="setup-title" name="title" required></label>
+        </div>
+        <div class="setup-step" data-step="2" hidden>
+          <h2>服务设置</h2>
+          <label class="setup-check"><input id="setup-defaults" type="checkbox"> 使用默认监听设置</label>
+          <label>监听地址<input id="setup-host" name="host" required></label>
+          <label>端口<input id="setup-port" name="port" type="number" min="1" max="65535" step="1" required></label>
+          <p>修改监听地址或端口后需要重启才能生效。</p>
+        </div>
+        <div class="setup-step" data-step="3" hidden>
+          <h2>确认配置</h2>
+          <dl class="setup-summary">
+            <div><dt>服务描述</dt><dd id="summary-description"></dd></div>
+            <div><dt>WebUI 标题</dt><dd id="summary-title"></dd></div>
+            <div><dt>监听地址</dt><dd id="summary-host"></dd></div>
+            <div><dt>端口</dt><dd id="summary-port"></dd></div>
+          </dl>
+        </div>
+        <p id="setup-error" class="setup-error" role="alert" hidden></p>
+        <div class="setup-actions">
+          <button type="button" id="setup-back" class="setup-secondary" hidden>上一步</button>
+          <button type="button" id="setup-next" class="setup-primary">下一步</button>
+          <button type="submit" id="setup-submit" class="setup-primary" hidden>完成初始化</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

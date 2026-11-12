@@ -1,6 +1,8 @@
 import { createStardustServer } from "./app.js";
 import { loadCoreEnv } from "./env.js";
 import { loadConfig, resolveConfig } from "./config.js";
+import { setupService } from "./setup.js";
+import { runSetupWizard } from "./setup-cli.js";
 
 const { host, port } = resolveConfig(loadConfig(), loadCoreEnv()).server;
 const server = createStardustServer();
@@ -11,9 +13,19 @@ server.on("error", () => {
 });
 
 server.listen(port, host, () => {
-  console.log("\n  Stardust v0.1.0");
-  console.log("  ──────────────────────────────────");
-  console.log("  已启动基础服务（尚无初始化向导、模型及 Agent）\n");
+  console.log("\nStardust\n服务已启动。");
+  const address = server.address();
+  if (address && typeof address !== "string") {
+    const listenHost = address.address.includes(":") ? `[${address.address}]` : address.address;
+    console.log(`WebUI: http://${listenHost}:${address.port}`);
+  }
+  if (!setupService.getInitializationState().initialized) {
+    console.log("请在 WebUI 中完成初始化。");
+    if (process.stdin.isTTY) {
+      console.log("或按下 Enter 在终端中继续。");
+      void runSetupWizard(setupService, process.stdin, process.stdout);
+    }
+  }
 });
 
 let closing = false;

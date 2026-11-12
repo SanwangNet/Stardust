@@ -13,9 +13,10 @@ let root;
 let store;
 const expectedDefaults = {
   initialized: false,
-  service: { name: "Stardust", description: "" },
+  service: { description: "" },
   server: { host: "127.0.0.1", port: 8347 },
   web: { title: "Stardust" },
+  model: { baseUrl: "", modelId: "", timeoutMs: 30000, stream: false },
 };
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "stardust-config-"));
@@ -26,21 +27,34 @@ after(async () => { await rm(root, { recursive: true, force: true }); });
 test("文件缺失时返回默认值而不创建文件，部分字段使用默认值", async () => {
   assert.deepEqual(store.loadConfig(), expectedDefaults);
   await assert.rejects(access(join(root, "config.toml")), { code: "ENOENT" });
-  await writeFile(join(root, "config.toml"), '[service]\nname = "Example"\n[server]\nport = 9001\n');
+  await writeFile(join(root, "config.toml"), '[service]\ndescription = "Example"\n[server]\nport = 9001\n');
   assert.deepEqual(store.loadConfig(), {
-    ...expectedDefaults, service: { name: "Example", description: "" }, server: { host: "127.0.0.1", port: 9001 },
+    ...expectedDefaults, service: { description: "Example" }, server: { host: "127.0.0.1", port: 9001 },
   });
 });
 
 test("TOML 和两层环境变量按优先级合并，不修改 process.env", async () => {
-  await writeFile(join(root, "config.toml"), '[server]\nhost = "localhost"\nport = 9001\n[web]\ntitle = "Test"\n');
+  await writeFile(join(root, "config.toml"), '[server]\nhost = "localhost"\nport = 9001\n[web]\ntitle = "Test"\n[model]\nbaseUrl = "https://example.com/v1"\nmodelId = "old"\n');
   const config = store.loadConfig();
+  assert.equal(config.model.stream, false);
   const previous = process.env.STARDUST_PORT;
   assert.deepEqual(resolveConfig(config, {}, {}).server, { host: "localhost", port: 9001 });
   assert.deepEqual(resolveConfig(config, { STARDUST_HOST: "127.0.0.2", STARDUST_PORT: "9002" }, {}).server, { host: "127.0.0.2", port: 9002 });
   assert.deepEqual(resolveConfig(config, { STARDUST_HOST: "127.0.0.2", STARDUST_PORT: "9002" }, { STARDUST_HOST: "127.0.0.3", STARDUST_PORT: "9003" }).server, { host: "127.0.0.3", port: 9003 });
   assert.equal(resolveConfig(config, {}, {}).web.title, "Test");
   assert.equal(process.env.STARDUST_PORT, previous);
+});
+
+test("旧的 service.name 被忽略并在下一次保存时移除", async () => {
+  const path = join(root, "config.toml");
+  const legacy = 'initialized = true\n[service]\nname = "Old Name"\ndescription = "Keep"\n[server]\nport = 9001\n[web]\ntitle = "Keep Title"\n';
+  await writeFile(path, legacy);
+  const config = store.loadConfig();
+  assert.deepEqual(config, { initialized: true, service: { description: "Keep" }, server: { host: "127.0.0.1", port: 9001 }, web: { title: "Keep Title" }, model: expectedDefaults.model });
+  assert.equal(await readFile(path, "utf8"), legacy);
+  store.saveConfig(config);
+  assert.doesNotMatch(await readFile(path, "utf8"), /\bname\s*=/);
+  assert.deepEqual(store.loadConfig(), config);
 });
 
 test("非法格式、类型、端口和未知字段明确报错且不覆盖原文件", async () => {
@@ -51,7 +65,7 @@ test("非法格式、类型、端口和未知字段明确报错且不覆盖原�
     ['[server]\nport = 65536', /server.port/],
     ['[server]\nport = 3.5', /server.port/],
     ['[server]\nhost = 12', /server.host/],
-    ['[service]\nname = ""', /service.name/],
+    ['[service]\ndescription = 42', /service.description/],
     ['[web]\ntitle = true', /web.title/],
     ['[server]\ntoken = "sensitive"', /未知配置字段/],
     ['[other]\nname = "x"', /未知配置字段/],
@@ -66,15 +80,16 @@ test("非法格式、类型、端口和未知字段明确报错且不覆盖原�
 test("保存并重新读取配置，拒绝未知和敏感字段", async () => {
   await rm(join(root, "config.toml"));
   const value = {
-    service: { name: 'Star "dust"', description: "第一行\n第二行" },
+    service: { description: "第一行\n第二行" },
     server: { host: "localhost", port: 9005 },
     web: { title: "星尘" },
   };
   store.saveConfig(value);
-  assert.deepEqual(store.loadConfig(), { initialized: false, ...value });
+  assert.deepEqual(store.loadConfig(), { initialized: false, ...value, model: expectedDefaults.model });
   const original = await readFile(join(root, "config.toml"), "utf8");
   assert.throws(() => store.saveConfig({ ...value, apiKey: "do-not-store" }), /未知配置字段/);
   assert.throws(() => store.saveConfig({ ...value, service: { ...value.service, secret: "do-not-store" } }), /未知配置字段/);
+  assert.throws(() => store.saveConfig({ ...value, service: { ...value.service, name: "Legacy" } }), /未知配置字段/);
   assert.throws(() => store.saveConfig({ ...value, server: { ...value.server, port: -1 } }), /server.port/);
   assert.equal(await readFile(join(root, "config.toml"), "utf8"), original);
   assert.doesNotMatch(original, /do-not-store/);
@@ -105,16 +120,25 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
     await new Promise((done, fail) => probe.close((error) => error ? fail(error) : done()));
     return port;
   }
-  async function startAndCheck(port, env) {
+  async function startAndCheck(port, env, initialize = false, expectedInitialized = false) {
     const child = spawn(process.execPath, [join(project, "apps", "server", "dist", "main.js")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
     try {
+      let output = "";
       await new Promise((ready, reject) => {
-        let output = "";
         const timer = setTimeout(() => reject(new Error("服务启动超时")), 5000);
-        child.stdout.on("data", (data) => { output += data; if (output.includes("已启动")) { clearTimeout(timer); ready(); } });
+        child.stdout.on("data", (data) => { output += data; if (output.includes(`WebUI: http://127.0.0.1:${port}`)) { clearTimeout(timer); ready(); } });
         child.once("exit", () => { clearTimeout(timer); reject(new Error("服务提前退出")); });
       });
-      assert.equal((await fetch(`http://127.0.0.1:${port}/api/health`)).status, 200);
+      assert.doesNotMatch(output, /按下 Enter/);
+      assert.match(output, /服务已启动/);
+      const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).service, "Stardust");
+      assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/v1/setup/state`)).json()).initialized, expectedInitialized);
+      if (initialize) {
+        const response = await fetch(`http://127.0.0.1:${port}/api/v1/setup/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        assert.equal(response.status, 200);
+      }
     } finally {
       child.kill();
       if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
@@ -127,6 +151,8 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
   await startAndCheck(firstPort, { ...env, STARDUST_PORT: String(firstPort) });
   await assert.rejects(access(join(project, "config.toml")), { code: "ENOENT" });
   const secondPort = await availablePort();
-  await writeFile(join(project, "config.toml"), `[server]\nhost = "127.0.0.1"\nport = ${secondPort}\n`);
-  await startAndCheck(secondPort, env);
+  await writeFile(join(project, "config.toml"), `[service]\nname = "Legacy Product"\ndescription = "Keep"\n[server]\nhost = "127.0.0.1"\nport = ${secondPort}\n`);
+  await startAndCheck(secondPort, env, true);
+  assert.doesNotMatch(await readFile(join(project, "config.toml"), "utf8"), /\bname\s*=/);
+  await startAndCheck(secondPort, env, false, true);
 });

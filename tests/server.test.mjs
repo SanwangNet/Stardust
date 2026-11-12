@@ -41,7 +41,9 @@ test("不支持在健康检查接口上写入", async () => {
 test("WebUI 首页与静态脚本由同一进程提供", async () => {
   const html = await fetch(origin);
   assert.equal(html.status, 200);
-  assert.match(await html.text(), /服务状态/);
+  const page = await html.text();
+  assert.match(page, /服务状态/);
+  assert.doesNotMatch(page, /服务名称|setup-name/);
   const js = await fetch(`${origin}/main.js`);
   assert.equal(js.status, 200);
   assert.match(await js.text(), /api\/health/);
