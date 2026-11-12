@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, type ConfigUpdate } from "./config.js";
 import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
+import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 
 export interface AppOptions {
   version?: string;
@@ -12,6 +13,7 @@ export interface AppOptions {
   startedAt?: Date;
   setupService?: SetupService;
   modelService?: ModelService;
+  extensionManager?: ExtensionManager;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -78,8 +80,9 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const staticDir = options.staticDir ?? defaultStaticDir;
   const setup = options.setupService ?? setupService;
   const model = options.modelService ?? modelService;
+  const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, []);
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     let pathname: string;
     try {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -129,10 +132,40 @@ export function createStardustServer(options: AppOptions = {}): Server {
       }
       try {
         await setup.completeInitialization(input);
+        void extensions.restore().catch(() => {});
         sendJson(response, 200, { initialized: true });
       } catch (error) {
         if (error instanceof AlreadyInitializedError) sendJson(response, 409, { error: "ALREADY_INITIALIZED" });
         else sendJson(response, 500, { error: "SETUP_FAILED" });
+      }
+      return;
+    }
+
+    if (pathname === "/api/v1/extensions" || pathname.startsWith("/api/v1/extensions/")) {
+      try {
+        if (!setup.getInitializationState().initialized) throw new ExtensionError("SETUP_REQUIRED", 403);
+        if (pathname === "/api/v1/extensions" && request.method === "GET") { sendJson(response, 200, { extensions: extensions.list() }); return; }
+        if (request.method !== "POST") throw new ExtensionError("METHOD_NOT_ALLOWED", 405);
+        if (!isSameOrigin(request)) throw new ExtensionError("INVALID_ORIGIN", 403);
+        if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
+        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall)$/.exec(pathname);
+        if (!match) throw new ExtensionError("EXTENSION_NOT_FOUND", 404);
+        let body: unknown;
+        try { body = await readSetupBody(request, 32 * 1024); } catch (error) { throw error instanceof RangeError ? new ExtensionError("BODY_TOO_LARGE", 413) : new ExtensionError("INVALID_INPUT"); }
+        if (!body || typeof body !== "object" || Array.isArray(body)) throw new ExtensionError("INVALID_INPUT");
+        const fields = body as Record<string, unknown>;
+        const id = match[1]!;
+        switch (match[2]) {
+          case "install": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.install(id); break;
+          case "config": await extensions.saveConfig(id, fields); break;
+          case "enable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.enable(id); break;
+          case "disable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.disable(id); break;
+          case "uninstall": if (Object.keys(fields).length !== 1 || typeof fields.deleteConfig !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.uninstall(id, fields.deleteConfig); break;
+        }
+        sendJson(response, 200, { ok: true });
+      } catch (error) {
+        if (error instanceof ExtensionError) sendJson(response, error.status, { error: error.code });
+        else sendJson(response, 500, { error: "EXTENSION_FAILED" });
       }
       return;
     }
@@ -218,4 +251,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
       sendJson(response, 500, { error: "STATIC_FILE_UNAVAILABLE" });
     }
   });
+  server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => {}); } catch {} });
+  server.on("close", () => { void extensions.shutdown(); });
+  return server;
 }

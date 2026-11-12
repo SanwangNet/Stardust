@@ -3,9 +3,12 @@ import { loadCoreEnv } from "./env.js";
 import { loadConfig, resolveConfig } from "./config.js";
 import { setupService } from "./setup.js";
 import { runSetupWizard } from "./setup-cli.js";
+import { ExtensionManager } from "./extension-manager.js";
+import { bundledExtensions } from "./extensions/index.js";
 
 const { host, port } = resolveConfig(loadConfig(), loadCoreEnv()).server;
-const server = createStardustServer();
+const extensions = new ExtensionManager(undefined, undefined, bundledExtensions);
+const server = createStardustServer({ extensionManager: extensions });
 
 server.on("error", () => {
   console.error("[Stardust] 服务启动失败，请检查监听配置。");
@@ -33,6 +36,7 @@ function shutdown(signal: string): void {
   if (closing) return;
   closing = true;
   console.log(`[Stardust] 收到 ${signal}，正在关闭……`);
+  void extensions.shutdown();
   server.close((error) => {
     if (error) {
       console.error("[Stardust] 关闭失败。");

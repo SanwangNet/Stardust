@@ -791,6 +791,7 @@ function renderModelConfig(config: ModelView): void {
   }
 }
 function showModel(): void {
+  showExtensions();
   if (modelLoaded) return;
   modelLoaded = true;
   void modelRequest("/api/v1/model/config").then((value) => renderModelConfig(value as ModelView)).catch((error: unknown) => {
@@ -846,3 +847,104 @@ chatForm.addEventListener("submit", (event) => {
   }).catch((error: unknown) => { chatStatus.textContent = error instanceof Error ? error.message : "发送失败，请重试。"; })
     .finally(() => { chatSend.disabled = false; });
 });
+
+type ExtensionView = { id: string; name: string; version: string; description: string; installed: boolean; enabled: boolean; state: string; error?: string; fields: { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string }[] };
+const extensionList = getElement<HTMLElement>("extension-list");
+const extensionFeedback = getElement<HTMLElement>("extension-feedback");
+const extensionCards = new Map<string, { node: HTMLElement; status: HTMLElement; error: HTMLElement; fields: Map<string, { input: HTMLInputElement; clear?: HTMLInputElement; note?: HTMLElement }>; enable: HTMLButtonElement; disable: HTMLButtonElement }>();
+let extensionsLoaded = false;
+let extensionsBusy = false;
+let extensionSignature = "";
+async function extensionRequest(path: string, body?: unknown): Promise<unknown> {
+  let response: Response;
+  try { response = await fetch(path, body === undefined ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(130000) }); }
+  catch { throw new Error("无法连接 Stardust 服务端。"); }
+  const data = await response.json() as { error?: string };
+  if (!response.ok) {
+    const messages: Record<string, string> = { NOT_CONFIGURED: "请先保存必填配置。", INVALID_INPUT: "配置无效，请检查输入。", SAVE_FAILED: "保存失败，请重试。", DELETE_CONFIG_FAILED: "删除配置失败，请重试。", NOT_INSTALLED: "扩展尚未安装。", ALREADY_INSTALLED: "扩展已安装。" };
+    throw new Error(messages[data.error ?? ""] ?? `操作失败（HTTP ${response.status}）。`);
+  }
+  return data;
+}
+function extensionButton(label: string): HTMLButtonElement {
+  const button = document.createElement("button"); button.type = "button"; button.className = "setup-secondary"; button.textContent = label; return button;
+}
+async function extensionAction(id: string, action: string, body: unknown): Promise<boolean> {
+  if (extensionsBusy) return false;
+  extensionsBusy = true; extensionFeedback.textContent = "正在处理…";
+  try {
+    await extensionRequest(`/api/v1/extensions/${encodeURIComponent(id)}/${action}`, body);
+    extensionFeedback.textContent = "操作已完成。";
+    if (action === "install" || action === "uninstall") extensionSignature = "";
+    await refreshExtensions();
+    return true;
+  } catch (error) { extensionFeedback.textContent = error instanceof Error ? error.message : "操作失败。"; return false; }
+  finally { extensionsBusy = false; }
+}
+function buildExtensionCards(items: ExtensionView[]): void {
+  extensionList.replaceChildren(); extensionCards.clear();
+  for (const item of items) {
+    const node = document.createElement("article"); node.className = "extension-item";
+    const title = document.createElement("h2"); title.textContent = `${item.name} · ${item.version}`;
+    const description = document.createElement("p"); description.textContent = item.description;
+    node.append(title, description);
+    if (!item.installed) {
+      const install = extensionButton(`添加${item.name}`);
+      install.addEventListener("click", () => { void extensionAction(item.id, "install", {}); });
+      node.append(install); extensionList.append(node); continue;
+    }
+    const status = document.createElement("p"); status.setAttribute("role", "status");
+    const error = document.createElement("p"); error.setAttribute("role", "status");
+    const form = document.createElement("form"); form.className = "extension-form";
+    const fields = new Map<string, { input: HTMLInputElement; clear?: HTMLInputElement; note?: HTMLElement }>();
+    for (const field of item.fields) {
+      const label = document.createElement("label"); label.textContent = field.label;
+      const input = document.createElement("input"); input.type = field.sensitive ? "password" : "text"; input.autocomplete = field.sensitive ? "new-password" : "off"; input.maxLength = 4096;
+      if (!field.sensitive) input.value = field.value ?? ""; else input.placeholder = "留空以保留已保存的凭据";
+      label.append(input); form.append(label);
+      const entry: { input: HTMLInputElement; clear?: HTMLInputElement; note?: HTMLElement } = { input };
+      if (field.sensitive) {
+        const note = document.createElement("p"); form.append(note); entry.note = note;
+        const clearLabel = document.createElement("label"); clearLabel.className = "model-check";
+        const clear = document.createElement("input"); clear.type = "checkbox"; clear.addEventListener("change", () => { input.disabled = clear.checked; });
+        clearLabel.append(clear, document.createTextNode(`清除${field.label}`)); form.append(clearLabel); entry.clear = clear;
+      }
+      fields.set(field.key, entry);
+    }
+    const actions = document.createElement("div"); actions.className = "extension-actions";
+    const save = extensionButton("保存配置"); save.type = "submit";
+    const enable = extensionButton("启用"); const disable = extensionButton("停用"); const uninstall = extensionButton("卸载");
+    const deleteLabel = document.createElement("label"); deleteLabel.className = "model-check";
+    const deleteConfig = document.createElement("input"); deleteConfig.type = "checkbox"; deleteLabel.append(deleteConfig, document.createTextNode("卸载时删除配置"));
+    actions.append(save, enable, disable, uninstall); form.append(actions, deleteLabel);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault(); const values: Record<string, string | null> = {};
+      for (const field of item.fields) { const entry = fields.get(field.key)!; if (entry.clear?.checked) values[field.key] = null; else if (!field.sensitive || entry.input.value) values[field.key] = entry.input.value; }
+      void extensionAction(item.id, "config", values).then((ok) => { if (ok) for (const field of item.fields) if (field.sensitive) { const entry = fields.get(field.key)!; entry.input.value = ""; entry.input.disabled = false; if (entry.clear) entry.clear.checked = false; } });
+    });
+    enable.addEventListener("click", () => { void extensionAction(item.id, "enable", {}); });
+    disable.addEventListener("click", () => { void extensionAction(item.id, "disable", {}); });
+    uninstall.addEventListener("click", () => { void extensionAction(item.id, "uninstall", { deleteConfig: deleteConfig.checked }); });
+    node.append(status, error, form); extensionList.append(node); extensionCards.set(item.id, { node, status, error, fields, enable, disable });
+  }
+}
+async function refreshExtensions(): Promise<void> {
+  try {
+    const data = await extensionRequest("/api/v1/extensions") as { extensions: ExtensionView[] };
+    if (!Array.isArray(data.extensions)) throw new Error("扩展状态不可用。");
+    const signature = data.extensions.map((item) => `${item.id}:${item.installed}`).join("|");
+    if (signature !== extensionSignature) { buildExtensionCards(data.extensions); extensionSignature = signature; }
+    const labels: Record<string, string> = { connecting: "连接中", connected: "已连接", disconnected: "已断开", error: "错误" };
+    for (const item of data.extensions) {
+      const card = extensionCards.get(item.id); if (!card) continue;
+      card.status.textContent = `${item.enabled ? "已启用" : "已停用"} · ${labels[item.state] ?? "已断开"}`;
+      card.error.textContent = item.error ?? ""; card.enable.disabled = item.enabled; card.disable.disabled = !item.enabled;
+      for (const field of item.fields) { const entry = card.fields.get(field.key); if (entry?.note) entry.note.textContent = field.configured ? `${field.label} 已配置。` : `${field.label} 未配置。`; }
+    }
+  } catch (error) { extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。"; }
+}
+function showExtensions(): void {
+  if (extensionsLoaded) return;
+  extensionsLoaded = true; void refreshExtensions();
+  setInterval(() => { if (!document.hidden) void refreshExtensions(); }, 5000);
+}
