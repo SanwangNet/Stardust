@@ -198,7 +198,7 @@ test("failed configuration replacement leaves the previous secret intact", async
 test("a failed gateway stays isolated and credentials in different extensions do not collide", async (t) => {
   const { root, model } = await fixture(t);
   const fail = createQQBotExtension(async () => { throw new Error("hidden-secret"); });
-  const other = { ...fail, manifest: { ...fail.manifest, id: "other-extension" } };
+  const other = { ...fail, tools: [], manifest: { ...fail.manifest, id: "other-extension" } };
   const manager = new ExtensionManager(root, model, [fail, other]);
   t.after(() => manager.shutdown());
   await manager.install("qq-bot"); await manager.install("other-extension");

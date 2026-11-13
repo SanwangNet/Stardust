@@ -7,6 +7,8 @@ import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
+import { AdminAuth } from "./admin-auth.js";
+import { ToolRuns } from "./tool-runs.js";
 
 export interface AppOptions {
   version?: string;
@@ -16,6 +18,7 @@ export interface AppOptions {
   modelService?: ModelService;
   extensionManager?: ExtensionManager;
   logService?: LogService;
+  adminAuth?: AdminAuth;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -84,6 +87,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const model = options.modelService ?? modelService;
   const logs = options.logService ?? logger;
   const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [], logs);
+  const admin = options.adminAuth ?? new AdminAuth();
+  const toolRuns = new ToolRuns(model, extensions, logs);
   const streams = new Set<ServerResponse>();
 
   const server = createServer(async (request, response) => {
@@ -95,6 +100,48 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
+    if (pathname.startsWith("/api/v1/admin/") || pathname === "/api/v1/tool-runs" || pathname.startsWith("/api/v1/tool-runs/")) {
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
+        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (pathname === "/api/v1/admin/state" && request.method === "GET") { sendJson(response, 200, { configured: admin.configuredSecurely(), authenticated: Boolean(admin.session(request)) }); return; }
+        if (request.method === "POST") {
+          if (!request.headers.origin || !isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+          if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          let body: unknown; try { body = await readSetupBody(request, 32768); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          const fields = body as Record<string, unknown>;
+          if (pathname === "/api/v1/admin/login") {
+            if (Object.keys(fields).length !== 1 || typeof fields.token !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            const session = admin.login(fields.token);
+            if (!session) { sendJson(response, 401, { error: "AUTH_FAILED" }); return; }
+            response.setHeader("Set-Cookie", `stardust_admin=${session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`);
+            sendJson(response, 200, { authenticated: true }); return;
+          }
+          const owner = admin.session(request);
+          if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
+          if (pathname === "/api/v1/tool-runs") {
+            if (Object.keys(fields).length !== 1 || typeof fields.message !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            const id = toolRuns.start(owner, fields.message); sendJson(response, 202, { id }); return;
+          }
+          const decision = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})\/decision$/.exec(pathname);
+          if (decision) {
+            if (Object.keys(fields).length !== 2 || typeof fields.toolCallId !== "string" || typeof fields.approved !== "boolean") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            toolRuns.decide(owner, decision[1]!, fields.toolCallId, fields.approved); sendJson(response, 202, { ok: true }); return;
+          }
+        } else if (request.method === "GET") {
+          const owner = admin.session(request);
+          if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
+          const match = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})$/.exec(pathname);
+          if (match) { sendJson(response, 200, toolRuns.get(owner, match[1]!)); return; }
+        }
+        sendJson(response, 404, { error: "NOT_FOUND" });
+      } catch (error) {
+        const code = error instanceof Error && ["INVALID_INPUT", "RUN_LIMIT", "RUN_NOT_FOUND", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "TOOL_RUN_FAILED";
+        sendJson(response, code === "RUN_NOT_FOUND" ? 404 : code === "APPROVAL_UNAVAILABLE" ? 409 : code === "INVALID_INPUT" ? 400 : 500, { error: code });
+      }
+      return;
+    }
     if (pathname === "/api/v1/logs" || pathname === "/api/v1/logs/stream") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
       if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
@@ -212,7 +259,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         if (request.method !== "POST") throw new ExtensionError("METHOD_NOT_ALLOWED", 405);
         if (!isSameOrigin(request)) throw new ExtensionError("INVALID_ORIGIN", 403);
         if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
-        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test)$/.exec(pathname);
+        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test|tool)$/.exec(pathname);
         if (!match) throw new ExtensionError("EXTENSION_NOT_FOUND", 404);
         let body: unknown;
         try { body = await readSetupBody(request, 32 * 1024); } catch (error) { throw error instanceof RangeError ? new ExtensionError("BODY_TOO_LARGE", 413) : new ExtensionError("INVALID_INPUT"); }
@@ -225,6 +272,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
           case "enable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.enable(id); break;
           case "disable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.disable(id); break;
           case "uninstall": if (Object.keys(fields).length !== 1 || typeof fields.deleteConfig !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.uninstall(id, fields.deleteConfig); break;
+          case "tool": if (Object.keys(fields).length !== 2 || typeof fields.name !== "string" || typeof fields.enabled !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.setToolEnabled(id, fields.name, fields.enabled); break;
           case "capability-test": {
             if (Object.keys(fields).length !== 3 || typeof fields.targetId !== "string" || typeof fields.kind !== "string" || typeof fields.requestId !== "string") throw new ExtensionError("INVALID_INPUT");
             const result = await extensions.runCapabilityTest(id, { targetId: fields.targetId, kind: fields.kind, requestId: fields.requestId });
@@ -321,7 +369,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
   });
   server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
-  server.on("close", () => { void extensions.shutdown(); });
+  server.on("close", () => { toolRuns.shutdown(); void extensions.shutdown(); });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;

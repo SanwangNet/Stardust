@@ -1,7 +1,7 @@
 import { createConfigStore, ConfigValidationError, type StardustConfig } from "./config.js";
 import { createSecretStore } from "./model-secret.js";
 import { networkDiagnostic, safeTarget, upstreamDiagnostic, type ModelDiagnostic } from "./model-diagnostics.js";
-import { collectModelStream } from "./model-stream.js";
+import { collectModelStream, collectModelTurn } from "./model-stream.js";
 import { randomUUID } from "node:crypto";
 import { logger, type LogService } from "./logger.js";
 
@@ -13,6 +13,8 @@ export class ModelError extends Error {
   }
 }
 type ModelSettings = StardustConfig["model"];
+export type ToolCall = { id: string; name: string; arguments: string };
+export type ModelTurnMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_call_id?: string; tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[] };
 const maxMessage = 32 * 1024;
 const maxResponse = 1024 * 1024;
 
@@ -76,6 +78,56 @@ export class ModelService {
       const diagnostic = error instanceof ModelError ? error.diagnostic : undefined;
       this.logs.write("ERROR", "model", "模型请求失败。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started, status: diagnostic?.status, code: diagnostic?.code, category: diagnostic?.category, message: diagnostic?.message }, secrets);
       throw error;
+    }
+  }
+  async chatWithTools(messages: ModelTurnMessage[], tools: { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }[], cancellation?: AbortSignal): Promise<{ content: string; toolCalls: ToolCall[] }> {
+    const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
+    if (!baseUrl || !modelId) throw new ModelError("NOT_CONFIGURED", 400);
+    const { key, fileKey } = this.secrets.getKey();
+    const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const privateText = messages.map((entry) => entry.content ?? "").join("\n");
+    const headers: Record<string, string> = { "Content-Type": "application/json", Accept: stream ? "text/event-stream" : "application/json" };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
+    const started = Date.now(); const requestId = randomUUID();
+    this.logs.write("DEBUG", "model", "工具对话模型请求开始。", { requestId });
+    try {
+      const response = await this.request(endpoint, { method: "POST", headers, body: JSON.stringify({ model: modelId, messages, ...(tools.length ? { tools } : {}), stream }), redirect: "error", signal });
+      if (!response.ok) { const diagnostic = await upstreamDiagnostic(response, endpoint, [key, fileKey], privateText); throw new ModelError(diagnostic.category, 502, diagnostic); }
+      const invalid = () => new ModelError("INVALID_RESPONSE", 502);
+      if (Number(response.headers.get("content-length")) > maxResponse) { await response.body?.cancel(); throw invalid(); }
+      let turn: { content: string; toolCalls: ToolCall[] };
+      if (stream) {
+        turn = await collectModelTurn(response, signal, maxResponse, invalid, () => new ModelError("STREAM_INCOMPLETE", 502), async (data) => {
+          const diagnostic = await upstreamDiagnostic(new Response(data, { status: 200, headers: { "content-type": "application/json" } }), endpoint, [key, fileKey], privateText);
+          return new ModelError(diagnostic.category, 502, diagnostic);
+        });
+      } else {
+        const reader = response.body?.getReader(); if (!reader) throw invalid();
+        const chunks: Uint8Array[] = []; let size = 0; let ended = false;
+        const cancel = () => { void reader.cancel().catch(() => {}); };
+        signal.addEventListener("abort", cancel, { once: true }); if (signal.aborted) cancel();
+        try {
+          for (;;) { const part = await reader.read(); if (signal.aborted) throw signal.reason; if (part.done) { ended = true; break; } size += part.value.length; if (size > maxResponse) throw invalid(); chunks.push(part.value); }
+        } finally { signal.removeEventListener("abort", cancel); if (!ended) cancel(); try { reader.releaseLock(); } catch {} }
+        let data: { choices?: { message?: { content?: unknown; tool_calls?: unknown } }[] };
+        try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")) as typeof data; } catch { throw invalid(); }
+        const msg = Array.isArray(data?.choices) ? data.choices[0]?.message : undefined;
+        if (!msg || (msg.content != null && typeof msg.content !== "string") || (msg.tool_calls != null && !Array.isArray(msg.tool_calls))) throw invalid();
+        const calls = (msg.tool_calls ?? []) as { id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } }[];
+        if (calls.length > 8 || calls.some((call) => !call || call.type !== "function" || typeof call.id !== "string" || !call.id || call.id.length > 256 || typeof call.function?.name !== "string" || !call.function.name || call.function.name.length > 128 || typeof call.function.arguments !== "string" || call.function.arguments.length > 32768)) throw invalid();
+        turn = { content: (msg.content as string | null | undefined) ?? "", toolCalls: calls.map((call) => ({ id: call.id as string, name: call.function!.name as string, arguments: call.function!.arguments as string })) };
+        if (!turn.content.trim() && !turn.toolCalls.length) throw invalid();
+      }
+      if (new Set(turn.toolCalls.map((call) => call.id)).size !== turn.toolCalls.length || [key, fileKey].filter(Boolean).some((secret) => turn.toolCalls.some((call) => call.arguments.includes(secret) || call.id.includes(secret) || call.name.includes(secret)))) throw invalid();
+      turn.content = [key, fileKey].filter(Boolean).reduce((value, secret) => value.replaceAll(secret, "[REDACTED]"), turn.content);
+      this.logs.write("INFO", "model", "工具对话模型请求完成。", { requestId, durationMs: Date.now() - started });
+      return turn;
+    } catch (error) {
+      const normalized = error instanceof ModelError ? error : cancellation?.aborted ? new ModelError("REQUEST_CANCELLED", 499) : (() => { const diagnostic = networkDiagnostic(error, timeout.aborted, endpoint, [key, fileKey], privateText); return new ModelError(diagnostic.category, diagnostic.category === "TIMEOUT" ? 504 : 502, diagnostic); })();
+      this.logs.write("ERROR", "model", "工具对话模型请求失败。", { requestId, durationMs: Date.now() - started, status: normalized.diagnostic.status, code: normalized.diagnostic.code, category: normalized.diagnostic.category }, [key, fileKey, privateText]);
+      throw normalized;
     }
   }
   private async performChat(message: unknown, cancellation?: AbortSignal): Promise<string> {

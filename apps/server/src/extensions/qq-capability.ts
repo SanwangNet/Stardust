@@ -58,6 +58,7 @@ export async function performQQCapabilityTest(options: {
   kind: string; target: PrivateTarget; getToken: () => Promise<string>; signal: AbortSignal;
   appId: string; appSecret: string; request: DiagnosticFetch;
   onSent: (messageId: string) => void;
+  textContent?: string;
 }): Promise<CapabilityTestResult> {
   const { kind, target, signal } = options;
   const requestedAt = new Date().toISOString();
@@ -94,7 +95,7 @@ export async function performQQCapabilityTest(options: {
       if (signal.aborted || expired()) return { ...result, state: "unavailable", stage, httpStatus: uploaded.status, message: "上传后回复期限已过或扩展已停止，未发送消息。" };
       body = { msg_type: 7, content: " ", media: { file_info: uploaded.data.file_info }, msg_id: target.messageId, msg_seq: getNextMsgSeq(target.messageId) };
     } else {
-      body = { msg_type: 0, content: "Hello, Stardust!" };
+      body = { msg_type: 0, content: options.textContent ?? "Hello, Stardust!" };
     }
     stage = "send";
     result.interface = media ? `${result.interface} + POST ${base}/messages` : `POST ${base}/messages`;
@@ -106,7 +107,7 @@ export async function performQQCapabilityTest(options: {
     if (error instanceof PlatformFailure) {
       const code = error.data.code ?? error.data.err_code;
       const businessCode = typeof code === "number" && Number.isSafeInteger(code) ? String(code) : typeof code === "string" && /^\d{1,15}$/.test(code) ? code : undefined;
-      const message = safeMessage(error.data.message, [options.appSecret, options.appId, token, target.targetOpenid, target.messageId]);
+      const message = safeMessage(error.data.message, [options.appSecret, options.appId, token, target.targetOpenid, target.messageId, options.textContent ?? ""]);
       return { ...result, state: "rejected", stage: error.stage, httpStatus: error.status, ...(businessCode ? { businessCode } : {}), message: message || "QQ 未提供可显示的错误信息。" };
     }
     return { ...result, state: signal.aborted ? "unavailable" : "network_failure", stage, message: signal.aborted ? "扩展已停止，请求已取消。" : "请求未获得 HTTP 响应；发送状态可能未知，请先检查 QQ 客户端。" };

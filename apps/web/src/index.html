@@ -41,6 +41,10 @@
           </section>
 
           <section class="nav-page content-section model-chat" data-page="/model/chat" hidden>
+            <div id="tool-admin" class="tool-admin" data-transition-order="1">
+              <p id="tool-admin-status" role="status"></p>
+              <form id="tool-admin-form" hidden><label for="tool-admin-token">管理员口令</label><input id="tool-admin-token" type="password" autocomplete="current-password"><button type="submit" class="setup-secondary">登录以使用 Tool</button></form>
+            </div>
             <div id="chat-messages" class="chat-messages" data-transition-order="2" aria-live="polite"></div>
             <form id="chat-form"><label data-transition-order="3" for="chat-input">消息</label><textarea data-transition-order="4" id="chat-input" rows="4" maxlength="16000" required></textarea><button data-transition-order="5" class="setup-primary" type="submit" id="chat-send">发送</button><p data-transition-order="6" id="chat-status" class="model-feedback" role="status" aria-live="polite"></p></form>
           </section>

@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { CapabilityTestInput, CapabilityTestResult, ExtensionPackage } from "../channel.js";
 import { ExtensionError } from "../extension-manager.js";
 import { performQQCapabilityTest, type DiagnosticFetch, type PrivateTarget } from "./qq-capability.js";
+import { qqSendMessageTool } from "./qq-send-message.js";
 
 type BotFactory = (appId: string, appSecret: string) => Promise<QQBot>;
 const defaultFactory: BotFactory = async (appId, appSecret) => {
@@ -26,7 +27,15 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
       { key: "appId", env: "QQBOT_APP_ID", label: "AppID", sensitive: false, required: true },
       { key: "appSecret", env: "QQBOT_APP_SECRET", label: "AppSecret", sensitive: true, required: true },
     ],
+    managementPages: [
+      { pageId: "config", title: "机器人信息配置", description: "配置凭据与连接状态。", pageKind: "config" },
+      { pageId: "capabilities", title: "机器人能力测试", description: "手动测试 QQ 平台能力。", pageKind: "qq-capabilities" },
+      { pageId: "tools", title: "Tool 管理", description: "管理此扩展提供的 Tool。", pageKind: "tools" },
+      { pageId: "skills", title: "Skill 管理", description: "查看此扩展提供的 Skill。", pageKind: "skills" },
+    ],
+    skills: [],
   },
+  tools: [qqSendMessageTool],
   create(config, host) {
     let bot: QQBot | undefined;
     let stopped = false;
@@ -37,6 +46,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
     const capabilityTargets: PrivateTarget[] = [];
     const capabilityRequests = new Map<string, { key: string; result: Promise<CapabilityTestResult> }>();
     let activeTest: Promise<CapabilityTestResult> | undefined;
+    let activeToolSend: Promise<unknown> | undefined;
     let connected = false;
     let pending = 0;
     let queue: Promise<void> = Promise.resolve();
@@ -128,6 +138,37 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
       await queue;
     }
     return {
+      listMessageTargets() {
+        const unique = new Set<string>();
+        return capabilityTargets.slice().reverse().filter((target) => {
+          const key = `${target.scope}:${target.targetOpenid}`;
+          if (Date.now() - Date.parse(target.receivedAt) >= 60 * 60_000 || unique.has(key)) return false;
+          unique.add(key); return true;
+        }).map((target) => ({ id: target.id, scope: target.scope, description: target.scope === "private" ? "QQ 私聊：最近交互的用户" : "QQ 群聊：最近交互的群", expiresAt: new Date(Date.parse(target.receivedAt) + 60 * 60_000).toISOString() }));
+      },
+      async sendMessage(targetId, content, signal) {
+        const target = capabilityTargets.find((item) => item.id === targetId);
+        if (!target || !bot || !connected || stopped || signal.aborted || Date.now() - Date.parse(target.receivedAt) >= 60 * 60_000 || !/^[A-Za-z0-9_-]{1,256}$/.test(target.targetOpenid)) return { status: "unavailable", code: "TARGET_UNAVAILABLE" };
+        const currentBot = bot;
+        const work = performQQCapabilityTest({
+          kind: `${target.scope}-text`, target, textContent: content, signal: AbortSignal.any([controller.signal, signal]), appId: config.appId!, appSecret: config.appSecret!, request: diagnosticFetch,
+          getToken: () => currentBot.tokenManager.getAccessToken(config.appId!, config.appSecret!),
+          onSent: (messageId) => {
+            const scope = target.scope === "private" ? "c2c" : "group";
+            if (messageId.length <= 1024) seen.set(`${scope}:${messageId}`, Date.now());
+            replies.set(`${scope}:${target.targetOpenid}:${createHash("sha256").update(content.trim()).digest("hex")}`, Date.now());
+            if (replies.size > 4096) replies.delete(replies.keys().next().value!);
+          },
+        });
+        activeToolSend = work;
+        try {
+          const result = await work;
+          if (result.state === "success") return { status: "sent", httpStatus: result.httpStatus };
+          if (result.state === "rejected") return { status: "rejected", code: result.businessCode, httpStatus: result.httpStatus, message: result.message };
+          if (result.stage === "send") return { status: "unknown_outcome", code: "UNKNOWN_OUTCOME" };
+          return { status: "unavailable", code: "CHANNEL_UNAVAILABLE" };
+        } finally { if (activeToolSend === work) activeToolSend = undefined; }
+      },
       getCapabilityTargets() {
         return capabilityTargets.filter((target) => Date.now() - Date.parse(target.receivedAt) < 60 * 60_000).map(({ id, scope, receivedAt, replyExpiresAt }) => ({ id, scope, receivedAt, replyExpiresAt }));
       },
@@ -179,7 +220,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           } catch (error) { if (!stopped) { host.log("ERROR", "QQ Gateway 启动失败。", platformError(error)); host.status("error", "QQ 连接失败，请检查凭据、网络及平台权限。"); } }
         })();
       },
-      async stop() { if (!stopped) host.log("INFO", "QQ Gateway 正在停止。"); stopped = true; connected = false; capabilityTargets.length = 0; controller.abort(); bot?.stop(); await Promise.all([sending?.catch(() => {}), activeTest?.catch(() => {})]); },
+      async stop() { if (!stopped) host.log("INFO", "QQ Gateway 正在停止。"); stopped = true; connected = false; capabilityTargets.length = 0; controller.abort(); bot?.stop(); await Promise.all([sending?.catch(() => {}), activeTest?.catch(() => {}), activeToolSend?.catch(() => {})]); },
     };
   },
 }; }

@@ -1,12 +1,12 @@
 /** Collect an OpenAI-compatible SSE response without exposing partial content. */
-export async function collectModelStream(
+export async function collectModelTurn(
   response: Response,
   signal: AbortSignal,
   limit: number,
   invalid: () => Error,
   incomplete: () => Error,
   streamError: (data: string) => Promise<Error>,
-): Promise<string> {
+): Promise<{ content: string; toolCalls: { id: string; name: string; arguments: string }[] }> {
   if (!/^text\/event-stream(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
     void response.body?.cancel().catch(() => {});
     throw invalid();
@@ -20,6 +20,7 @@ export async function collectModelStream(
   let dataLines: string[] = [];
   let size = 0;
   let text = "";
+  const calls = new Map<number, { id: string; name: string; arguments: string }>();
   let done = false;
   let reachedEnd = false;
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -41,13 +42,32 @@ export async function collectModelStream(
     if (!payload || typeof payload !== "object" || !Array.isArray((payload as { choices?: unknown }).choices)) throw invalid();
     for (const choice of (payload as { choices: unknown[] }).choices) {
       if (!choice || typeof choice !== "object") throw invalid();
+      const choiceIndex = (choice as { index?: unknown }).index;
+      if (choiceIndex !== undefined && (!Number.isInteger(choiceIndex) || (choiceIndex as number) < 0)) throw invalid();
+      if (choiceIndex !== undefined && choiceIndex !== 0) continue;
       const delta = (choice as { delta?: unknown }).delta;
       if (delta == null) continue;
       if (typeof delta !== "object" || Array.isArray(delta)) throw invalid();
       const content = (delta as { content?: unknown }).content;
-      if (content == null) continue;
-      if (typeof content !== "string") throw invalid();
-      text += content;
+      if (content != null) { if (typeof content !== "string") throw invalid(); text += content; }
+      const fragments = (delta as { tool_calls?: unknown }).tool_calls;
+      if (fragments != null) {
+        if (!Array.isArray(fragments) || fragments.length > 8) throw invalid();
+        for (const fragment of fragments) {
+          if (!fragment || typeof fragment !== "object") throw invalid();
+          const part = fragment as { index?: unknown; id?: unknown; type?: unknown; function?: { name?: unknown; arguments?: unknown } };
+          if (!Number.isInteger(part.index) || (part.index as number) < 0 || (part.index as number) >= 8 || (part.type !== undefined && part.type !== "function")) throw invalid();
+          const entry = calls.get(part.index as number) ?? { id: "", name: "", arguments: "" };
+          if (part.id !== undefined) { if (typeof part.id !== "string") throw invalid(); entry.id += part.id; }
+          if (part.function !== undefined) {
+            if (!part.function || typeof part.function !== "object") throw invalid();
+            if (part.function.name !== undefined) { if (typeof part.function.name !== "string") throw invalid(); entry.name += part.function.name; }
+            if (part.function.arguments !== undefined) { if (typeof part.function.arguments !== "string") throw invalid(); entry.arguments += part.function.arguments; }
+          }
+          if (entry.id.length > 256 || entry.name.length > 128 || entry.arguments.length > 32768) throw invalid();
+          calls.set(part.index as number, entry);
+        }
+      }
     }
   }
 
@@ -101,11 +121,18 @@ export async function collectModelStream(
       if (!done && dataLines.length) await dispatch();
     }
     if (!done) throw incomplete();
-    if (!text.trim()) throw invalid();
-    return text;
+    const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
+    if ((!text.trim() && !toolCalls.length) || toolCalls.some((call) => !call.id || !call.name || !call.arguments)) throw invalid();
+    return { content: text, toolCalls };
   } finally {
     signal.removeEventListener("abort", cancel);
     if (!reachedEnd) cancel();
     try { reader.releaseLock(); } catch { /* Cancellation can still be settling. */ }
   }
+}
+
+export async function collectModelStream(response: Response, signal: AbortSignal, limit: number, invalid: () => Error, incomplete: () => Error, streamError: (data: string) => Promise<Error>): Promise<string> {
+  const result = await collectModelTurn(response, signal, limit, invalid, incomplete, streamError);
+  if (!result.content.trim() || result.toolCalls.length) throw invalid();
+  return result.content;
 }

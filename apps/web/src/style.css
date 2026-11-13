@@ -79,6 +79,7 @@ button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid
 .main { max-width: 1400px; min-width: 0; margin-left: 220px; padding: 80px clamp(30px, 6vw, 88px) 70px; overflow-x: clip; }
 .page-stage { display: grid; min-width: 0; }
 .page-stage > .nav-page { grid-area: 1 / 1; align-self: start; width: 100%; min-width: 0; }
+.page-stage > .nav-page[aria-hidden="true"] { pointer-events: none; }
 .page-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 52px; }
 .heading-copy { position: relative; min-width: 0; }
 .transition-ghost { position: absolute; z-index: 2; pointer-events: none; user-select: none; }
@@ -212,6 +213,8 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .chat-message p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
 #chat-form textarea { margin-bottom: 12px; }
 .extension-item { padding: 20px 0; border-bottom: 1px solid var(--line); }
+.extension-card { display: block; color: var(--text); text-decoration: none; }
+.extension-card:hover h2 { color: var(--accent); }
 .extension-item h2 { margin: 0 0 8px; font-size: 19px; }
 .extension-item p { margin: 8px 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .extension-form { margin-top: 20px; }
@@ -219,6 +222,16 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .extension-form input:not([type="checkbox"]) { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 0; background: var(--background); color: var(--text); font: inherit; }
 .extension-form input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .extension-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.extension-link { color: var(--text); text-decoration: none; }
+.extension-link:hover { color: var(--accent); }
+.extension-breadcrumb { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 24px; font-size: 13px; color: var(--muted); }
+.extension-breadcrumb a { color: var(--accent); }
+.extension-detail p { color: var(--muted); line-height: 1.6; }
+.extension-page-links { margin-top: 24px; border-top: 1px solid var(--line); }
+.extension-page-links a { display: grid; gap: 6px; padding: 18px 0; border-bottom: 1px solid var(--line); font-weight: 650; }
+.extension-page-links span { font-size: 13px; font-weight: 400; color: var(--muted); }
+.extension-schema { overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extension-available { margin: 28px 0 12px; font-size: 16px; }
 .capability-tests { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
 .capability-tests h3, .capability-tests h4 { margin: 16px 0 8px; }
 .capability-select { display: grid; gap: 8px; margin: 12px 0; font-size: 13px; font-weight: 650; }
@@ -228,6 +241,12 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .capability-test .setup-secondary:disabled { cursor: not-allowed; }
 .capability-confirm { padding: 24px; }
 .capability-confirm p { color: var(--text); }
+.tool-admin { padding: 0 0 20px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+.tool-admin p { font-size: 13px; color: var(--muted); }
+.tool-admin form:not([hidden]) { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.tool-admin input { min-height: 44px; max-width: 100%; border: 1px solid var(--line); background: var(--background); color: var(--text); padding: 8px; }
+.tool-call { margin: 14px 0; padding: 14px 0; border-block: 1px solid var(--line); }
+.tool-call pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .log-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
 .log-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .log-actions button { min-height: 36px; padding: 0 12px; font-size: 12px; }
