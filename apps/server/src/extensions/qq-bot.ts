@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { CapabilityTestInput, CapabilityTestResult, ExtensionPackage } from "../channel.js";
 import { ExtensionError } from "../extension-manager.js";
-import { performQQCapabilityTest, type DiagnosticFetch, type PrivateTarget } from "./qq-capability.js";
+import { isPublicHttpsImageUrl, performQQCapabilityTest, performQQStreamCapabilityTest, type DiagnosticFetch, type QQTestTarget } from "./qq-capability.js";
 import { qqSendMessageTool } from "./qq-send-message.js";
 
 type BotFactory = (appId: string, appSecret: string) => Promise<QQBot>;
@@ -43,8 +43,9 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
     const seen = new Map<string, number>();
     const replies = new Map<string, number>();
     const conversations = new Map<string, number[]>();
-    const capabilityTargets: PrivateTarget[] = [];
+    const capabilityTargets: QQTestTarget[] = [];
     const capabilityRequests = new Map<string, { key: string; result: Promise<CapabilityTestResult> }>();
+    const usedCapabilitySequences = new Map<string, Set<number>>();
     let activeTest: Promise<CapabilityTestResult> | undefined;
     let activeToolSend: Promise<unknown> | undefined;
     let connected = false;
@@ -174,8 +175,20 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
       },
       runCapabilityTest(input: CapabilityTestInput): Promise<CapabilityTestResult> {
         const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-        if (!uuid.test(input.targetId) || !uuid.test(input.requestId) || !/^(private|group)-(text|file|png)$/.test(input.kind)) throw new ExtensionError("INVALID_INPUT");
-        const key = `${input.targetId}:${input.kind}`;
+        if (!uuid.test(input.targetId) || !uuid.test(input.requestId) || !/^(private|group)-(text|file|png|png-direct|png-empty-content|markdown-multi-image|markdown-local-multi-image)$/.test(input.kind)) throw new ExtensionError("INVALID_INPUT");
+        if ((input.mode !== undefined && input.mode !== "active" && input.mode !== "passive") || (input.stream !== undefined && typeof input.stream !== "boolean")) throw new ExtensionError("INVALID_INPUT");
+        const directPng = input.kind.endsWith("-png-direct");
+        const markdownMultiImage = input.kind.endsWith("-markdown-multi-image");
+        const markdownLocalMultiImage = input.kind.endsWith("-markdown-local-multi-image");
+        if (markdownMultiImage ? (!input.imageUrl1 || !input.imageUrl2 || !isPublicHttpsImageUrl(input.imageUrl1) || !isPublicHttpsImageUrl(input.imageUrl2) || new URL(input.imageUrl1).href === new URL(input.imageUrl2).href || input.imageFiles !== undefined) : (input.imageUrl1 !== undefined || input.imageUrl2 !== undefined)) throw new ExtensionError("INVALID_INPUT");
+        if (markdownLocalMultiImage ? (!input.imageFiles || input.imageFiles.length !== 2 || input.imageFiles.some((file) => !Buffer.isBuffer(file) || file.length < 8 || file.length > 10 * 1024 * 1024 || !file.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) || input.imageFiles[0].equals(input.imageFiles[1])) : input.imageFiles !== undefined) throw new ExtensionError("INVALID_INPUT");
+        const media = input.kind.endsWith("-file") || input.kind.endsWith("-png") || directPng || input.kind.endsWith("-png-empty-content") || markdownLocalMultiImage;
+        const mode = input.mode ?? (directPng ? "active" : media || markdownMultiImage ? "passive" : "active");
+        const stream = input.stream ?? false;
+        if ((media && (stream || (directPng ? mode !== "active" : mode !== "passive"))) || ((markdownMultiImage || markdownLocalMultiImage) && (stream || mode !== "passive")) || (stream && !input.kind.endsWith("-text"))) throw new ExtensionError("INVALID_INPUT");
+        const urlsDigest = markdownMultiImage ? createHash("sha256").update(`${input.imageUrl1}\0${input.imageUrl2}`).digest("hex") : "";
+        const filesDigest = markdownLocalMultiImage ? createHash("sha256").update(input.imageFiles!.map((file) => createHash("sha256").update(file).digest("hex")).join("\0")).digest("hex") : "";
+        const key = `${input.targetId}:${input.kind}:${mode}:${stream}:${urlsDigest}:${filesDigest}`;
         const prior = capabilityRequests.get(input.requestId);
         if (prior) { if (prior.key !== key) throw new ExtensionError("INVALID_INPUT"); return prior.result; }
         if (capabilityRequests.size >= 512) throw new ExtensionError("TEST_LIMIT_REACHED", 429);
@@ -185,20 +198,54 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
         if (!target || Date.now() - Date.parse(target.receivedAt) >= 60 * 60_000 || !input.kind.startsWith(`${target.scope}-`)) throw new ExtensionError("INVALID_TARGET");
         if (!/^[A-Za-z0-9_-]{1,256}$/.test(target.targetOpenid)) throw new ExtensionError("INVALID_TARGET");
         const currentBot = bot;
+        if (stream && mode === "passive" && (!target.replyExpiresAt || Date.now() - Date.parse(target.receivedAt) >= 5 * 60_000)) {
+          const result: CapabilityTestResult = { state: "unavailable", interface: target.scope === "private" ? "POST /v2/users/{openid}/stream_messages" : "POST /v2/groups/{group_openid}/stream_messages（实验性、未验证候选接口）", requestedAt: new Date().toISOString(), stage: "target", mode, stream, frameCount: 0, completion: "not_started", serverAccepted: false, clientReceived: "unconfirmed", message: "被动流式实验要求使用 5 分钟内的真实入站消息。" };
+          const promise = Promise.resolve(result); capabilityRequests.set(input.requestId, { key, result: promise }); return promise;
+        }
+        if (mode === "passive" && (!target.replyExpiresAt || Date.now() >= Date.parse(target.replyExpiresAt))) {
+          const result: CapabilityTestResult = { state: "unavailable", interface: markdownMultiImage ? `POST /v2/${target.scope === "private" ? "users/{openid}" : "groups/{group_openid}"}/messages` : "未调用：被动回复目标已过期", requestedAt: new Date().toISOString(), stage: "target", mode, stream, frameCount: 0, completion: "not_started", serverAccepted: false, clientReceived: "unconfirmed", ...(markdownMultiImage ? { requestMessageId: `•••${target.messageId.slice(-4)}` } : {}), message: "所选入站消息的被动回复有效期已过；未发送请求。" };
+          const promise = Promise.resolve(result); capabilityRequests.set(input.requestId, { key, result: promise }); return promise;
+        }
         host.log("INFO", "QQ 平台能力测试开始。", { scope: target.scope, category: input.kind, requestId: input.requestId });
-        const promise = performQQCapabilityTest({
-          kind: input.kind, target, signal: controller.signal, appId: config.appId!, appSecret: config.appSecret!, request: diagnosticFetch,
-          getToken: () => currentBot.tokenManager.getAccessToken(config.appId!, config.appSecret!),
-          onSent: (messageId) => {
-            const scope = target.scope === "private" ? "c2c" : "group";
-            if (messageId.length <= 1024) seen.set(`${scope}:${messageId}`, Date.now());
-            if (input.kind.endsWith("-text")) {
-              const hash = createHash("sha256").update("Hello, Stardust!").digest("hex");
-              replies.set(`${scope}:${target.targetOpenid}:${hash}`, Date.now());
-              if (replies.size > 4096) replies.delete(replies.keys().next().value!);
-            }
-          },
-        }).then((result) => {
+        const start = Date.now();
+        const onSent = (messageId: string): void => {
+          const scope = target.scope === "private" ? "c2c" : "group";
+          if (messageId.length <= 1024) seen.set(`${scope}:${messageId}`, Date.now());
+          if (input.kind.endsWith("-text")) {
+            const hash = createHash("sha256").update("Hello, Stardust!").digest("hex");
+            replies.set(`${scope}:${target.targetOpenid}:${hash}`, Date.now());
+            if (replies.size > 4096) replies.delete(replies.keys().next().value!);
+          }
+        };
+        const runBasicTest = (getNextSequence?: (messageId: string) => number) => performQQCapabilityTest({
+          kind: input.kind, target, mode, signal: controller.signal, appId: config.appId!, appSecret: config.appSecret!, request: diagnosticFetch,
+          getToken: () => currentBot.tokenManager.getAccessToken(config.appId!, config.appSecret!), onSent,
+          ...(markdownMultiImage ? { imageUrl1: input.imageUrl1, imageUrl2: input.imageUrl2 } : {}),
+          ...(markdownLocalMultiImage ? { imageFiles: input.imageFiles } : {}),
+          ...(getNextSequence ? { getNextSequence } : {}),
+        }).then((result) => ({ ...result, mode, stream: false as const, durationMs: Date.now() - start }));
+        const work = stream
+          ? import("@tencent-connect/qqbot-nodejs/protocol").then(({ getNextMsgSeq }) => performQQStreamCapabilityTest({
+            target, signal: controller.signal, appId: config.appId!, appSecret: config.appSecret!, requestId: input.requestId,
+            mode,
+            getNextSequence: getNextMsgSeq,
+            getToken: () => currentBot.tokenManager.getAccessToken(config.appId!, config.appSecret!),
+            request: diagnosticFetch,
+            onEvent: (level, message, details) => host.log(level, message, details),
+          }))
+          : markdownMultiImage || markdownLocalMultiImage
+            ? import("@tencent-connect/qqbot-nodejs/protocol").then(({ getNextMsgSeq }) => runBasicTest((messageId) => {
+              const used = usedCapabilitySequences.get(messageId) ?? new Set<number>();
+              for (let attempt = 0; attempt < 65_536; attempt++) {
+                const sequence = getNextMsgSeq(messageId);
+                if (Number.isInteger(sequence) && sequence >= 0 && sequence <= 65_535 && !used.has(sequence)) {
+                  used.add(sequence); usedCapabilitySequences.set(messageId, used); return sequence;
+                }
+              }
+              throw new Error("MSG_SEQ_EXHAUSTED");
+            }))
+            : runBasicTest();
+        const promise = work.then((result) => {
           host.log(result.state === "success" ? "INFO" : "WARN", "QQ 平台能力测试结束。", { scope: target.scope, category: result.state, requestId: input.requestId, status: result.httpStatus, code: result.businessCode });
           return result;
         }).finally(() => { if (activeTest === promise) activeTest = undefined; });

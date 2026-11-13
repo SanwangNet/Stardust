@@ -970,7 +970,7 @@ let extensionsBusy = false;
 let extensionSignature = "";
 async function extensionRequest(path: string, body?: unknown): Promise<unknown> {
   let response: Response;
-  try { response = await fetch(path, body === undefined ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(130000) }); }
+  try { response = await fetch(path, body === undefined ? { cache: "no-store" } : body instanceof FormData ? { method: "POST", body, signal: AbortSignal.timeout(280000) } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(130000) }); }
   catch { throw new Error("无法连接 Stardust 服务端。"); }
   const data = await response.json() as { error?: string };
   if (!response.ok) {
@@ -982,72 +982,170 @@ async function extensionRequest(path: string, body?: unknown): Promise<unknown> 
 function extensionButton(label: string): HTMLButtonElement {
   const button = document.createElement("button"); button.type = "button"; button.className = "setup-secondary"; button.textContent = label; return button;
 }
+async function validateLocalPngSelection(input: HTMLInputElement): Promise<File[] | undefined> {
+  input.setCustomValidity("");
+  const files = Array.from(input.files ?? []);
+  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (files.length !== 2) input.setCustomValidity("请恰好选择两张 PNG 图片。");
+  else if (files.some((file) => file.type.toLowerCase() !== "image/png" || !file.name.toLowerCase().endsWith(".png") || file.size < 8 || file.size > 10 * 1024 * 1024)) input.setCustomValidity("两张图片都必须是 PNG，且单张不超过 10 MB。");
+  if (input.validationMessage) { input.reportValidity(); return undefined; }
+  const [first, second] = files;
+  const [firstHeader, secondHeader, firstDigest, secondDigest] = await Promise.all([
+    first!.slice(0, 8).arrayBuffer(), second!.slice(0, 8).arrayBuffer(),
+    crypto.subtle.digest("SHA-256", await first!.arrayBuffer()), crypto.subtle.digest("SHA-256", await second!.arrayBuffer()),
+  ]);
+  if (!new Uint8Array(firstHeader).every((byte, index) => byte === signature[index]) || !new Uint8Array(secondHeader).every((byte, index) => byte === signature[index])) input.setCustomValidity("文件内容不是有效 PNG 文件。");
+  else if (new Uint8Array(firstDigest).every((byte, index) => byte === new Uint8Array(secondDigest)[index])) input.setCustomValidity("请选择内容不同的两张 PNG 图片。");
+  if (input.validationMessage) { input.reportValidity(); return undefined; }
+  return files;
+}
 function buildQQCapabilityTests(id: string): HTMLElement {
   const section = document.createElement("section"); section.className = "capability-tests";
-  const introduction = document.createElement("p"); introduction.textContent = "腾讯公开文档标注主动推送已停止、普通文件暂未开放；手动测试可能被平台拒绝。每次确认后最多发送一次，媒体测试会先上传再发送，不自动重试。";
+  const introduction = document.createElement("p"); introduction.textContent = "主动消息可能受平台限制；发送前需要确认，HTTP 成功不代表客户端已展示。";
   introduction.className = "capability-introduction";
-  const sources = document.createElement("p");
-  sources.className = "capability-sources";
+  const interfaceNotes = document.createElement("details"); interfaceNotes.className = "capability-interface-notes";
+  const interfaceSummary = document.createElement("summary"); interfaceSummary.textContent = "接口说明";
+  const interfaceContent = document.createElement("div");
   const link = (label: string, href: string) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = label; return a; };
-  sources.append(link("发送消息文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md"), document.createTextNode(" · "), link("富媒体文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md"));
+  const streamInfo = document.createElement("p"); streamInfo.textContent = "私聊使用 QQ C2C stream_messages；群聊使用实验性、未验证候选路径 POST /v2/groups/{group_openid}/stream_messages。候选路径的 400、403、404 仅代表本次请求结果，不代表平台整体能力。流式每帧间隔至少 300ms，首帧失败即结束，不重试。";
+  const sourceLinks = document.createElement("p"); sourceLinks.className = "capability-sources";
+  sourceLinks.append(link("QQ 发送接口文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md"), document.createTextNode(" · "), link("SDK 流式说明", "https://github.com/tencent-connect/qqbot-nodejs/blob/main/USAGE.md"), document.createTextNode(" · "), link("富媒体文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md"));
+  interfaceContent.append(streamInfo, sourceLinks); interfaceNotes.append(interfaceSummary, interfaceContent);
   const targetPanel = document.createElement("div"); targetPanel.className = "capability-target-panel";
   const targetHeading = document.createElement("div"); targetHeading.className = "capability-target-heading";
   const targetsHeading = document.createElement("h3"); targetsHeading.textContent = "最近接收的测试目标";
-  const note = document.createElement("p"); note.textContent = "仅显示本次运行中实际接收并接受的消息。被动回复通常为私聊 60 分钟、群聊 5 分钟，每条消息最多回复 5 次，实际以 QQ 平台为准。";
+  const note = document.createElement("p"); note.textContent = "目标仅来自本次运行实际收到的消息；主动模式也使用已知目标。";
   targetHeading.append(targetsHeading, note);
   type Target = { id: string; scope: "private" | "group"; receivedAt: string; replyExpiresAt: string | null };
-  type Result = { state: "success" | "rejected" | "network_failure" | "unavailable"; interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string; serverAccepted: boolean; clientReceived: "unconfirmed" };
+  type FrameResult = { index: number; inputState: number; state: string; httpStatus?: number; businessCode?: string; responseId?: string };
+  type StageResult = { stage: "direct_send" | "upload" | "send"; state: string; httpStatus?: number; businessCode?: string; message?: string; messageIdReturned?: boolean };
+  type ImageUploadResult = { image: 1 | 2; phase?: string; state: string; httpStatus?: number; businessCode?: string; message?: string; imageId?: string };
+  type Result = { state: "success" | "partial_success" | "rejected" | "network_failure" | "unknown_outcome" | "unavailable"; interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string; serverAccepted: boolean; clientReceived: "unconfirmed"; mode?: "active" | "passive"; stream?: boolean; frameCount?: number; streamMsgId?: string; durationMs?: number; completion?: string; frames?: FrameResult[]; stages?: StageResult[]; imageUploads?: ImageUploadResult[]; messageIdReturned?: boolean; messageId?: string; requestMessageId?: string };
   let entries: Target[] = []; let busy = false;
   const targetControls = document.createElement("div"); targetControls.className = "capability-target-controls";
-  const selectLabel = document.createElement("label"); selectLabel.className = "capability-select"; selectLabel.append(document.createTextNode("测试目标"));
-  const select = document.createElement("select"); selectLabel.append(select);
+  const targetSelects = new Map<Target["scope"], HTMLSelectElement>();
+  for (const scope of ["private", "group"] as const) {
+    const selectLabel = document.createElement("label"); selectLabel.className = "capability-select"; selectLabel.append(document.createTextNode(scope === "private" ? "私聊目标" : "群聊目标"));
+    const select = document.createElement("select"); select.setAttribute("aria-label", scope === "private" ? "私聊测试目标" : "群聊测试目标"); selectLabel.append(select); targetSelects.set(scope, select);
+    select.addEventListener("change", updateTargets); targetControls.append(selectLabel);
+  }
   const targetStatus = document.createElement("p"); targetStatus.className = "capability-target-status"; targetStatus.setAttribute("role", "status");
   const refresh = extensionButton("刷新测试目标");
   refresh.classList.add("capability-refresh");
-  targetControls.append(selectLabel, refresh); targetPanel.append(targetHeading, targetControls, targetStatus);
+  targetControls.append(refresh); targetPanel.append(targetHeading, targetControls, targetStatus);
   const list = document.createElement("div"); list.className = "capability-test-list";
-  const tests: { kind: string; scope: Target["scope"]; media: boolean; button: HTMLButtonElement; result: HTMLElement }[] = [];
-  function selectedTarget(): Target | undefined { return entries.find((entry) => entry.id === select.value); }
+  const tests: { kind: string; scope: Target["scope"]; mode: "active" | "passive"; media: boolean; button: HTMLButtonElement; result: HTMLElement; streamToggle?: HTMLInputElement; streamSupported: boolean; streamNotice?: HTMLElement; scopeSelect?: HTMLSelectElement; experiment?: "direct" | "empty-content" | "markdown" | "markdown-local"; observation?: HTMLSelectElement; imageUrl1?: HTMLInputElement; imageUrl2?: HTMLInputElement; imageFiles?: HTMLInputElement }[] = [];
+  function selectedTarget(scope: Target["scope"]): Target | undefined { const select = targetSelects.get(scope); return entries.find((entry) => entry.scope === scope && entry.id === select?.value); }
   function updateTargets(): void {
-    const selected = selectedTarget();
-    if (!entries.length) targetStatus.textContent = "请先向机器人发送一条私聊消息，或在群聊中 @机器人，然后刷新测试目标。";
-    else if (selected) {
-      const remaining = selected.replyExpiresAt ? Math.max(0, Math.ceil((Date.parse(selected.replyExpiresAt) - Date.now()) / 1000)) : 0;
-      targetStatus.textContent = selected.replyExpiresAt ? `被动回复剩余 ${Math.floor(remaining / 60)} 分 ${remaining % 60} 秒；实际以平台为准。` : "无法确认被动回复有效期。";
+    const selectedByScope = { private: selectedTarget("private"), group: selectedTarget("group") };
+    const scopeStatus = (["private", "group"] as const).map((scope) => {
+      const target = selectedByScope[scope];
+      const label = scope === "private" ? "私聊" : "群聊";
+      if (!target) return `${label}：先${scope === "private" ? "向机器人发送私聊消息" : "在群聊中 @机器人"}`;
+      const remaining = target.replyExpiresAt ? Math.max(0, Math.ceil((Date.parse(target.replyExpiresAt) - Date.now()) / 1000)) : 0;
+      return target.replyExpiresAt ? `${label}被动有效 ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}` : `${label}被动期限未知`;
+    });
+    targetStatus.textContent = `${scopeStatus.join(" · ")}。`;
+    for (const test of tests) {
+      const selected = selectedByScope[test.scope];
+      const streaming = test.streamToggle?.checked ?? false;
+      const streamExpired = streaming && test.mode === "passive" && (!selected || Date.parse(selected.receivedAt) + 5 * 60_000 <= Date.now());
+      const passiveExpired = test.mode === "passive" && (!selected?.replyExpiresAt || Date.parse(selected.replyExpiresAt) <= Date.now());
+      test.button.disabled = busy || !selected || (test.mode === "passive" && passiveExpired) || streamExpired || (streaming && !test.streamSupported);
+      if (test.streamNotice) test.streamNotice.hidden = !streaming;
     }
-    for (const test of tests) test.button.disabled = busy || !selected || selected.scope !== test.scope || (test.media && (!selected.replyExpiresAt || Date.parse(selected.replyExpiresAt) <= Date.now()));
   }
-  select.addEventListener("change", updateTargets);
   function refreshTargets(): void {
-    refresh.disabled = true; targetStatus.textContent = "正在读取…";
+    refresh.disabled = true; targetStatus.textContent = "正在读取目标…";
     void extensionRequest(`/api/v1/extensions/${encodeURIComponent(id)}/capability-targets`).then((value) => {
-      const current = select.value; entries = (value as { targets: Target[] }).targets.slice().reverse();
-      select.replaceChildren();
-      for (const [index, target] of entries.entries()) {
-        const option = document.createElement("option"); option.value = target.id;
-        option.textContent = `${target.scope === "private" ? "私聊" : "群聊"} · ${new Date(target.receivedAt).toLocaleTimeString()} · 消息 ${index + 1}`;
-        select.append(option);
+      const current = { private: targetSelects.get("private")!.value, group: targetSelects.get("group")!.value };
+      entries = (value as { targets: Target[] }).targets.slice().reverse();
+      for (const scope of ["private", "group"] as const) {
+        const select = targetSelects.get(scope)!; select.replaceChildren();
+        const scoped = entries.filter((target) => target.scope === scope);
+        for (const [index, target] of scoped.entries()) {
+          const option = document.createElement("option"); option.value = target.id;
+          option.textContent = `${new Date(target.receivedAt).toLocaleTimeString()} · 消息 ${index + 1}`; select.append(option);
+        }
+        select.disabled = scoped.length === 0;
+        if (scoped.some((target) => target.id === current[scope])) select.value = current[scope];
       }
-      if (entries.some((target) => target.id === current)) select.value = current;
       updateTargets();
     }).catch((error: unknown) => { targetStatus.textContent = error instanceof Error ? error.message : "无法读取测试目标。"; }).finally(() => { refresh.disabled = false; });
   }
   refresh.addEventListener("click", refreshTargets);
-  for (const [kind, title, scope, media, warning] of [
-    ["private-text", "私聊主动文本", "private", false, "主动推送已停止提供，可能被平台拒绝。"],
-    ["group-text", "群聊主动文本", "group", false, "主动推送已停止提供，可能被平台拒绝。"],
-    ["private-file", "私聊被动普通文件", "private", true, "普通文件在公开文档中标记为暂未开放。"],
-    ["group-file", "群聊被动普通文件", "group", true, "普通文件在公开文档中标记为暂未开放。"],
-    ["private-png", "私聊被动 PNG 图片", "private", true, "实际能力取决于机器人权限和平台返回。"],
-    ["group-png", "群聊被动 PNG 图片", "group", true, "实际能力取决于机器人权限和平台返回。"],
-  ] as const) {
+  const scenarios = [
+    { kind: "private-text", title: "私聊主动", scope: "private", mode: "active", media: false, streamSupported: true, warning: "主动消息可能受平台限制。", streamReason: "POST /v2/users/{openid}/stream_messages；主动模式不发送 msg_id 或 event_id。" },
+    { kind: "private-text", title: "私聊被动", scope: "private", mode: "passive", media: false, streamSupported: true, warning: "被动消息使用所选真实私聊入站目标。", streamReason: "POST /v2/users/{openid}/stream_messages；被动模式使用真实 msg_id 和 event_id。" },
+    { kind: "group-text", title: "群聊主动", scope: "group", mode: "active", media: false, streamSupported: true, warning: "主动消息可能受平台限制。", streamReason: "实验性、未验证候选接口：POST /v2/groups/{group_openid}/stream_messages；主动模式不发送 msg_id 或 event_id。" },
+    { kind: "group-text", title: "群聊被动", scope: "group", mode: "passive", media: false, streamSupported: true, warning: "被动消息使用所选真实群聊入站目标。", streamReason: "实验性、未验证候选接口：POST /v2/groups/{group_openid}/stream_messages；被动模式使用真实 msg_id 和 event_id。" },
+    { kind: "private-file", title: "私聊被动 TXT 文件", scope: "private", mode: "passive", media: true, streamSupported: false, warning: "普通文件在公开文档中标记为暂未开放。" },
+    { kind: "group-file", title: "群聊被动 TXT 文件", scope: "group", mode: "passive", media: true, streamSupported: false, warning: "普通文件在公开文档中标记为暂未开放。" },
+    { kind: "private-png", title: "私聊被动 PNG 图片", scope: "private", mode: "passive", media: true, streamSupported: false, warning: "实际能力取决于机器人权限和平台返回。" },
+    { kind: "group-png", title: "群聊被动 PNG 图片", scope: "group", mode: "passive", media: true, streamSupported: false, warning: "实际能力取决于机器人权限和平台返回。" },
+    { kind: "png-direct", title: "图片直接发送（srv_send_msg=true）", scope: "private", selectScope: true, mode: "active", media: true, experiment: "direct", streamSupported: false, warning: "会主动发送图片，可能消耗主动消息额度。" },
+    { kind: "png-empty-content", title: "图片空 Content（content=\"\"）", scope: "private", selectScope: true, mode: "passive", media: true, experiment: "empty-content", streamSupported: false, warning: "仅对本次实验使用空 content；平台拒绝时不会回退为空格。" },
+    { kind: "markdown-multi-image", title: "Markdown 多图", scope: "private", selectScope: true, mode: "passive", media: true, experiment: "markdown", streamSupported: false, warning: "使用真实入站消息被动回复；图片 URL 会随 Markdown 请求发送给 QQ 平台。" },
+    { kind: "markdown-local-multi-image", title: "Markdown 本地多图", scope: "private", selectScope: true, mode: "passive", media: true, experiment: "markdown-local", streamSupported: false, warning: "选择两张 PNG 后上传至 QQ 官方图片素材库，并被动发送一条 Markdown 消息。单张上限 10 MB。" },
+  ] as const;
+  for (const scenario of scenarios) {
+    const { kind, title, mode, media, streamSupported, warning } = scenario;
+    let scope: Target["scope"] = scenario.scope;
+    const experiment = "experiment" in scenario ? scenario.experiment : undefined;
+    const streamReason = "streamReason" in scenario ? scenario.streamReason : "";
     const row = document.createElement("article"); row.className = "capability-test";
     const header = document.createElement("div"); header.className = "capability-test-header";
     const name = document.createElement("strong"); name.textContent = title;
-    const mode = document.createElement("span"); mode.className = "capability-test-mode"; mode.textContent = `${scope === "private" ? "私聊" : "群聊"} · ${media ? "被动" : "主动"}`;
-    header.append(name, mode);
+    const modeLabel = document.createElement("span"); modeLabel.className = "capability-test-mode"; modeLabel.textContent = `${scope === "private" ? "私聊" : "群聊"} · ${mode === "passive" ? "被动" : "主动"}`;
+    header.append(name, modeLabel);
     const details = document.createElement("p"); details.textContent = warning;
-    const result = document.createElement("p"); result.className = "capability-test-result"; result.dataset.state = "untested"; result.setAttribute("role", "status"); result.textContent = "未测试";
+    const controls = document.createElement("div"); controls.className = "capability-test-controls";
+    let scopeSelect: HTMLSelectElement | undefined;
+    if ("selectScope" in scenario) {
+      const scopeLabel = document.createElement("label"); scopeLabel.className = "capability-select"; scopeLabel.append(document.createTextNode("目标类型"));
+      scopeSelect = document.createElement("select"); scopeSelect.setAttribute("aria-label", `${title}目标类型`);
+      for (const [value, label] of [["private", "私聊"], ["group", "群聊"]] as const) { const option = document.createElement("option"); option.value = value; option.textContent = label; scopeSelect.append(option); }
+      scopeSelect.value = scope; scopeLabel.append(scopeSelect); controls.append(scopeLabel);
+    }
+    let imageUrl1: HTMLInputElement | undefined; let imageUrl2: HTMLInputElement | undefined;
+    let imageFiles: HTMLInputElement | undefined;
+    if (experiment === "markdown") {
+      for (const [number, labelText] of [[1, "图片 URL 1"], [2, "图片 URL 2"]] as const) {
+        const label = document.createElement("label"); label.className = "capability-select"; label.append(document.createTextNode(labelText));
+        const input = document.createElement("input"); input.type = "url"; input.required = true; input.maxLength = 2048; input.setAttribute("autocomplete", "url"); input.spellcheck = false; input.placeholder = "https://…"; input.setAttribute("aria-label", `${title} ${labelText}`);
+        label.append(input); controls.append(label);
+        if (number === 1) imageUrl1 = input; else imageUrl2 = input;
+      }
+    }
+    if (experiment === "markdown-local") {
+      const label = document.createElement("label"); label.className = "capability-select capability-file-input"; label.append(document.createTextNode("选择两张不同的 PNG（单张不超过 10 MB）"));
+      imageFiles = document.createElement("input"); imageFiles.type = "file"; imageFiles.accept = "image/png,.png"; imageFiles.multiple = true; imageFiles.required = true; imageFiles.setAttribute("aria-label", "选择两张 PNG 图片");
+      label.append(imageFiles); controls.append(label);
+    }
+    let streamToggle: HTMLInputElement | undefined; let streamNotice: HTMLElement | undefined;
+    if (!media) {
+      const streamLabel = document.createElement("label"); streamLabel.className = "capability-stream-toggle";
+      streamLabel.setAttribute("aria-label", `${title}：启用流式`);
+      streamToggle = document.createElement("input"); streamToggle.type = "checkbox";
+      const toggleText = document.createElement("span"); toggleText.textContent = "启用流式";
+      streamLabel.append(streamToggle, toggleText); controls.append(streamLabel);
+      streamNotice = document.createElement("p"); streamNotice.className = "capability-stream-note"; streamNotice.textContent = streamReason; streamNotice.hidden = true;
+      streamToggle.addEventListener("change", updateTargets);
+    }
+    const result = document.createElement("div"); result.className = "capability-test-result"; result.dataset.state = "untested"; result.setAttribute("role", "status"); result.setAttribute("aria-live", "polite");
+    const resultTitle = document.createElement("strong"); resultTitle.className = "capability-result-title"; resultTitle.textContent = "未测试"; result.append(resultTitle);
+    let observation: HTMLSelectElement | undefined;
+    if (experiment) {
+      const observationLabel = document.createElement("label"); observationLabel.className = "capability-select capability-observation"; observationLabel.append(document.createTextNode("客户端观察（手动记录）"));
+      observation = document.createElement("select"); observation.setAttribute("aria-label", `${title}客户端观察结果`);
+      const choices = experiment === "markdown-local"
+        ? [["unchecked", "尚未检查"], ["two", "同一条消息成功显示两张图片"], ["split", "两张图片显示为不同消息"], ["one", "只显示一张图片"], ["markdown", "Markdown 可见但图片无法加载"], ["rejected", "消息被平台拒绝"]] as const
+        : experiment === "markdown"
+        ? [["unchecked", "尚未检查"], ["two", "同一条消息显示两张图片"], ["one", "只显示一张图片"], ["source", "显示 Markdown 源代码"], ["none", "图片均未显示"], ["missing", "未收到消息"]] as const
+        : [["unchecked", "尚未检查"], ["normal", "图片正常显示，无额外空格"], ["space", "图片显示，但附带空格"], ["missing", "没有收到图片"]] as const;
+      for (const [value, label] of choices) { const option = document.createElement("option"); option.value = value; option.textContent = label; observation.append(option); }
+      observationLabel.append(observation);
+    }
     const button = extensionButton("执行测试"); button.setAttribute("aria-label", `执行${title}`);
     const dialog = document.createElement("dialog"); dialog.className = "setup-dialog capability-confirm"; dialog.setAttribute("aria-label", `确认${title}`);
     const confirmation = document.createElement("p");
@@ -1055,33 +1153,92 @@ function buildQQCapabilityTests(id: string): HTMLElement {
     const cancel = extensionButton("取消"); const confirm = extensionButton("确认发送");
     confirmActions.append(cancel, confirm); dialog.append(confirmation, confirmActions);
     let pendingTarget: Target | undefined;
+    let pendingLocalFiles: File[] | undefined;
     cancel.addEventListener("click", () => dialog.close());
-    tests.push({ kind, scope, media, button, result });
-    button.addEventListener("click", () => {
-      const target = selectedTarget(); if (!target || busy || button.disabled) return;
-      const targetLabel = select.selectedOptions[0]?.textContent ?? title;
+    const test = { kind, scope, mode: mode as "active" | "passive", media, button, result, streamSupported, ...(streamToggle ? { streamToggle } : {}), ...(streamNotice ? { streamNotice } : {}), ...(scopeSelect ? { scopeSelect } : {}), ...(experiment ? { experiment } : {}), ...(observation ? { observation } : {}), ...(imageUrl1 ? { imageUrl1 } : {}), ...(imageUrl2 ? { imageUrl2 } : {}), ...(imageFiles ? { imageFiles } : {}) };
+    tests.push(test);
+    scopeSelect?.addEventListener("change", () => { scope = scopeSelect!.value as Target["scope"]; test.scope = scope; updateTargets(); });
+    button.addEventListener("click", async () => {
+      const target = selectedTarget(test.scope); if (!target || busy || button.disabled) return;
+      if (test.experiment === "markdown" && (!test.imageUrl1?.reportValidity() || !test.imageUrl2?.reportValidity())) return;
+      const selectedFiles = test.experiment === "markdown-local" ? await validateLocalPngSelection(test.imageFiles!) : undefined;
+      if (test.experiment === "markdown-local" && !selectedFiles) return;
+      const targetLabel = targetSelects.get(scope)?.selectedOptions[0]?.textContent ?? title;
       pendingTarget = target;
-      confirmation.textContent = `确认向${targetLabel}执行“${title}”？这会向 QQ 平台提交真实请求。${warning}`;
+      pendingLocalFiles = selectedFiles;
+      const streaming = streamToggle?.checked ?? false;
+      const localFiles = selectedFiles ?? [];
+      const parameters = experiment === "direct" ? "请求摘要：POST /files，file_type=1、srv_send_msg=true，不带 msg_id；只调用一次。" : experiment === "empty-content" ? "请求摘要：POST /files 获取 file_info，再 POST /messages，msg_type=7、content=空字符串，使用真实入站 msg_id。" : experiment === "markdown" ? `请求摘要：POST /messages，msg_type=2，使用真实入站 msg_id 和新序号。\n图片 1：${imageUrl1!.value}\n图片 2：${imageUrl2!.value}\n将把这两个图片 URL 提交给 QQ 平台。` : experiment === "markdown-local" ? `请求摘要：上传两张 PNG 到 QQ 图片素材库（prepare → 预签名 PUT → complete），随后 POST /messages，msg_type=2，使用真实入站 msg_id 和新序号。\n图片 1：${(localFiles[0]!.size / 1024 / 1024).toFixed(2)} MB\n图片 2：${(localFiles[1]!.size / 1024 / 1024).toFixed(2)} MB\n每张图片将传给 QQ 官方平台。` : "";
+      confirmation.textContent = `确认向${targetLabel}执行“${title}”？${parameters}这会向 QQ 平台提交真实请求。${warning}`;
       dialog.showModal(); cancel.focus();
     });
-    confirm.addEventListener("click", () => {
-      const target = pendingTarget; pendingTarget = undefined; dialog.close();
+    confirm.addEventListener("click", async () => {
+      const target = pendingTarget;
       if (!target || busy) return;
-      busy = true; updateTargets(); result.dataset.state = "testing"; result.textContent = "测试中…";
-      void extensionRequest(`/api/v1/extensions/${encodeURIComponent(id)}/capability-test`, { targetId: target.id, kind, requestId: crypto.randomUUID() }).then((data) => {
+      if (test.experiment === "markdown-local") {
+        const selectedFiles = await validateLocalPngSelection(test.imageFiles!);
+        if (!selectedFiles) return;
+        pendingLocalFiles = selectedFiles;
+      }
+      pendingTarget = undefined; dialog.close();
+      busy = true; updateTargets(); result.dataset.state = "testing"; resultTitle.textContent = "测试中…";
+      const streaming = streamToggle?.checked ?? false;
+      const requestScope = test.scope;
+      const requestKind = experiment === "direct" ? `${requestScope}-png-direct` : experiment === "empty-content" ? `${requestScope}-png-empty-content` : experiment === "markdown" ? `${requestScope}-markdown-multi-image` : experiment === "markdown-local" ? `${requestScope}-markdown-local-multi-image` : kind;
+      let requestBody: unknown = { targetId: target.id, kind: requestKind, mode, stream: streaming, requestId: crypto.randomUUID(), ...(experiment === "markdown" ? { imageUrl1: imageUrl1!.value, imageUrl2: imageUrl2!.value } : {}) };
+      if (experiment === "markdown-local") {
+        const form = new FormData(); form.set("targetId", target.id); form.set("kind", requestKind); form.set("mode", mode); form.set("requestId", crypto.randomUUID());
+        form.set("image1", pendingLocalFiles![0]!); form.set("image2", pendingLocalFiles![1]!); requestBody = form; pendingLocalFiles = undefined;
+      }
+      void extensionRequest(`/api/v1/extensions/${encodeURIComponent(id)}/capability-test`, requestBody).then((data) => {
         const value = (data as { result: Result }).result;
-        const states: Record<Result["state"], string> = { success: "请求成功", rejected: "平台拒绝", network_failure: "网络失败", unavailable: "不可执行" };
+        const states: Record<Result["state"], string> = { success: streaming ? "成功完成流式协议" : "请求成功", partial_success: "部分帧成功", rejected: value.httpStatus === 404 && streaming && requestScope === "group" ? "候选接口返回 404" : "平台拒绝", network_failure: "网络失败", unknown_outcome: "请求结果未知", unavailable: "未执行" };
         result.dataset.state = value.state;
-        result.textContent = `${states[value.state]} · 接口：${value.interface} · 请求时间：${new Date(value.requestedAt).toLocaleString()} · 阶段：${value.stage} · HTTP：${value.httpStatus ?? "无响应"} · QQ 业务码：${value.businessCode ?? "无"} · 信息：${value.message ?? "无"} · 发送接口成功响应：${value.serverAccepted ? "是" : "否或未确认"} · 客户端接收：未确认`;
+        result.replaceChildren();
+        const heading = document.createElement("strong"); heading.className = "capability-result-title"; heading.textContent = states[value.state]; result.append(heading);
+        const summary = document.createElement("p"); summary.className = "capability-result-summary"; summary.textContent = `${requestScope === "private" ? "私聊" : "群聊"} · ${experiment === "direct" ? "主动" : mode === "passive" ? "被动" : "主动"} · ${experiment ? title : streaming ? `流式 · ${value.frameCount ?? 0} 帧` : "普通文本"} · ${value.durationMs === undefined ? "耗时未知" : `${value.durationMs} ms`} · 客户端展示未确认`;
+        result.append(summary);
+        const diagnostic = document.createElement("details"); diagnostic.className = "capability-result-details";
+        const diagnosticSummary = document.createElement("summary"); diagnosticSummary.textContent = "请求诊断";
+        const diagnosticList = document.createElement("dl");
+          const localSendState = experiment === "markdown-local" ? (value.stage === "send" ? (value.state === "success" ? "成功响应" : value.state === "rejected" ? "平台拒绝" : value.state === "unknown_outcome" ? "请求结果未知" : "发送失败") : "未发送") : undefined;
+          const fields: [string, string][] = [["接口", value.interface], ...(localSendState ? [["Markdown 发送状态", localSendState] as [string, string]] : []), ["请求时间", new Date(value.requestedAt).toLocaleString()], ["请求耗时", value.durationMs === undefined ? "未知" : `${value.durationMs} ms`], ["阶段", value.stage], ["HTTP", value.httpStatus === undefined ? (value.serverAccepted ? "状态缺失" : "无响应") : String(value.httpStatus)], ["QQ 业务码", value.businessCode ?? "无"], ...(value.requestMessageId ? [["入站消息 ID", value.requestMessageId] as [string, string]] : []), ...(value.messageId ? [["返回消息 ID", value.messageId] as [string, string]] : []), ["响应含消息 ID", value.messageIdReturned === undefined ? "不适用" : value.messageIdReturned ? "是" : "否"], ["客户端收到", value.clientReceived === "unconfirmed" ? "未确认" : "未知"], ["流式 ID", value.streamMsgId ?? "无"], ["完成状态", value.completion ?? (value.serverAccepted ? "请求已接受" : "未开始")], ["错误信息", value.message ?? "无"]];
+        for (const [label, text] of fields) { const line = document.createElement("div"); const term = document.createElement("dt"); term.textContent = label; const valueNode = document.createElement("dd"); valueNode.textContent = text; line.append(term, valueNode); diagnosticList.append(line); }
+        diagnostic.append(diagnosticSummary, diagnosticList);
+        if (value.stages?.length) {
+          const stageList = document.createElement("ol"); stageList.className = "capability-frame-list";
+          for (const item of value.stages) { const line = document.createElement("li"); line.textContent = `${item.stage === "direct_send" ? "富媒体直接发送" : item.stage === "upload" ? "上传" : "消息发送"} · ${item.state === "success" ? "成功响应" : item.state === "rejected" ? "平台拒绝" : item.state === "unknown_outcome" ? "结果未知" : "网络失败"} · HTTP ${item.httpStatus ?? "无响应"}${item.businessCode ? ` · QQ 业务码 ${item.businessCode}` : ""}${item.message ? ` · ${item.message}` : ""}`; stageList.append(line); }
+          const stageHeading = document.createElement("p"); stageHeading.className = "capability-frame-heading"; stageHeading.textContent = "请求阶段"; diagnostic.append(stageHeading, stageList);
+        }
+        if (value.imageUploads?.length) {
+          const uploadList = document.createElement("ol"); uploadList.className = "capability-frame-list";
+          for (const item of value.imageUploads) {
+            const state = item.state === "success" ? "成功" : item.state === "not_started" ? "未开始" : item.state === "unknown_outcome" ? "结果未知" : item.state === "network_failure" ? "网络失败" : "平台拒绝";
+            const phase = item.phase === "prepare" ? "申请素材上传" : item.phase === "put" ? "预签名上传" : item.phase === "complete" ? "完成素材登记" : "";
+            const line = document.createElement("li"); line.textContent = `图片 ${item.image} · ${phase || "素材上传"} · ${state}${item.httpStatus === undefined ? "" : ` · HTTP ${item.httpStatus}`}${item.businessCode ? ` · QQ 业务码 ${item.businessCode}` : ""}${item.imageId ? ` · image_id ${item.imageId}` : ""}${item.message ? ` · ${item.message}` : ""}`; uploadList.append(line);
+          }
+          const uploadHeading = document.createElement("p"); uploadHeading.className = "capability-frame-heading"; uploadHeading.textContent = "图片素材上传"; diagnostic.append(uploadHeading, uploadList);
+        }
+        if (value.frames?.length) {
+          const frames = document.createElement("ol"); frames.className = "capability-frame-list";
+          for (const frame of value.frames) { const item = document.createElement("li"); item.textContent = `帧 ${frame.index + 1} · ${frame.inputState === 10 ? "完成" : "更新"} · ${frame.state === "success" ? "请求成功" : frame.state === "rejected" ? "平台拒绝" : frame.state === "unknown_outcome" ? "结果未知" : "网络失败"} · HTTP ${frame.httpStatus ?? "未提供"}${frame.businessCode ? ` · QQ 业务码 ${frame.businessCode}` : ""}${frame.responseId ? ` · 响应 ID ${frame.responseId}` : ""}`; frames.append(item); }
+          const frameHeading = document.createElement("p"); frameHeading.className = "capability-frame-heading"; frameHeading.textContent = `流式帧（${value.frames.length}）`;
+          diagnostic.append(frameHeading, frames);
+        }
+        result.append(diagnostic);
+        if (value.httpStatus === 404 && streaming && requestScope === "group") {
+          const note = document.createElement("p"); note.className = "capability-result-summary"; note.textContent = "该候选路径返回 404；这不能证明 QQ 平台不存在其他群聊流式能力。"; result.append(note);
+        }
       }).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "请求失败";
         result.dataset.state = "network_failure";
-        result.textContent = message === "无法连接 Stardust 服务端。" ? `网络失败：${message}发送结果未知，请先检查 QQ 客户端。` : `不可执行：${message}`;
+        resultTitle.textContent = message === "无法连接 Stardust 服务端。" ? "请求结果未知" : "不可执行";
+        const detail = document.createElement("p"); detail.className = "capability-result-summary"; detail.textContent = message === "无法连接 Stardust 服务端。" ? `${message}发送状态未知，请先检查 QQ 客户端。` : message; result.replaceChildren(resultTitle, detail);
       }).finally(() => { busy = false; updateTargets(); });
     });
-    row.append(header, details, result, button, dialog); list.append(row);
+    controls.append(button); row.append(header, details, ...(streamNotice ? [streamNotice] : []), controls, result, ...(observation ? [observation.parentElement!] : []), dialog); list.append(row);
   }
-  section.append(introduction, sources, targetPanel, list);
+  section.append(introduction, interfaceNotes, targetPanel, list);
   updateTargets(); queueMicrotask(refreshTargets);
   const timer = setInterval(() => { if (!section.isConnected) clearInterval(timer); else updateTargets(); }, 1000);
   return section;

@@ -248,14 +248,19 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .extension-available { margin: 28px 0 12px; font-size: 16px; }
 .capability-tests { display: grid; gap: 0; margin-top: 0; }
 .capability-introduction { max-width: 900px; margin: 0 0 8px; color: var(--text); font-size: 14px; line-height: 1.7; }
+.capability-interface-notes { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.capability-interface-notes summary { width: fit-content; color: var(--text); cursor: pointer; text-underline-offset: 3px; }
+.capability-interface-notes p { max-width: 900px; margin: 10px 0; }
 .capability-sources { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px; font-size: 12px; }
 .capability-sources a { color: var(--accent); text-underline-offset: 3px; }
 .capability-target-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, .8fr); align-items: center; gap: 20px 32px; padding: 20px 0; border-block: 1px solid var(--line); }
 .capability-target-heading h3 { margin: 0 0 7px; font-size: 16px; }
 .capability-target-heading p { max-width: 760px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.capability-target-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
+.capability-target-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: end; gap: 12px; }
 .capability-select { display: grid; min-width: 0; gap: 7px; margin: 0; font-size: 12px; font-weight: 650; }
 .capability-select select { width: 100%; min-width: 0; min-height: 44px; padding: 8px; border: 1px solid var(--line); border-radius: 0; color: var(--text); background: var(--background); }
+.capability-select input[type="url"] { box-sizing: border-box; width: min(100%, 420px); min-width: 220px; min-height: 44px; padding: 8px; border: 1px solid var(--line); border-radius: 0; color: var(--text); background: var(--background); }
+.capability-select input[type="file"] { box-sizing: border-box; width: min(100%, 520px); min-width: 240px; min-height: 44px; padding: 8px; border: 1px solid var(--line); color: var(--text); background: var(--background); font: inherit; }
 .capability-refresh { min-height: 44px; }
 .capability-target-status { grid-column: 1 / -1; margin: -8px 0 0; padding: 10px 12px; background: var(--surface); color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .capability-test-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
@@ -265,7 +270,23 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 .capability-test-mode { flex: none; padding: 4px 7px; background: var(--surface); color: var(--muted); font-size: 10px; white-space: nowrap; }
 .capability-test > p { margin: 0; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .capability-test > p:not(.capability-test-result) { color: var(--muted); }
-.capability-test-result { align-self: start; min-height: 42px; padding: 10px 12px; border-left: 2px solid var(--line); background: var(--surface); color: var(--text); }
+.capability-test-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.capability-stream-toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; color: var(--text); font-size: 12px; font-weight: 650; cursor: pointer; }
+.capability-stream-toggle input { width: 17px; height: 17px; accent-color: var(--accent); }
+.capability-stream-toggle:focus-within { outline: 2px solid var(--focus); outline-offset: 3px; }
+.capability-stream-note { padding: 9px 11px; border-left: 2px solid var(--accent); background: var(--surface); color: var(--muted); }
+.capability-test-result { align-self: stretch; min-width: 0; min-height: 42px; padding: 10px 12px; border-left: 2px solid var(--line); background: var(--surface); color: var(--text); }
+.capability-result-title { display: block; font-size: 12px; line-height: 1.5; }
+.capability-result-summary { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.capability-result-details { margin-top: 8px; color: var(--muted); font-size: 11px; }
+.capability-result-details summary { width: fit-content; cursor: pointer; text-underline-offset: 3px; }
+.capability-result-details dl { margin: 8px 0 0; }
+.capability-result-details dl div { display: grid; grid-template-columns: minmax(80px, 110px) minmax(0, 1fr); gap: 10px; padding: 5px 0; border-top: 1px solid var(--line); }
+.capability-result-details dt { color: var(--muted); }
+.capability-result-details dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.capability-frame-heading { margin: 12px 0 4px; color: var(--text); font-weight: 650; }
+.capability-frame-list { margin: 0; padding-left: 20px; line-height: 1.7; }
+.capability-frame-list li { overflow-wrap: anywhere; }
 .capability-test-result[data-state="success"] { border-color: var(--online); }
 .capability-test-result[data-state="rejected"], .capability-test-result[data-state="network_failure"], .capability-test-result[data-state="unavailable"] { border-color: var(--offline); }
 .capability-test > button { justify-self: start; }
@@ -291,5 +312,5 @@ h1 { margin: 0; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; letter-s
 @media (max-width: 640px) { #extension-list, .extension-page-links { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 850px) { .capability-target-panel { grid-template-columns: 1fr; gap: 16px; } }
 @media (max-width: 640px) { .capability-test-list { grid-template-columns: 1fr; } }
-@media (max-width: 440px) { .capability-target-controls { grid-template-columns: 1fr; } .capability-refresh { justify-self: start; } .capability-test { min-height: 0; } }
+@media (max-width: 440px) { .capability-target-controls { grid-template-columns: 1fr; } .capability-refresh { justify-self: start; } .capability-test { min-height: 0; padding: 15px; } .capability-test-header { flex-wrap: wrap; } .capability-result-details dl div { grid-template-columns: 1fr; gap: 3px; } }
 @media (max-width: 440px) { .settings-list div { grid-template-columns: 1fr; gap: 8px; } .extension-card { min-height: 122px; padding: 18px; } }

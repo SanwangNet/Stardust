@@ -39,6 +39,8 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown): 
 }
 
 const maxSetupBody = 16 * 1024;
+const maxCapabilityUploadBody = 20 * 1024 * 1024 + 64 * 1024;
+const maxCapabilityImageSize = 10 * 1024 * 1024;
 
 function isSameOrigin(request: IncomingMessage): boolean {
   if (request.headers["sec-fetch-site"] === "cross-site") return false;
@@ -67,6 +69,44 @@ function readSetupBody(request: IncomingMessage, limit = maxSetupBody): Promise<
       catch (error) { reject(error); }
     });
   });
+}
+
+function readRawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    request.on("data", (bytes: Buffer) => {
+      size += bytes.length;
+      if (size <= limit) chunks.push(bytes);
+    });
+    request.on("error", reject);
+    request.on("end", () => size > limit ? reject(new RangeError("BODY_TOO_LARGE")) : resolve(Buffer.concat(chunks)));
+  });
+}
+
+async function readCapabilityForm(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const contentType = request.headers["content-type"] ?? "";
+  if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new TypeError("INVALID_INPUT");
+  const raw = await readRawBody(request, maxCapabilityUploadBody);
+  const form = await new Request("http://localhost/", { method: "POST", headers: { "Content-Type": contentType }, body: raw }).formData();
+  const fields: Record<string, unknown> = {};
+  const images: Buffer[] = [];
+  const imageSeen = new Set<string>();
+  for (const [key, value] of form.entries()) {
+    if (key === "image1" || key === "image2") {
+      if (imageSeen.has(key) || !(value instanceof File) || value.type.toLowerCase() !== "image/png" || !value.name.toLowerCase().endsWith(".png") || value.size < 33 || value.size > maxCapabilityImageSize) throw new TypeError("INVALID_INPUT");
+      const bytes = Buffer.from(await value.arrayBuffer());
+      if (bytes.length !== value.size || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.readUInt32BE(8) !== 13 || bytes.toString("ascii", 12, 16) !== "IHDR" || bytes.readUInt32BE(16) === 0 || bytes.readUInt32BE(20) === 0) throw new TypeError("INVALID_INPUT");
+      imageSeen.add(key);
+      images[key === "image1" ? 0 : 1] = bytes;
+    } else {
+      if (typeof value !== "string" || Object.hasOwn(fields, key)) throw new TypeError("INVALID_INPUT");
+      fields[key] = value;
+    }
+  }
+  if (!images[0] || !images[1] || images[0].equals(images[1])) throw new TypeError("INVALID_INPUT");
+  fields.imageFiles = [images[0], images[1]];
+  return fields;
 }
 
 const staticFiles: Readonly<Record<string, { filename: string; contentType: string }>> = {
@@ -258,11 +298,13 @@ export function createStardustServer(options: AppOptions = {}): Server {
         if (targetsMatch && request.method === "GET") { sendJson(response, 200, { targets: extensions.capabilityTargets(targetsMatch[1]!) }); return; }
         if (request.method !== "POST") throw new ExtensionError("METHOD_NOT_ALLOWED", 405);
         if (!isSameOrigin(request)) throw new ExtensionError("INVALID_ORIGIN", 403);
-        if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
         const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test|tool)$/.exec(pathname);
         if (!match) throw new ExtensionError("EXTENSION_NOT_FOUND", 404);
+        const multipartCapability = match[2] === "capability-test" && /^multipart\/form-data\s*;/i.test(request.headers["content-type"] ?? "");
+        if (!multipartCapability && !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
         let body: unknown;
-        try { body = await readSetupBody(request, 32 * 1024); } catch (error) { throw error instanceof RangeError ? new ExtensionError("BODY_TOO_LARGE", 413) : new ExtensionError("INVALID_INPUT"); }
+        try { body = multipartCapability ? await readCapabilityForm(request) : await readSetupBody(request, match[2] === "capability-test" ? 32 * 1024 : 32 * 1024); }
+        catch (error) { throw error instanceof RangeError ? new ExtensionError("BODY_TOO_LARGE", 413) : new ExtensionError("INVALID_INPUT"); }
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new ExtensionError("INVALID_INPUT");
         const fields = body as Record<string, unknown>;
         const id = match[1]!;
@@ -274,8 +316,10 @@ export function createStardustServer(options: AppOptions = {}): Server {
           case "uninstall": if (Object.keys(fields).length !== 1 || typeof fields.deleteConfig !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.uninstall(id, fields.deleteConfig); break;
           case "tool": if (Object.keys(fields).length !== 2 || typeof fields.name !== "string" || typeof fields.enabled !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.setToolEnabled(id, fields.name, fields.enabled); break;
           case "capability-test": {
-            if (Object.keys(fields).length !== 3 || typeof fields.targetId !== "string" || typeof fields.kind !== "string" || typeof fields.requestId !== "string") throw new ExtensionError("INVALID_INPUT");
-            const result = await extensions.runCapabilityTest(id, { targetId: fields.targetId, kind: fields.kind, requestId: fields.requestId });
+            const allowed = new Set(["targetId", "kind", "requestId", "mode", "stream", "imageUrl1", "imageUrl2", "imageFiles"]);
+            const localImageTest = fields.kind === "private-markdown-local-multi-image" || fields.kind === "group-markdown-local-multi-image";
+            if (!Object.hasOwn(fields, "targetId") || !Object.hasOwn(fields, "kind") || !Object.hasOwn(fields, "requestId") || Object.keys(fields).some((key) => !allowed.has(key)) || typeof fields.targetId !== "string" || typeof fields.kind !== "string" || typeof fields.requestId !== "string" || (fields.mode !== undefined && fields.mode !== "active" && fields.mode !== "passive") || (fields.stream !== undefined && typeof fields.stream !== "boolean") || (fields.imageUrl1 !== undefined && typeof fields.imageUrl1 !== "string") || (fields.imageUrl2 !== undefined && typeof fields.imageUrl2 !== "string") || (localImageTest !== multipartCapability) || (multipartCapability && !localImageTest) || (!multipartCapability && Object.hasOwn(fields, "imageFiles"))) throw new ExtensionError("INVALID_INPUT");
+            const result = await extensions.runCapabilityTest(id, { targetId: fields.targetId, kind: fields.kind, requestId: fields.requestId, ...(fields.mode === undefined ? {} : { mode: fields.mode as "active" | "passive" }), ...(fields.stream === undefined ? {} : { stream: fields.stream }), ...(fields.imageUrl1 === undefined ? {} : { imageUrl1: fields.imageUrl1 }), ...(fields.imageUrl2 === undefined ? {} : { imageUrl2: fields.imageUrl2 }), ...(fields.imageFiles === undefined ? {} : { imageFiles: fields.imageFiles as [Buffer, Buffer] }) });
             sendJson(response, 200, { result }); return;
           }
         }

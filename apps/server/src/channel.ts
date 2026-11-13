@@ -22,8 +22,20 @@ export interface ChannelHost {
   log(level: LogLevel, message: string, details?: LogDetails): void;
 }
 export interface CapabilityTarget { id: string; scope: "private" | "group"; receivedAt: string; replyExpiresAt: string | null }
-export interface CapabilityTestInput { targetId: string; kind: string; requestId: string }
-export interface CapabilityTestResult { state: "success" | "rejected" | "network_failure" | "unavailable"; interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string; serverAccepted: boolean; clientReceived: "unconfirmed" }
+export interface CapabilityTestInput { targetId: string; kind: string; requestId: string; mode?: "active" | "passive"; stream?: boolean; imageUrl1?: string; imageUrl2?: string; imageFiles?: [Buffer, Buffer] }
+export interface CapabilityFrameResult { index: number; inputState: 1 | 10; state: "success" | "rejected" | "network_failure" | "unknown_outcome"; httpStatus?: number; businessCode?: string; responseId?: string }
+export interface CapabilityStageResult { stage: "direct_send" | "upload" | "send"; state: "success" | "rejected" | "network_failure" | "unknown_outcome"; httpStatus?: number; businessCode?: string; message?: string; messageIdReturned?: boolean }
+export interface CapabilityImageUploadResult { image: 1 | 2; phase?: "prepare" | "put" | "complete"; state: "not_started" | "success" | "rejected" | "network_failure" | "unknown_outcome"; httpStatus?: number; businessCode?: string; message?: string; imageId?: string }
+export interface CapabilityTestResult {
+  state: "success" | "partial_success" | "rejected" | "network_failure" | "unknown_outcome" | "unavailable";
+  interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string;
+  serverAccepted: boolean; clientReceived: "unconfirmed"; mode?: "active" | "passive"; stream?: boolean;
+  frameCount?: number; streamMsgId?: string; durationMs?: number; completion?: "complete" | "partial" | "not_started" | "unknown";
+  frames?: CapabilityFrameResult[];
+  stages?: CapabilityStageResult[]; messageIdReturned?: boolean;
+  imageUploads?: CapabilityImageUploadResult[];
+  messageId?: string; requestMessageId?: string;
+}
 export interface ChannelInstance {
   start(): void;
   stop(): void | Promise<void>;
