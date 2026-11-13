@@ -28,6 +28,7 @@ type MotionOptions = {
   token: number;
   duration: number;
   delay?: number;
+  startTime?: number;
   properties: AnimatedProperties[];
   onFinish?: () => void;
 };
@@ -93,6 +94,7 @@ export class NavigationMotion {
       options.onFinish?.();
       return Promise.resolve(true);
     }
+    if (options.startTime !== undefined) animation.startTime = options.startTime;
 
     const freeze = (): void => {
       const computed = getComputedStyle(element);

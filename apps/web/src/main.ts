@@ -149,7 +149,7 @@ function setGroupExpanded(groupId: string, isExpanded: boolean, category: MenuCa
     window.setTimeout(complete, navigationMotion.submenuDurationMs + 32);
   }
 }
-function createSecondaryNavigation(category: MenuCategory, path: string, animate: boolean, direction: NavigationDirection, token: number): Promise<boolean[]> {
+function createSecondaryNavigation(category: MenuCategory, path: string, animate: boolean, direction: NavigationDirection, token: number, startTime?: number): Promise<boolean[]> {
   secondaryNav.replaceChildren(secondaryIndicator);
   let order = 0;
   for (const item of category.items) {
@@ -190,11 +190,11 @@ function createSecondaryNavigation(category: MenuCategory, path: string, animate
     secondaryNav.append(group);
   }
   const sideItems = Array.from(secondaryNav.querySelectorAll<HTMLElement>("[data-transition-order]"));
-  const entering = animate ? animateElements(sideItems, "enter", direction, "x", token, navigationMotion.sidebarEnterPx, true) : Promise.resolve([]);
-  moveSecondaryIndicator(animate, token);
+  const entering = animate ? animateElements(sideItems, "enter", direction, "x", token, navigationMotion.sidebarEnterPx, true, startTime) : Promise.resolve([]);
+  moveSecondaryIndicator(animate, token, undefined, startTime);
   return entering;
 }
-function updateSecondarySelection(category: MenuCategory, path: string, animate: boolean, token: number): void {
+function updateSecondarySelection(category: MenuCategory, path: string, animate: boolean, token: number, startTime?: number): void {
   secondaryNav.querySelectorAll<HTMLAnchorElement>("a.secondary-link").forEach((link) => {
     if (link.hash.slice(1) === path) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -205,9 +205,9 @@ function updateSecondarySelection(category: MenuCategory, path: string, animate:
     document.getElementById(`nav-toggle-${item.id}`)?.classList.toggle("has-current", currentChild);
     if (currentChild && !expanded.has(item.id)) setGroupExpanded(item.id, true, category, path);
   }
-  moveSecondaryIndicator(animate, token);
+  moveSecondaryIndicator(animate, token, undefined, startTime);
 }
-function movePrimaryIndicator(animate: boolean, token: number): Promise<boolean> {
+function movePrimaryIndicator(animate: boolean, token: number, startTime?: number): Promise<boolean> {
   if (!activeCategory) return Promise.resolve(false);
   const link = primaryLinks.get(activeCategory);
   if (!link) return Promise.resolve(false);
@@ -228,11 +228,12 @@ function movePrimaryIndicator(animate: boolean, token: number): Promise<boolean>
   ], {
     token,
     duration: navigationMotion.navigationDurationMs,
+    ...(startTime === undefined ? {} : { startTime }),
     properties: ["transform", "width"],
     onFinish: () => { primaryIndicator.style.transform = `translateX(${x}px)`; primaryIndicator.style.width = `${width}px`; },
   });
 }
-function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: HTMLElement): void {
+function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: HTMLElement, startTime?: number): void {
   const selected = forcedTarget ?? secondaryNav.querySelector<HTMLElement>('[aria-current="page"]');
   if (!selected) return;
   const closedGroup = selected.closest<HTMLElement>(".nav-children[data-expanded='false']");
@@ -254,6 +255,7 @@ function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: 
   ], {
     token,
     duration: navigationMotion.navigationDurationMs,
+    ...(startTime === undefined ? {} : { startTime }),
     properties: ["transform", "height"],
     onFinish: () => { secondaryIndicator.style.transform = `translateY(${y}px)`; secondaryIndicator.style.height = `${height}px`; },
   });
@@ -266,7 +268,7 @@ function orderedTransitionItems(root: ParentNode): HTMLElement[] {
 function motionTranslate(axis: "x" | "y", amount: number): string {
   return axis === "x" ? `${amount}px 0px` : `0px ${amount}px`;
 }
-function animateElements(elements: HTMLElement[], mode: "enter" | "exit", direction: NavigationDirection, axis: "x" | "y", token: number, distance: number, initialize: boolean): Promise<boolean[]> {
+function animateElements(elements: HTMLElement[], mode: "enter" | "exit", direction: NavigationDirection, axis: "x" | "y", token: number, distance: number, initialize: boolean, startTime?: number): Promise<boolean[]> {
   const selected = [...new Set(elements)];
   return Promise.all(selected.map((element, index) => {
     const timing = getStaggerTiming(index);
@@ -288,10 +290,15 @@ function animateElements(elements: HTMLElement[], mode: "enter" | "exit", direct
       token,
       duration: timing.duration,
       delay: timing.delay,
+      ...(startTime === undefined ? {} : { startTime }),
       properties: ["translate", "opacity"],
       onFinish: mode === "enter" ? () => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); } : undefined,
     });
   }));
+}
+function nextNavigationStartTime(): number {
+  const timelineTime = document.timeline.currentTime;
+  return (typeof timelineTime === "number" ? timelineTime : performance.now()) + 16;
 }
 function createHeadingGhost(element: HTMLElement): HTMLElement {
   const ghost = element.cloneNode(true) as HTMLElement;
@@ -350,6 +357,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const animate = Boolean(previousPath);
   const token = animate ? motion.begin() : activeNavigationToken;
   if (animate) activeNavigationToken = token;
+  const animationStartTime = animate ? nextNavigationStartTime() : undefined;
   navigationAnimating = animate;
   const axis: "x" | "y" = previousCategory && previousCategory !== category ? "x" : "y";
   const fromIndex = axis === "x" && previousCategory ? menu.indexOf(previousCategory) : previousCategory ? visiblePageIndex(previousCategory, previousPath) : 0;
@@ -396,8 +404,8 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   });
   const sameCategory = previousCategory === category;
   const sideAnimation = !sameCategory
-    ? createSecondaryNavigation(category, sidebarPath, animate, direction, token)
-    : (updateSecondarySelection(category, sidebarPath, animate, token), Promise.resolve([]));
+    ? createSecondaryNavigation(category, sidebarPath, animate, direction, token, animationStartTime)
+    : (updateSecondarySelection(category, sidebarPath, animate, token, animationStartTime), Promise.resolve([]));
   closeMenu();
 
   if (!animate) {
@@ -419,13 +427,14 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
     ...headingGhosts,
     ...(refreshWasVisible && path !== "/overview/status" ? [refreshButton] : []),
   ];
-  const entering = animateElements(enterItems, "enter", direction, axis, token, navigationMotion.contentEnterPx, !targetWasVisible);
-  const exitingAnimation = animateElements(exiting, "exit", direction, axis, token, navigationMotion.contentExitPx, false);
-  const primary = movePrimaryIndicator(true, token);
   if (!targetWasVisible) targetSection.style.opacity = "0";
+  const entering = animateElements(enterItems, "enter", direction, axis, token, navigationMotion.contentEnterPx, !targetWasVisible, animationStartTime);
+  const exitingAnimation = animateElements(exiting, "exit", direction, axis, token, navigationMotion.contentExitPx, false, animationStartTime);
+  const primary = movePrimaryIndicator(true, token, animationStartTime);
+  // Both page surfaces use the same timeline start so the outgoing and incoming pages crossfade together.
   const fadePage = (section: HTMLElement, opacity: string): Promise<boolean> => motion.animate(section, [
     { opacity: getComputedStyle(section).opacity }, { opacity },
-  ], { token, duration: navigationMotion.pageDurationMs, properties: ["opacity"] });
+  ], { token, duration: navigationMotion.pageDurationMs, ...(animationStartTime === undefined ? {} : { startTime: animationStartTime }), properties: ["opacity"] });
   const pageFades = [fadePage(targetSection, "1"), ...oldVisible.map((section) => fadePage(section, "0"))];
   const heightAnimation = motion.animate(pageStage, [
     { height: `${stageHeight}px` }, { height: `${targetSection.offsetHeight}px` },
@@ -975,20 +984,27 @@ function extensionButton(label: string): HTMLButtonElement {
 }
 function buildQQCapabilityTests(id: string): HTMLElement {
   const section = document.createElement("section"); section.className = "capability-tests";
-  const heading = document.createElement("h3"); heading.textContent = "能力测试";
   const introduction = document.createElement("p"); introduction.textContent = "腾讯公开文档标注主动推送已停止、普通文件暂未开放；手动测试可能被平台拒绝。每次确认后最多发送一次，媒体测试会先上传再发送，不自动重试。";
+  introduction.className = "capability-introduction";
   const sources = document.createElement("p");
+  sources.className = "capability-sources";
   const link = (label: string, href: string) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = label; return a; };
   sources.append(link("发送消息文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md"), document.createTextNode(" · "), link("富媒体文档", "https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md"));
-  const targetsHeading = document.createElement("h4"); targetsHeading.textContent = "最近接收的测试目标";
+  const targetPanel = document.createElement("div"); targetPanel.className = "capability-target-panel";
+  const targetHeading = document.createElement("div"); targetHeading.className = "capability-target-heading";
+  const targetsHeading = document.createElement("h3"); targetsHeading.textContent = "最近接收的测试目标";
   const note = document.createElement("p"); note.textContent = "仅显示本次运行中实际接收并接受的消息。被动回复通常为私聊 60 分钟、群聊 5 分钟，每条消息最多回复 5 次，实际以 QQ 平台为准。";
+  targetHeading.append(targetsHeading, note);
   type Target = { id: string; scope: "private" | "group"; receivedAt: string; replyExpiresAt: string | null };
   type Result = { state: "success" | "rejected" | "network_failure" | "unavailable"; interface: string; requestedAt: string; stage: string; httpStatus?: number; businessCode?: string; message?: string; serverAccepted: boolean; clientReceived: "unconfirmed" };
   let entries: Target[] = []; let busy = false;
-  const selectLabel = document.createElement("label"); selectLabel.className = "capability-select"; selectLabel.textContent = "测试目标";
+  const targetControls = document.createElement("div"); targetControls.className = "capability-target-controls";
+  const selectLabel = document.createElement("label"); selectLabel.className = "capability-select"; selectLabel.append(document.createTextNode("测试目标"));
   const select = document.createElement("select"); selectLabel.append(select);
-  const targetStatus = document.createElement("p"); targetStatus.setAttribute("role", "status");
+  const targetStatus = document.createElement("p"); targetStatus.className = "capability-target-status"; targetStatus.setAttribute("role", "status");
   const refresh = extensionButton("刷新测试目标");
+  refresh.classList.add("capability-refresh");
+  targetControls.append(selectLabel, refresh); targetPanel.append(targetHeading, targetControls, targetStatus);
   const list = document.createElement("div"); list.className = "capability-test-list";
   const tests: { kind: string; scope: Target["scope"]; media: boolean; button: HTMLButtonElement; result: HTMLElement }[] = [];
   function selectedTarget(): Target | undefined { return entries.find((entry) => entry.id === select.value); }
@@ -1025,10 +1041,13 @@ function buildQQCapabilityTests(id: string): HTMLElement {
     ["private-png", "私聊被动 PNG 图片", "private", true, "实际能力取决于机器人权限和平台返回。"],
     ["group-png", "群聊被动 PNG 图片", "group", true, "实际能力取决于机器人权限和平台返回。"],
   ] as const) {
-    const row = document.createElement("div"); row.className = "capability-test";
+    const row = document.createElement("article"); row.className = "capability-test";
+    const header = document.createElement("div"); header.className = "capability-test-header";
     const name = document.createElement("strong"); name.textContent = title;
+    const mode = document.createElement("span"); mode.className = "capability-test-mode"; mode.textContent = `${scope === "private" ? "私聊" : "群聊"} · ${media ? "被动" : "主动"}`;
+    header.append(name, mode);
     const details = document.createElement("p"); details.textContent = warning;
-    const result = document.createElement("p"); result.setAttribute("role", "status"); result.textContent = "未测试";
+    const result = document.createElement("p"); result.className = "capability-test-result"; result.dataset.state = "untested"; result.setAttribute("role", "status"); result.textContent = "未测试";
     const button = extensionButton("执行测试"); button.setAttribute("aria-label", `执行${title}`);
     const dialog = document.createElement("dialog"); dialog.className = "setup-dialog capability-confirm"; dialog.setAttribute("aria-label", `确认${title}`);
     const confirmation = document.createElement("p");
@@ -1048,19 +1067,21 @@ function buildQQCapabilityTests(id: string): HTMLElement {
     confirm.addEventListener("click", () => {
       const target = pendingTarget; pendingTarget = undefined; dialog.close();
       if (!target || busy) return;
-      busy = true; updateTargets(); result.textContent = "测试中…";
+      busy = true; updateTargets(); result.dataset.state = "testing"; result.textContent = "测试中…";
       void extensionRequest(`/api/v1/extensions/${encodeURIComponent(id)}/capability-test`, { targetId: target.id, kind, requestId: crypto.randomUUID() }).then((data) => {
         const value = (data as { result: Result }).result;
         const states: Record<Result["state"], string> = { success: "请求成功", rejected: "平台拒绝", network_failure: "网络失败", unavailable: "不可执行" };
+        result.dataset.state = value.state;
         result.textContent = `${states[value.state]} · 接口：${value.interface} · 请求时间：${new Date(value.requestedAt).toLocaleString()} · 阶段：${value.stage} · HTTP：${value.httpStatus ?? "无响应"} · QQ 业务码：${value.businessCode ?? "无"} · 信息：${value.message ?? "无"} · 发送接口成功响应：${value.serverAccepted ? "是" : "否或未确认"} · 客户端接收：未确认`;
       }).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "请求失败";
+        result.dataset.state = "network_failure";
         result.textContent = message === "无法连接 Stardust 服务端。" ? `网络失败：${message}发送结果未知，请先检查 QQ 客户端。` : `不可执行：${message}`;
       }).finally(() => { busy = false; updateTargets(); });
     });
-    row.append(name, details, result, button, dialog); list.append(row);
+    row.append(header, details, result, button, dialog); list.append(row);
   }
-  section.append(heading, introduction, sources, targetsHeading, note, selectLabel, refresh, targetStatus, list);
+  section.append(introduction, sources, targetPanel, list);
   updateTargets(); queueMicrotask(refreshTargets);
   const timer = setInterval(() => { if (!section.isConnected) clearInterval(timer); else updateTargets(); }, 1000);
   return section;
@@ -1082,6 +1103,21 @@ function extensionStatus(item: ExtensionView): string {
   return `${item.enabled ? "已启用" : "已停用"} · ${labels[item.state] ?? "已断开"}`;
 }
 function extensionPath(id: string): string { return `/extensions/installed/${id}`; }
+function extensionIcon(kind: string): SVGSVGElement {
+  const paths: Record<string, string[]> = {
+    extension: ["M8 3h3a2 2 0 1 1 4 0h3v5a2 2 0 1 1 0 4v5h-5a2 2 0 1 0-4 0H4v-5a2 2 0 1 1 0-4V3h4"],
+    config: ["M4 7h16M4 17h16", "M9 4v6M15 14v6"],
+    capabilities: ["M3 12h4l3-7 4 14 3-7h4"],
+    tools: ["M14 6a5 5 0 0 0-6 6l-5 5a2 2 0 0 0 3 3l5-5a5 5 0 0 0 6-6l-3 3-3-3z"],
+    skills: ["M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7l-8-4z", "m9 12 2 2 4-4"],
+  };
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("aria-hidden", "true"); icon.classList.add("extension-icon");
+  for (const d of paths[kind] ?? paths.extension!) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", d); icon.append(path);
+  }
+  return icon;
+}
 function extensionLink(label: string, path: string, className = "extension-link"): HTMLAnchorElement {
   return createPageLink({ label, path }, location.hash.slice(1), className, 1);
 }
@@ -1176,7 +1212,12 @@ function registerExtensionPages(item: ExtensionView): void {
   for (const page of item.managementPages) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(page.pageId) || !Object.hasOwn(extensionPageFactories, page.pageKind)) continue;
     const path = `${extensionPath(item.id)}/${page.pageId}`;
-    const link = extensionLink(page.title, path); const description = document.createElement("span"); description.textContent = page.description; link.append(description); links.append(link);
+    const link = extensionLink("", path, "extension-page-link");
+    const icon = document.createElement("span"); icon.className = "extension-icon-box"; icon.append(extensionIcon(page.pageKind));
+    const copy = document.createElement("span"); copy.className = "extension-page-copy";
+    const title = document.createElement("strong"); title.textContent = page.title;
+    const description = document.createElement("span"); description.textContent = page.description;
+    copy.append(title, description); link.append(icon, copy); links.append(link);
   }
   root.append(links); register(extensionPath(item.id), item.name, 1, root);
   for (const [index, page] of item.managementPages.entries()) {
@@ -1199,11 +1240,13 @@ function buildExtensionList(items: ExtensionView[]): void {
   const installed = items.filter((item) => item.installed);
   if (!installed.length) { const empty = document.createElement("p"); empty.textContent = "尚未安装扩展。"; extensionList.append(empty); }
   for (const item of installed) {
-    const card = extensionLink("", extensionPath(item.id), "extension-item extension-card");
+    const card = extensionLink("", extensionPath(item.id), "extension-card");
+    const icon = document.createElement("span"); icon.className = "extension-icon-box extension-card-icon"; icon.append(extensionIcon("extension"));
+    const copy = document.createElement("span"); copy.className = "extension-card-copy";
     const title = document.createElement("h2"); title.textContent = `${item.name} · ${item.version}`;
     const description = document.createElement("p"); description.textContent = item.description;
-    const status = document.createElement("p"); status.setAttribute("role", "status"); extensionListStatuses.set(item.id, status);
-    card.append(title, description, status); extensionList.append(card);
+    const status = document.createElement("span"); status.className = "extension-card-status"; status.setAttribute("role", "status"); extensionListStatuses.set(item.id, status);
+    copy.append(title, description, status); card.append(icon, copy); extensionList.append(card);
   }
   const available = items.filter((item) => !item.installed);
   if (available.length) {
