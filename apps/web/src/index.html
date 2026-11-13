@@ -10,9 +10,10 @@
     <script type="module" src="/main.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">跳转到主要内容</a>
     <div class="app-shell">
       <header class="site-header">
-        <a class="brand" href="#/overview/status" aria-label="Stardust 概览"><span class="brand-mark" aria-hidden="true">✦</span><span>STARDUST</span></a>
+        <a class="brand" href="#/overview/status" aria-label="Stardust 概览"><span class="brand-mark" aria-hidden="true">✦</span><span>STARDUST<small>星尘控制台</small></span></a>
         <nav id="primary-nav" class="primary-nav" aria-label="一级分类"></nav>
         <div class="header-controls">
           <div class="connection" role="status"><span class="status-dot" id="connection-dot" aria-hidden="true"></span><span id="connection-label">正在检测连接</span></div>
@@ -25,60 +26,80 @@
           <button id="menu-toggle" class="menu-toggle" type="button" aria-expanded="false" aria-controls="secondary-nav"><span id="menu-toggle-label">菜单</span><span aria-hidden="true">⌄</span></button>
           <div id="sidebar-heading" class="sidebar-heading"></div>
           <nav id="secondary-nav" class="secondary-nav" aria-label="当前分类菜单"></nav>
+          <div class="sidebar-footer"><span class="sidebar-star" aria-hidden="true">✦</span><strong>让想法连接起来。</strong><span>你的模型，你的工作空间。</span><div class="sidebar-caption">STARDUST / CONSOLE</div></div>
         </aside>
 
-        <main class="main" id="main-content">
+        <main class="main" id="main-content" tabindex="-1">
+          <div class="page-context"><span id="page-category">概览</span><span aria-hidden="true">/</span><span>工作空间</span><span class="context-line" aria-hidden="true"></span><span class="context-index" id="page-index">01</span></div>
           <div class="page-heading">
-            <div class="heading-copy"><p class="eyebrow" data-transition-order="0"><span aria-hidden="true"></span><span id="page-breadcrumb">STARDUST / 概览</span></p><h1 id="page-title" data-transition-order="1" tabindex="-1">运行概况</h1></div>
-            <button type="button" id="refresh-button" class="refresh-button" data-transition-order="2"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 12-1.8L20 12M4 12l1.9 2.8A7 7 0 0 0 18 15"/></svg><span id="refresh-label">刷新状态</span></button>
+            <div class="heading-copy"><h1 id="page-title" tabindex="-1">运行概况</h1><p id="page-description" class="page-description">一览服务状态，从这里开始你的工作。</p></div>
+            <button type="button" id="refresh-button" class="refresh-button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 12-1.8L20 12M4 12l1.9 2.8A7 7 0 0 0 18 15"/></svg><span id="refresh-label">刷新状态</span></button>
           </div>
 
           <div id="page-stage" class="page-stage">
-          <section id="page-overview" class="status-section nav-page" data-page="/overview/status" aria-labelledby="main-status">
-            <div class="section-label" data-transition-order="3"><span>服务连接</span></div>
-            <div class="status-main" data-transition-order="4"><div class="status-symbol" aria-hidden="true"><span></span></div><div class="status-copy" role="status" aria-live="polite"><h2 id="main-status">正在检查服务</h2><p id="status-description">正在请求服务状态</p></div></div>
-            <dl class="metrics" data-transition-order="5"><div class="metric"><dt>后端版本</dt><dd id="server-version">—</dd></div><div class="metric"><dt>运行时间</dt><dd id="server-uptime">—</dd></div><div class="metric"><dt>最近检查</dt><dd id="last-checked">—</dd></div></dl>
+          <section id="page-overview" class="nav-page overview-page" data-page="/overview/status" aria-labelledby="main-status">
+            <div class="status-section">
+              <div class="section-label"><span><i class="label-square" aria-hidden="true"></i>服务状态</span><span class="mono">SYSTEM STATUS</span></div>
+              <div class="status-main" id="status-panel" data-state="checking">
+                <div class="status-copy" role="status" aria-live="polite"><span class="status-eyebrow"><span id="health-state">CHECKING</span><span class="status-rule" aria-hidden="true"></span>STARDUST SERVER</span><h2 id="main-status">正在检查服务</h2><p id="status-description">正在请求服务状态</p><a class="text-link" href="#/settings/server">查看服务信息 <span aria-hidden="true">↗</span></a></div>
+                <div class="status-art" aria-hidden="true"><svg viewBox="0 0 240 180"><path class="art-grid" d="M0 30H240M0 90H240M0 150H240M60 0V180M120 0V180M180 0V180"/><path class="art-orbit" d="M120 12 198 90 120 168 42 90Z"/><path class="art-orbit" d="M120 40 170 90 120 140 70 90Z"/><path class="art-star" d="M120 55 130 80 155 90 130 100 120 125 110 100 85 90 110 80Z"/><path class="art-node" d="M116 8h8v8h-8zM194 86h8v8h-8zM38 86h8v8h-8zM116 164h8v8h-8z"/></svg><span>CONNECTED BY STARDUST</span></div>
+              </div>
+              <dl class="metrics"><div class="metric"><dt><span>后端版本</span><span class="metric-index">01</span></dt><dd id="server-version">—</dd></div><div class="metric"><dt><span>运行时间</span><span class="metric-index">02</span></dt><dd id="server-uptime">—</dd></div><div class="metric"><dt><span>最近检查</span><span class="metric-index">03</span></dt><dd id="last-checked">—</dd></div></dl>
+            </div>
+            <div class="workspace-heading"><h2>工作空间</h2><span>配置、连接与观察</span></div>
+            <div class="workspace-cards">
+              <a class="workspace-card" href="#/model/service/config"><div class="card-topline"><span class="card-number">01 / MODEL</span><span class="card-arrow" aria-hidden="true">↗</span></div><span class="workspace-icon" aria-hidden="true">◇</span><h3>模型服务</h3><p>连接模型，配置你的智能核心。</p><div class="card-bottom"><span id="overview-model">正在读取配置</span><span aria-hidden="true">→</span></div></a>
+              <a class="workspace-card" href="#/extensions/installed"><div class="card-topline"><span class="card-number">02 / EXTENSIONS</span><span class="card-arrow" aria-hidden="true">↗</span></div><span class="workspace-icon extension-glyph" aria-hidden="true">⊞</span><h3>扩展中心</h3><p>接入消息渠道，拓展服务能力。</p><div class="card-bottom"><span id="overview-extensions">正在读取扩展</span><span aria-hidden="true">→</span></div></a>
+              <a class="workspace-card" href="#/model/logs"><div class="card-topline"><span class="card-number">03 / OBSERVE</span><span class="card-arrow" aria-hidden="true">↗</span></div><span class="workspace-icon log-glyph" aria-hidden="true">≡</span><h3>运行日志</h3><p>查看实时记录，追踪服务运行。</p><div class="card-bottom"><span>打开日志面板</span><span aria-hidden="true">→</span></div></a>
+            </div>
+            <a class="overview-prompt" href="#/model/chat"><span><strong>准备好开始了吗？</strong><span>发送一条消息，试试你的模型。</span></span><span>进入测试对话 <span aria-hidden="true">↗</span></span></a>
           </section>
 
           <section class="nav-page content-section model-chat" data-page="/model/chat" hidden>
-            <div id="tool-admin" class="tool-admin" data-transition-order="1">
+            <div class="panel-heading"><span><i class="label-square" aria-hidden="true"></i>对话工作台</span><span class="panel-meta">单轮测试 · 不保存历史</span></div>
+            <div id="tool-admin" class="tool-admin">
+              <span class="small-label">TOOL / 工具权限</span>
               <p id="tool-admin-status" role="status"></p>
               <form id="tool-admin-form" hidden><label for="tool-admin-token">管理员口令</label><input id="tool-admin-token" type="password" autocomplete="current-password"><button type="submit" class="setup-secondary">登录以使用 Tool</button></form>
             </div>
-            <div id="chat-messages" class="chat-messages" data-transition-order="2" aria-live="polite"></div>
-            <form id="chat-form"><label data-transition-order="3" for="chat-input">消息</label><textarea data-transition-order="4" id="chat-input" rows="4" maxlength="16000" required></textarea><button data-transition-order="5" class="setup-primary" type="submit" id="chat-send">发送</button><p data-transition-order="6" id="chat-status" class="model-feedback" role="status" aria-live="polite"></p></form>
+            <div class="conversation"><div id="chat-messages" class="chat-messages" aria-live="polite"></div><div class="chat-empty"><span aria-hidden="true">✦</span><h2>从一个想法开始</h2><p>向当前模型发送消息，检验它的回答。</p><a class="text-link" href="#/model/service/config">查看模型配置 <span aria-hidden="true">↗</span></a></div></div>
+            <form id="chat-form"><label for="chat-input">发送消息</label><textarea id="chat-input" rows="3" maxlength="16000" placeholder="在这里输入你的消息…" aria-describedby="chat-input-note" required></textarea><div class="composer-bottom"><span id="chat-input-note">每次请求仅发送当前消息</span><button class="setup-primary" type="submit" id="chat-send">发送消息 <span aria-hidden="true">↗</span></button></div><p id="chat-status" class="model-feedback" role="status" aria-live="polite"></p></form>
           </section>
           <section class="nav-page content-section" data-page="/model/logs" hidden>
-            <div data-transition-order="2" class="log-panel">
-              <div class="log-toolbar"><span id="log-connection" role="status">日志服务未连接</span><div class="log-actions"><button id="log-pause" type="button" class="setup-secondary">暂停更新</button><button id="log-copy" type="button" class="setup-secondary">复制日志</button><button id="log-clear" type="button" class="setup-secondary">清空显示</button></div></div>
+            <div class="log-panel">
+              <div class="log-toolbar"><span class="log-heading"><span class="small-label">LIVE LOGS</span><span id="log-connection" role="status">日志服务未连接</span></span><div class="log-actions"><button id="log-pause" type="button" class="setup-secondary">暂停更新</button><button id="log-copy" type="button" class="setup-secondary">复制日志</button><button id="log-clear" type="button" class="setup-secondary">清空显示</button></div></div>
               <div id="log-list" class="log-list" tabindex="0" aria-label="运行日志"></div>
+              <p class="log-footnote">显示 Server、模型和扩展的近期记录。清空显示仅影响当前页面。</p>
             </div>
           </section>
 
           <section class="nav-page content-section model-settings" data-page="/model/service/config" hidden>
             <form id="model-form">
-              <label data-transition-order="2">API Base URL<input id="model-url" type="url" placeholder="https://example.com/v1" required></label>
-              <label data-transition-order="3">模型 ID<input id="model-id" required></label>
-              <label data-transition-order="4">请求超时（毫秒）<input id="model-timeout" type="number" min="1000" max="120000" step="1" required></label>
-              <label class="model-check" data-transition-order="5"><input id="model-stream" type="checkbox"> 流式请求</label>
-              <label data-transition-order="6">API Key<input id="model-key" type="password" autocomplete="new-password" placeholder="留空以保留已保存的密钥"></label>
-              <p data-transition-order="7" id="model-key-status" class="model-note"></p>
-              <label class="model-check" data-transition-order="8"><input id="model-clear-key" type="checkbox"> 清除文件中保存的 API Key</label>
-              <div class="model-actions" data-transition-order="9"><button class="setup-primary" type="submit" id="model-save">保存配置</button></div>
-              <p data-transition-order="10" id="model-status" class="model-feedback" role="status" aria-live="polite"></p>
+              <div class="form-section"><div class="form-section-heading"><span class="small-label">01 / CONNECTION</span><h2>模型连接</h2><p>连接兼容 OpenAI 的模型服务。</p></div><div class="form-fields">
+              <label>API Base URL<input id="model-url" type="url" placeholder="https://example.com/v1" required><span class="field-hint">填写模型服务的 API 地址，通常以 /v1 结尾。</span></label>
+              <label>模型 ID<input id="model-id" placeholder="输入服务提供的模型名称" required></label>
+              </div></div>
+              <div class="form-section"><div class="form-section-heading"><span class="small-label">02 / REQUEST</span><h2>请求设置</h2><p>设置等待时间和响应方式。</p></div><div class="form-fields">
+              <label>请求超时（毫秒）<input id="model-timeout" type="number" min="1000" max="120000" step="1" required><span class="field-hint">允许范围：1,000–120,000 毫秒。</span></label>
+              <label class="model-check check-panel"><input id="model-stream" type="checkbox"><span>流式请求<small>服务端收齐模型回复后，在页面中完整显示。</small></span></label>
+              </div></div>
+              <div class="form-section"><div class="form-section-heading"><span class="small-label">03 / AUTHENTICATION</span><h2>访问凭证</h2><p>管理连接模型所需的 API Key。</p></div><div class="form-fields">
+              <label>API Key<input id="model-key" type="password" autocomplete="new-password" placeholder="留空以保留已保存的密钥"></label>
+              <p id="model-key-status" class="model-note"></p>
+              <label class="model-check"><input id="model-clear-key" type="checkbox"> 清除文件中保存的 API Key</label>
+              </div></div>
+              <div class="form-footer"><p id="model-status" class="model-feedback" role="status" aria-live="polite"></p><div class="model-actions"><a class="text-link" href="#/model/service/test">前往连接测试 <span aria-hidden="true">↗</span></a><button class="setup-primary" type="submit" id="model-save">保存配置</button></div></div>
             </form>
           </section>
 
           <section class="nav-page content-section" data-page="/model/service/test" hidden>
-            <p data-transition-order="2" class="section-copy">测试当前已保存的模型配置。</p>
-            <button data-transition-order="3" class="setup-primary" type="button" id="model-test">测试连接</button>
-            <p data-transition-order="4" id="model-test-status" class="model-feedback" role="status" aria-live="polite"></p>
+            <div class="test-layout"><div class="test-intro"><span class="small-label">CONNECTION CHECK</span><span class="test-symbol" aria-hidden="true">◇</span><h2>检查模型是否准备就绪</h2><p class="section-copy">使用已保存的配置发起一次模型请求，确认服务可以正常响应。</p><p class="model-note">连接测试可能产生模型调用费用。</p><div class="model-actions"><button class="setup-primary" type="button" id="model-test">测试连接 <span aria-hidden="true">↗</span></button><a class="text-link" href="#/model/service/config">修改配置</a></div></div><div class="test-result"><span class="small-label">TEST RESULT / 测试结果</span><p id="model-test-status" class="model-feedback" role="status" aria-live="polite"></p></div></div>
           </section>
-          <section class="nav-page content-section" data-page="/extensions/installed" hidden><div id="extension-list" data-transition-order="2"></div><p id="extension-feedback" class="model-feedback" role="status" aria-live="polite"></p></section>
-          <section class="nav-page content-section" data-page="/settings/general" hidden><dl class="settings-list"><div data-transition-order="2"><dt>产品名称</dt><dd>Stardust</dd></div><div data-transition-order="3"><dt>WebUI 标题</dt><dd id="settings-web-title">—</dd></div></dl></section>
-          <section class="nav-page content-section" data-page="/settings/server" hidden><dl class="settings-list"><div data-transition-order="2"><dt>当前访问地址</dt><dd id="settings-access-url">—</dd></div></dl></section>
+          <section class="nav-page content-section extensions-section" data-page="/extensions/installed" hidden><div class="panel-heading"><span><i class="label-square" aria-hidden="true"></i>扩展库</span><span class="panel-meta">渠道与工具</span></div><div id="extension-list"></div><p id="extension-feedback" class="model-feedback" role="status" aria-live="polite"></p></section>
+          <section class="nav-page content-section" data-page="/settings/general" hidden><div class="form-section"><div class="form-section-heading"><span class="small-label">WORKSPACE</span><h2>工作空间信息</h2><p>当前 Stardust 实例的基本信息。</p></div><dl class="settings-list"><div><dt>产品名称</dt><dd>Stardust <span class="inline-muted">/ 星尘</span></dd></div><div><dt>WebUI 标题</dt><dd id="settings-web-title">—</dd></div></dl></div></section>
+          <section class="nav-page content-section" data-page="/settings/server" hidden><div class="form-section"><div class="form-section-heading"><span class="small-label">SERVER</span><h2>服务信息</h2><p>浏览器当前连接的服务地址。</p></div><dl class="settings-list"><div><dt>当前访问地址</dt><dd id="settings-access-url" class="mono">—</dd></div></dl></div></section>
           </div>
-          <div class="end-mark" aria-hidden="true"><span></span> STARDUST</div>
+          <footer class="end-mark"><span>✦ STARDUST</span><span>保持简单，连接更多。</span></footer>
           <div id="setup-state-error" class="setup-state-error" role="alert" hidden>无法读取初始化状态。<button type="button" id="setup-retry">重试</button></div>
         </main>
       </div>
@@ -91,6 +112,7 @@
             <select id="setup-theme-select" aria-label="向导主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
           </label>
         </div>
+        <div class="setup-progress" aria-label="初始化进度"><span>欢迎</span><span>基础设置</span><span>服务设置</span><span>确认配置</span></div>
         <div class="setup-step" data-step="0">
           <h2 id="setup-heading">欢迎您使用星尘！</h2>
           <p>本设置向导将引导您一步步配置自己的星屑。</p>

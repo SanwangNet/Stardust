@@ -114,7 +114,6 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/index.html": { filename: "index.html", contentType: "text/html; charset=utf-8" },
   "/main.js": { filename: "main.js", contentType: "text/javascript; charset=utf-8" },
   "/model-errors.js": { filename: "model-errors.js", contentType: "text/javascript; charset=utf-8" },
-  "/navigation-motion.js": { filename: "navigation-motion.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };

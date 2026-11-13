@@ -1,5 +1,4 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
-import { getNavigationDirection, getStaggerTiming, NavigationMotion, navigationMotion, type NavigationDirection } from "./navigation-motion.js";
 
 interface HealthResponse {
   status: "ok";
@@ -37,22 +36,30 @@ const menu: MenuCategory[] = [
   { label: "扩展", items: [{ label: "已安装扩展", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
 ];
+const pageDescriptions: Record<string, string> = {
+  "/overview/status": "一览服务状态，从这里开始你的工作。",
+  "/model/chat": "与当前模型对话，验证你的想法。",
+  "/model/service/config": "连接模型，调整请求方式与访问凭证。",
+  "/model/service/test": "确认当前模型配置可以正常响应。",
+  "/model/logs": "观察服务、模型与扩展的实时运行记录。",
+  "/extensions/installed": "管理消息渠道，让 Stardust 连接更多可能。",
+  "/settings/general": "查看当前工作空间的基本信息。",
+  "/settings/server": "查看当前服务的连接信息。",
+};
 const primaryNav = getElement<HTMLElement>("primary-nav");
 const secondaryNav = getElement<HTMLElement>("secondary-nav");
 const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
 const menuToggle = getElement<HTMLButtonElement>("menu-toggle");
 const pageTitle = getElement<HTMLElement>("page-title");
-const breadcrumb = getElement<HTMLElement>("page-breadcrumb");
 const sidebarHeading = getElement<HTMLElement>("sidebar-heading");
 const menuToggleLabel = getElement<HTMLElement>("menu-toggle-label");
 const pageStage = getElement<HTMLElement>("page-stage");
 const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
-const extensionRoutes = new Map<string, { page: MenuPage; index: number; section: HTMLElement; owner: string }>();
+const extensionRoutes = new Map<string, { page: MenuPage; section: HTMLElement; owner: string }>();
 let extensionsResolved = false;
 const expanded = new Set<string>();
 const lastVisited = new Map<string, string>();
 const routeStates = new Map<string, { scrollX: number; scrollY: number; sidebarScrollTop: number; focus?: HTMLElement }>();
-const motion = new NavigationMotion();
 const primaryIndicator = document.createElement("span");
 primaryIndicator.className = "primary-indicator";
 primaryIndicator.setAttribute("aria-hidden", "true");
@@ -65,35 +72,16 @@ let webTitle = "Stardust";
 let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
-let activeNavigationToken = 0;
-let navigationAnimating = false;
 
 function pages(category: MenuCategory): MenuPage[] {
   return category.items.flatMap((item) => "children" in item ? item.children : [item]);
-}
-function visiblePageIndex(category: MenuCategory, path: string): number {
-  const extensionRoute = extensionRoutes.get(path);
-  if (category === menu[2] && extensionRoute) return extensionRoute.index;
-  let index = 0;
-  for (const item of category.items) {
-    if (!("children" in item)) {
-      if (item.path === path) return index;
-      index += 1;
-      continue;
-    }
-    index += 1;
-    for (const child of item.children) {
-      if (child.path === path) return index;
-      index += 1;
-    }
-  }
-  return index;
 }
 function closeMenu(): void {
   sidebar.classList.remove("is-open");
   menuToggle.setAttribute("aria-expanded", "false");
 }
 function markNavigationIntent(path: string, event: MouseEvent): void {
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
   if (location.hash.slice(1) === path) {
     event.preventDefault();
     pageTitle.focus({ preventScroll: true });
@@ -101,12 +89,11 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
   }
   pendingNavigationOrigin = "click";
 }
-function createPageLink(page: MenuPage, path: string, className: string, order: number): HTMLAnchorElement {
+function createPageLink(page: MenuPage, path: string, className: string): HTMLAnchorElement {
   const link = document.createElement("a");
   link.href = `#${page.path}`;
   link.className = className;
   link.textContent = page.label;
-  link.dataset.transitionOrder = String(order);
   if (page.path === path) link.setAttribute("aria-current", "page");
   link.addEventListener("click", (event) => {
     closeMenu();
@@ -140,21 +127,13 @@ function setGroupExpanded(groupId: string, isExpanded: boolean, category: MenuCa
   children.setAttribute("aria-hidden", String(!isExpanded));
   children.inert = !isExpanded;
   const currentChild = category.items.find((item): item is MenuGroup => "children" in item && item.id === groupId)?.children.some((child) => child.path === path);
-  if (currentChild && !isExpanded) moveSecondaryIndicator(true, activeNavigationToken, button);
-  if (currentChild && isExpanded) {
-    const complete = (): void => moveSecondaryIndicator(true, activeNavigationToken);
-    children.addEventListener("transitionend", (event) => {
-      if (event.propertyName === "grid-template-rows") complete();
-    }, { once: true });
-    window.setTimeout(complete, navigationMotion.submenuDurationMs + 32);
-  }
+  if (currentChild) moveSecondaryIndicator(isExpanded ? undefined : button);
 }
-function createSecondaryNavigation(category: MenuCategory, path: string, animate: boolean, direction: NavigationDirection, token: number, startTime?: number): Promise<boolean[]> {
+function createSecondaryNavigation(category: MenuCategory, path: string): void {
   secondaryNav.replaceChildren(secondaryIndicator);
-  let order = 0;
   for (const item of category.items) {
     if (!("children" in item)) {
-      secondaryNav.append(createPageLink(item, path, "secondary-link", order++));
+      secondaryNav.append(createPageLink(item, path, "secondary-link"));
       continue;
     }
     const group = document.createElement("div");
@@ -163,7 +142,6 @@ function createSecondaryNavigation(category: MenuCategory, path: string, animate
     button.type = "button";
     button.id = `nav-toggle-${item.id}`;
     button.className = "nav-group-toggle";
-    button.dataset.transitionOrder = String(order++);
     button.setAttribute("aria-expanded", String(expanded.has(item.id)));
     button.setAttribute("aria-controls", `nav-children-${item.id}`);
     if (item.children.some((page) => page.path === path)) button.classList.add("has-current");
@@ -173,7 +151,7 @@ function createSecondaryNavigation(category: MenuCategory, path: string, animate
     button.addEventListener("click", () => {
       setGroupExpanded(item.id, !expanded.has(item.id), category, currentPath);
       button.focus({ preventScroll: true });
-      moveSecondaryIndicator(true, activeNavigationToken);
+      moveSecondaryIndicator();
     });
     group.append(button);
     const children = document.createElement("div");
@@ -184,17 +162,14 @@ function createSecondaryNavigation(category: MenuCategory, path: string, animate
     children.inert = !expanded.has(item.id);
     const inner = document.createElement("div");
     inner.className = "nav-children-inner";
-    for (const page of item.children) inner.append(createPageLink(page, path, "secondary-link child-link", order++));
+    for (const page of item.children) inner.append(createPageLink(page, path, "secondary-link child-link"));
     children.append(inner);
     group.append(children);
     secondaryNav.append(group);
   }
-  const sideItems = Array.from(secondaryNav.querySelectorAll<HTMLElement>("[data-transition-order]"));
-  const entering = animate ? animateElements(sideItems, "enter", direction, "x", token, navigationMotion.sidebarEnterPx, true, startTime) : Promise.resolve([]);
-  moveSecondaryIndicator(animate, token, undefined, startTime);
-  return entering;
+  moveSecondaryIndicator();
 }
-function updateSecondarySelection(category: MenuCategory, path: string, animate: boolean, token: number, startTime?: number): void {
+function updateSecondarySelection(category: MenuCategory, path: string): void {
   secondaryNav.querySelectorAll<HTMLAnchorElement>("a.secondary-link").forEach((link) => {
     if (link.hash.slice(1) === path) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -205,35 +180,20 @@ function updateSecondarySelection(category: MenuCategory, path: string, animate:
     document.getElementById(`nav-toggle-${item.id}`)?.classList.toggle("has-current", currentChild);
     if (currentChild && !expanded.has(item.id)) setGroupExpanded(item.id, true, category, path);
   }
-  moveSecondaryIndicator(animate, token, undefined, startTime);
+  moveSecondaryIndicator();
 }
-function movePrimaryIndicator(animate: boolean, token: number, startTime?: number): Promise<boolean> {
-  if (!activeCategory) return Promise.resolve(false);
+function movePrimaryIndicator(): void {
+  if (!activeCategory) return;
   const link = primaryLinks.get(activeCategory);
-  if (!link) return Promise.resolve(false);
+  if (!link) return;
   const navRect = primaryNav.getBoundingClientRect();
   const linkRect = link.getBoundingClientRect();
   const x = linkRect.left - navRect.left + primaryNav.scrollLeft;
   const width = linkRect.width;
-  if (!animate || motion.isReducedMotion()) {
-    primaryIndicator.style.transform = `translateX(${x}px)`;
-    primaryIndicator.style.width = `${width}px`;
-    return Promise.resolve(true);
-  }
-  const computed = getComputedStyle(primaryIndicator);
-  const transform = computed.transform === "none" ? "translateX(0px)" : computed.transform;
-  return motion.animate(primaryIndicator, [
-    { transform, width: computed.width },
-    { transform: `translateX(${x}px)`, width: `${width}px` },
-  ], {
-    token,
-    duration: navigationMotion.navigationDurationMs,
-    ...(startTime === undefined ? {} : { startTime }),
-    properties: ["transform", "width"],
-    onFinish: () => { primaryIndicator.style.transform = `translateX(${x}px)`; primaryIndicator.style.width = `${width}px`; },
-  });
+  primaryIndicator.style.transform = `translateX(${x}px)`;
+  primaryIndicator.style.width = `${width}px`;
 }
-function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: HTMLElement, startTime?: number): void {
+function moveSecondaryIndicator(forcedTarget?: HTMLElement): void {
   const selected = forcedTarget ?? secondaryNav.querySelector<HTMLElement>('[aria-current="page"]');
   if (!selected) return;
   const closedGroup = selected.closest<HTMLElement>(".nav-children[data-expanded='false']");
@@ -242,76 +202,8 @@ function moveSecondaryIndicator(animate: boolean, token: number, forcedTarget?: 
   const rect = target.getBoundingClientRect();
   const y = rect.top - navRect.top + secondaryNav.scrollTop;
   const height = rect.height;
-  if (!animate || motion.isReducedMotion()) {
-    secondaryIndicator.style.transform = `translateY(${y}px)`;
-    secondaryIndicator.style.height = `${height}px`;
-    return;
-  }
-  const computed = getComputedStyle(secondaryIndicator);
-  const transform = computed.transform === "none" ? "translateY(0px)" : computed.transform;
-  void motion.animate(secondaryIndicator, [
-    { transform, height: computed.height },
-    { transform: `translateY(${y}px)`, height: `${height}px` },
-  ], {
-    token,
-    duration: navigationMotion.navigationDurationMs,
-    ...(startTime === undefined ? {} : { startTime }),
-    properties: ["transform", "height"],
-    onFinish: () => { secondaryIndicator.style.transform = `translateY(${y}px)`; secondaryIndicator.style.height = `${height}px`; },
-  });
-}
-function orderedTransitionItems(root: ParentNode): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>("[data-transition-order]"))
-    .filter((element) => !element.hidden)
-    .sort((left, right) => Number(left.dataset.transitionOrder) - Number(right.dataset.transitionOrder));
-}
-function motionTranslate(axis: "x" | "y", amount: number): string {
-  return axis === "x" ? `${amount}px 0px` : `0px ${amount}px`;
-}
-function animateElements(elements: HTMLElement[], mode: "enter" | "exit", direction: NavigationDirection, axis: "x" | "y", token: number, distance: number, initialize: boolean, startTime?: number): Promise<boolean[]> {
-  const selected = [...new Set(elements)];
-  return Promise.all(selected.map((element, index) => {
-    const timing = getStaggerTiming(index);
-    const computed = getComputedStyle(element);
-    let translate = computed.translate === "none" ? "0px 0px" : computed.translate;
-    let opacity = computed.opacity;
-    if (mode === "enter" && initialize) {
-      translate = motionTranslate(axis, direction * distance);
-      opacity = "0";
-      element.style.translate = translate;
-      element.style.opacity = opacity;
-    }
-    const targetTranslate = mode === "enter" ? "0px 0px" : motionTranslate(axis, -direction * distance);
-    const targetOpacity = mode === "enter" ? "1" : "0";
-    return motion.animate(element, [
-      { translate, opacity },
-      { translate: targetTranslate, opacity: targetOpacity },
-    ], {
-      token,
-      duration: timing.duration,
-      delay: timing.delay,
-      ...(startTime === undefined ? {} : { startTime }),
-      properties: ["translate", "opacity"],
-      onFinish: mode === "enter" ? () => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); } : undefined,
-    });
-  }));
-}
-function nextNavigationStartTime(): number {
-  const timelineTime = document.timeline.currentTime;
-  return (typeof timelineTime === "number" ? timelineTime : performance.now()) + 16;
-}
-function createHeadingGhost(element: HTMLElement): HTMLElement {
-  const ghost = element.cloneNode(true) as HTMLElement;
-  ghost.removeAttribute("id");
-  ghost.removeAttribute("tabindex");
-  ghost.removeAttribute("data-transition-order");
-  ghost.setAttribute("aria-hidden", "true");
-  ghost.classList.add("transition-ghost");
-  ghost.style.top = `${element.offsetTop}px`;
-  ghost.style.left = `${element.offsetLeft}px`;
-  ghost.style.width = `${element.offsetWidth}px`;
-  element.parentElement!.append(ghost);
-  return ghost;
+  secondaryIndicator.style.transform = `translateY(${y}px)`;
+  secondaryIndicator.style.height = `${height}px`;
 }
 function saveRouteState(path: string): void {
   if (!path) return;
@@ -330,6 +222,8 @@ function restoreRouteState(path: string, origin: "click" | "history" | "programm
   if (origin === "history" && state) {
     window.scrollTo({ left: state.scrollX, top: state.scrollY, behavior: "instant" });
     sidebar.scrollTop = state.sidebarScrollTop;
+  } else {
+    window.scrollTo({ left: 0, top: 0, behavior: "instant" });
   }
 }
 function renderNavigation(origin: "click" | "history" | "programmatic" | "initial" = "history"): void {
@@ -346,123 +240,46 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   } else if (!location.hash) history.replaceState(null, "", `#${path}`);
   const page = dynamic?.page ?? pages(category).find((item) => item.path === path)!;
   const sidebarPath = dynamic ? "/extensions/installed" : path;
+  const pageHeading = document.querySelector<HTMLElement>(".page-heading")!;
+  pageHeading.classList.toggle("is-extension-detail", Boolean(dynamic));
   if (currentPath === path && currentPath) {
     if (origin === "programmatic") pageTitle.focus({ preventScroll: true });
     return;
   }
 
-  const previousPath = currentPath;
-  const previousCategory = activeCategory;
-  if (previousPath) saveRouteState(previousPath);
-  const animate = Boolean(previousPath);
-  const token = animate ? motion.begin() : activeNavigationToken;
-  if (animate) activeNavigationToken = token;
-  const animationStartTime = animate ? nextNavigationStartTime() : undefined;
-  navigationAnimating = animate;
-  const axis: "x" | "y" = previousCategory && previousCategory !== category ? "x" : "y";
-  const fromIndex = axis === "x" && previousCategory ? menu.indexOf(previousCategory) : previousCategory ? visiblePageIndex(previousCategory, previousPath) : 0;
-  const toIndex = axis === "x" ? menu.indexOf(category) : visiblePageIndex(category, path);
-  const direction = getNavigationDirection(fromIndex, toIndex);
-  const oldVisible = navPages.filter((section) => !section.hidden && section.dataset.page !== path);
-  const targetSection = navPages.find((section) => section.dataset.page === path)!;
-  const targetWasVisible = !targetSection.hidden;
-  const stageHeight = pageStage.getBoundingClientRect().height;
-  if (animate) pageStage.style.height = `${stageHeight}px`;
-  const refreshWasVisible = !refreshButton.hidden;
-  const headingGhosts = animate ? [
-    ...Array.from(document.querySelectorAll<HTMLElement>(".heading-copy > .transition-ghost")),
-    ...(pageTitle.textContent !== page.label ? [createHeadingGhost(pageTitle)] : []),
-    ...(breadcrumb.textContent !== `STARDUST / ${category.label}` ? [createHeadingGhost(breadcrumb)] : []),
-  ] : [];
-
+  const categoryChanged = activeCategory !== category;
+  if (currentPath) saveRouteState(currentPath);
   currentPath = path;
   activeCategory = category;
   currentTitle = page.label;
   lastVisited.set(category.label, path);
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
   pageTitle.textContent = page.label;
-  breadcrumb.textContent = `STARDUST / ${category.label}`;
+  getElement<HTMLElement>("page-category").textContent = category.label;
+  getElement<HTMLElement>("page-index").textContent = String(menu.indexOf(category) + 1).padStart(2, "0");
+  getElement<HTMLElement>("page-description").textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
   sidebarHeading.textContent = category.label;
   menuToggleLabel.textContent = `${category.label} / ${page.label}`;
   document.title = `${currentTitle} · ${webTitle}`;
   for (const section of navPages) {
-    if (section.dataset.page === path) {
-      section.hidden = false;
-      section.removeAttribute("aria-hidden");
-      section.inert = false;
-    } else if (!section.hidden) {
-      section.setAttribute("aria-hidden", "true");
-      section.inert = true;
-    }
+    const hidden = section.dataset.page !== path;
+    section.hidden = hidden;
+    section.inert = hidden;
+    section.removeAttribute("aria-hidden");
   }
-  if (path === "/overview/status") refreshButton.hidden = false;
+  refreshButton.hidden = path !== "/overview/status";
   primaryLinks.forEach((link, item) => {
     const targetPath = lastVisited.get(item.label) ?? pages(item)[0]!.path;
     link.href = `#${targetPath}`;
     if (item === category) link.setAttribute("aria-current", "true");
     else link.removeAttribute("aria-current");
   });
-  const sameCategory = previousCategory === category;
-  const sideAnimation = !sameCategory
-    ? createSecondaryNavigation(category, sidebarPath, animate, direction, token, animationStartTime)
-    : (updateSecondarySelection(category, sidebarPath, animate, token, animationStartTime), Promise.resolve([]));
+  if (categoryChanged) createSecondaryNavigation(category, sidebarPath);
+  else updateSecondarySelection(category, sidebarPath);
   closeMenu();
-
-  if (!animate) {
-    navPages.forEach((section) => { section.hidden = section.dataset.page !== path; section.inert = section.hidden; section.removeAttribute("aria-hidden"); });
-    refreshButton.hidden = path !== "/overview/status";
-    void movePrimaryIndicator(false, token);
-    moveSecondaryIndicator(false, token);
-    return;
-  }
-
-  const heading = document.querySelector<HTMLElement>(".page-heading")!;
-  const enteringHeading = orderedTransitionItems(heading).filter((element) => element !== refreshButton || path === "/overview/status");
-  const enteringContent = orderedTransitionItems(targetSection);
-  const enterItems = [...enteringHeading, ...enteringContent, sidebarHeading, menuToggleLabel];
-  sidebarHeading.dataset.transitionOrder = "0";
-  menuToggleLabel.dataset.transitionOrder = "0";
-  const exiting = [
-    ...oldVisible.flatMap((section) => orderedTransitionItems(section)),
-    ...headingGhosts,
-    ...(refreshWasVisible && path !== "/overview/status" ? [refreshButton] : []),
-  ];
-  if (!targetWasVisible) targetSection.style.opacity = "0";
-  const entering = animateElements(enterItems, "enter", direction, axis, token, navigationMotion.contentEnterPx, !targetWasVisible, animationStartTime);
-  const exitingAnimation = animateElements(exiting, "exit", direction, axis, token, navigationMotion.contentExitPx, false, animationStartTime);
-  const primary = movePrimaryIndicator(true, token, animationStartTime);
-  // Both page surfaces use the same timeline start so the outgoing and incoming pages crossfade together.
-  const fadePage = (section: HTMLElement, opacity: string): Promise<boolean> => motion.animate(section, [
-    { opacity: getComputedStyle(section).opacity }, { opacity },
-  ], { token, duration: navigationMotion.pageDurationMs, ...(animationStartTime === undefined ? {} : { startTime: animationStartTime }), properties: ["opacity"] });
-  const pageFades = [fadePage(targetSection, "1"), ...oldVisible.map((section) => fadePage(section, "0"))];
-  const heightAnimation = motion.animate(pageStage, [
-    { height: `${stageHeight}px` }, { height: `${targetSection.offsetHeight}px` },
-  ], { token, duration: navigationMotion.pageDurationMs, properties: ["height"] });
-  void Promise.all([entering, exitingAnimation, primary, sideAnimation, heightAnimation, ...pageFades]).then(() => {
-    if (!motion.isCurrent(token)) return;
-    for (const section of oldVisible) {
-      section.hidden = true;
-      section.removeAttribute("aria-hidden");
-      section.style.removeProperty("opacity");
-      section.querySelectorAll<HTMLElement>("[data-transition-order]").forEach((element) => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); });
-    }
-    for (const element of exiting) {
-      if (element.classList.contains("transition-ghost")) element.remove();
-      else { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); }
-    }
-    targetSection.querySelectorAll<HTMLElement>("[data-transition-order]").forEach((element) => { element.style.removeProperty("translate"); element.style.removeProperty("opacity"); });
-    targetSection.style.removeProperty("opacity");
-    targetSection.inert = false;
-    pageStage.style.removeProperty("height");
-    sidebarHeading.style.removeProperty("translate"); sidebarHeading.style.removeProperty("opacity");
-    menuToggleLabel.style.removeProperty("translate"); menuToggleLabel.style.removeProperty("opacity");
-    refreshButton.hidden = path !== "/overview/status";
-    navigationAnimating = false;
-    void movePrimaryIndicator(false, token);
-    moveSecondaryIndicator(false, token);
-    restoreRouteState(path, origin);
-  });
+  movePrimaryIndicator();
+  moveSecondaryIndicator();
+  restoreRouteState(path, origin);
 }
 function setWebTitle(title: string): void {
   webTitle = title;
@@ -477,6 +294,23 @@ function goToOverview(): void {
 menuToggle.addEventListener("click", () => {
   const open = sidebar.classList.toggle("is-open");
   menuToggle.setAttribute("aria-expanded", String(open));
+});
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  const link = event.target.closest<HTMLAnchorElement>('a[href^="#/"]');
+  if (!link || link.closest("#primary-nav, #secondary-nav") || event.defaultPrevented) return;
+  markNavigationIntent(link.hash.slice(1), event);
+  closeMenu();
+});
+document.querySelector<HTMLAnchorElement>(".skip-link")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  getElement<HTMLElement>("main-content").focus();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && sidebar.classList.contains("is-open")) {
+    closeMenu();
+    menuToggle.focus();
+  }
 });
 window.addEventListener("hashchange", () => {
   const origin = pendingNavigationOrigin ?? "history";
@@ -493,16 +327,15 @@ document.addEventListener("focusin", (event) => {
 });
 window.addEventListener("scroll", () => saveRouteState(currentPath), { passive: true });
 const indicatorResize = new ResizeObserver(() => {
-  if (!activeCategory || navigationAnimating) return;
-  void movePrimaryIndicator(false, activeNavigationToken);
-  moveSecondaryIndicator(false, activeNavigationToken);
+  if (!activeCategory) return;
+  movePrimaryIndicator();
+  moveSecondaryIndicator();
 });
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
-  if (navigationAnimating) return;
-  void movePrimaryIndicator(false, activeNavigationToken);
-  moveSecondaryIndicator(false, activeNavigationToken);
+  movePrimaryIndicator();
+  moveSecondaryIndicator();
 });
 getElement<HTMLElement>("settings-access-url").textContent = location.origin;
 createPrimaryNavigation();
@@ -536,7 +369,6 @@ function isHealthResponse(value: unknown): value is HealthResponse {
 async function refreshStatus(): Promise<void> {
   if (refreshButton.disabled) return;
   refreshButton.disabled = true;
-  refreshButton.classList.add("is-busy");
   refreshLabel.textContent = "正在刷新";
   try {
     const response = await fetch("/api/health", {
@@ -548,6 +380,8 @@ async function refreshStatus(): Promise<void> {
     if (!isHealthResponse(payload)) throw new Error("服务返回了不符合约定的数据");
 
     statusDot.className = "status-dot is-online";
+    getElement<HTMLElement>("status-panel").dataset.state = "online";
+    getElement<HTMLElement>("health-state").textContent = "ONLINE";
     statusLabel.textContent = "后端已连接";
     mainStatus.textContent = "服务运行正常";
     statusDescription.textContent = "已连接到 Stardust Server";
@@ -556,6 +390,8 @@ async function refreshStatus(): Promise<void> {
     lastChecked.textContent = formatTime(payload.checkedAt);
   } catch (error) {
     statusDot.className = "status-dot is-offline";
+    getElement<HTMLElement>("status-panel").dataset.state = "offline";
+    getElement<HTMLElement>("health-state").textContent = "OFFLINE";
     statusLabel.textContent = "后端未连接";
     mainStatus.textContent = "无法连接到服务";
     statusDescription.textContent = error instanceof Error ? error.message : "未知错误";
@@ -564,7 +400,6 @@ async function refreshStatus(): Promise<void> {
     lastChecked.textContent = "—";
   } finally {
     refreshButton.disabled = false;
-    refreshButton.classList.remove("is-busy");
     refreshLabel.textContent = "刷新状态";
   }
 }
@@ -642,6 +477,10 @@ function showSetupStep(step: number): void {
   setupStep = step;
   setSetupError("");
   setupSteps.forEach((section, index) => { section.hidden = index !== step; });
+  document.querySelectorAll(".setup-progress span").forEach((item, index) => {
+    if (index === step) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+  });
   setupBack.hidden = step === 0;
   setupNext.hidden = step === 3;
   setupSubmit.hidden = step !== 3;
@@ -803,6 +642,7 @@ async function modelRequest(path: string, body?: unknown): Promise<unknown> {
   return data;
 }
 function renderModelConfig(config: ModelView): void {
+  getElement<HTMLElement>("overview-model").textContent = config.modelId || "尚未配置模型";
   modelUrl.value = config.baseUrl;
   modelId.value = config.modelId;
   modelTimeout.value = String(config.timeoutMs);
@@ -823,6 +663,7 @@ function showModel(): void {
   modelLoaded = true;
   void modelRequest("/api/v1/model/config").then((value) => renderModelConfig(value as ModelView)).catch((error: unknown) => {
     modelLoaded = false;
+    getElement<HTMLElement>("overview-model").textContent = "配置读取失败";
     modelStatus.textContent = error instanceof Error ? error.message : "无法读取模型配置。";
   });
 }
@@ -853,12 +694,14 @@ modelTest.addEventListener("click", () => {
 function addMessage(role: string, message: string): void {
   const entry = document.createElement("div");
   entry.className = "chat-message";
+  entry.dataset.role = role === "你" ? "user" : "model";
   const label = document.createElement("strong");
   label.textContent = role;
   const content = document.createElement("p");
   content.textContent = message;
   entry.append(label, content);
   chatMessages.append(entry);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 async function toolRequest(path: string, body?: unknown): Promise<unknown> {
   let response: Response;
@@ -974,7 +817,7 @@ async function extensionRequest(path: string, body?: unknown): Promise<unknown> 
   catch { throw new Error("无法连接 Stardust 服务端。"); }
   const data = await response.json() as { error?: string };
   if (!response.ok) {
-    const messages: Record<string, string> = { NOT_CONFIGURED: "请先保存必填配置。", INVALID_INPUT: "输入无效，请检查。", SAVE_FAILED: "保存失败，请重试。", DELETE_CONFIG_FAILED: "删除配置失败，请重试。", NOT_INSTALLED: "扩展尚未安装。", ALREADY_INSTALLED: "扩展已安装。", EXTENSION_NOT_CONNECTED: "请先启用并连接 QQ 扩展。", INVALID_TARGET: "目标无效或已过期，请刷新测试目标。", TEST_IN_PROGRESS: "另一项测试正在进行。", TEST_LIMIT_REACHED: "本次运行的测试记录已达上限。" };
+    const messages: Record<string, string> = { NOT_CONFIGURED: "请先保存必填配置。", INVALID_INPUT: "输入无效，请检查。", SAVE_FAILED: "保存失败，请重试。", DELETE_CONFIG_FAILED: "删除配置失败，请重试。", NOT_INSTALLED: "扩展尚未安装。", ALREADY_INSTALLED: "扩展已安装。", EXTENSION_NOT_CONNECTED: "请先启用并连接 QQ 扩展。", INVALID_TARGET: "目标不可用，请刷新测试目标。", TEST_IN_PROGRESS: "另一项测试正在进行。", TEST_LIMIT_REACHED: "本次运行的测试记录已达上限。" };
     throw new Error(messages[data.error ?? ""] ?? `操作失败（HTTP ${response.status}）。`);
   }
   return data;
@@ -1016,7 +859,7 @@ function buildQQCapabilityTests(id: string): HTMLElement {
   const targetsHeading = document.createElement("h3"); targetsHeading.textContent = "最近接收的测试目标";
   const note = document.createElement("p"); note.textContent = "目标仅来自本次运行实际收到的消息；主动模式也使用已知目标。";
   targetHeading.append(targetsHeading, note);
-  type Target = { id: string; scope: "private" | "group"; receivedAt: string; replyExpiresAt: string | null };
+  type Target = { id: string; scope: "private" | "group"; receivedAt: string };
   type FrameResult = { index: number; inputState: number; state: string; httpStatus?: number; businessCode?: string; responseId?: string };
   type StageResult = { stage: "direct_send" | "upload" | "send"; state: string; httpStatus?: number; businessCode?: string; message?: string; messageIdReturned?: boolean };
   type ImageUploadResult = { image: 1 | 2; phase?: string; state: string; httpStatus?: number; businessCode?: string; message?: string; imageId?: string };
@@ -1042,16 +885,13 @@ function buildQQCapabilityTests(id: string): HTMLElement {
       const target = selectedByScope[scope];
       const label = scope === "private" ? "私聊" : "群聊";
       if (!target) return `${label}：先${scope === "private" ? "向机器人发送私聊消息" : "在群聊中 @机器人"}`;
-      const remaining = target.replyExpiresAt ? Math.max(0, Math.ceil((Date.parse(target.replyExpiresAt) - Date.now()) / 1000)) : 0;
-      return target.replyExpiresAt ? `${label}被动有效 ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}` : `${label}被动期限未知`;
+      return `${label}：已选择测试目标`;
     });
     targetStatus.textContent = `${scopeStatus.join(" · ")}。`;
     for (const test of tests) {
       const selected = selectedByScope[test.scope];
       const streaming = test.streamToggle?.checked ?? false;
-      const streamExpired = streaming && test.mode === "passive" && (!selected || Date.parse(selected.receivedAt) + 5 * 60_000 <= Date.now());
-      const passiveExpired = test.mode === "passive" && (!selected?.replyExpiresAt || Date.parse(selected.replyExpiresAt) <= Date.now());
-      test.button.disabled = busy || !selected || (test.mode === "passive" && passiveExpired) || streamExpired || (streaming && !test.streamSupported);
+      test.button.disabled = busy || !selected || (streaming && !test.streamSupported);
       if (test.streamNotice) test.streamNotice.hidden = !streaming;
     }
   }
@@ -1202,7 +1042,8 @@ function buildQQCapabilityTests(id: string): HTMLElement {
         const diagnosticSummary = document.createElement("summary"); diagnosticSummary.textContent = "请求诊断";
         const diagnosticList = document.createElement("dl");
           const localSendState = experiment === "markdown-local" ? (value.stage === "send" ? (value.state === "success" ? "成功响应" : value.state === "rejected" ? "平台拒绝" : value.state === "unknown_outcome" ? "请求结果未知" : "发送失败") : "未发送") : undefined;
-          const fields: [string, string][] = [["接口", value.interface], ...(localSendState ? [["Markdown 发送状态", localSendState] as [string, string]] : []), ["请求时间", new Date(value.requestedAt).toLocaleString()], ["请求耗时", value.durationMs === undefined ? "未知" : `${value.durationMs} ms`], ["阶段", value.stage], ["HTTP", value.httpStatus === undefined ? (value.serverAccepted ? "状态缺失" : "无响应") : String(value.httpStatus)], ["QQ 业务码", value.businessCode ?? "无"], ...(value.requestMessageId ? [["入站消息 ID", value.requestMessageId] as [string, string]] : []), ...(value.messageId ? [["返回消息 ID", value.messageId] as [string, string]] : []), ["响应含消息 ID", value.messageIdReturned === undefined ? "不适用" : value.messageIdReturned ? "是" : "否"], ["客户端收到", value.clientReceived === "unconfirmed" ? "未确认" : "未知"], ["流式 ID", value.streamMsgId ?? "无"], ["完成状态", value.completion ?? (value.serverAccepted ? "请求已接受" : "未开始")], ["错误信息", value.message ?? "无"]];
+        const safeTargetMessage = value.stage === "target" && value.state === "unavailable" ? "所选目标当前不可用，请刷新测试目标后重试。" : value.message ?? "无";
+        const fields: [string, string][] = [["接口", value.interface], ...(localSendState ? [["Markdown 发送状态", localSendState] as [string, string]] : []), ["请求时间", new Date(value.requestedAt).toLocaleString()], ["请求耗时", value.durationMs === undefined ? "未知" : `${value.durationMs} ms`], ["阶段", value.stage], ["HTTP", value.httpStatus === undefined ? (value.serverAccepted ? "状态缺失" : "无响应") : String(value.httpStatus)], ["QQ 业务码", value.businessCode ?? "无"], ...(value.requestMessageId ? [["入站消息 ID", value.requestMessageId] as [string, string]] : []), ...(value.messageId ? [["返回消息 ID", value.messageId] as [string, string]] : []), ["响应含消息 ID", value.messageIdReturned === undefined ? "不适用" : value.messageIdReturned ? "是" : "否"], ["客户端收到", value.clientReceived === "unconfirmed" ? "未确认" : "未知"], ["流式 ID", value.streamMsgId ?? "无"], ["完成状态", value.completion ?? (value.serverAccepted ? "请求已接受" : "未开始")], ["错误信息", safeTargetMessage]];
         for (const [label, text] of fields) { const line = document.createElement("div"); const term = document.createElement("dt"); term.textContent = label; const valueNode = document.createElement("dd"); valueNode.textContent = text; line.append(term, valueNode); diagnosticList.append(line); }
         diagnostic.append(diagnosticSummary, diagnosticList);
         if (value.stages?.length) {
@@ -1240,7 +1081,6 @@ function buildQQCapabilityTests(id: string): HTMLElement {
   }
   section.append(introduction, interfaceNotes, targetPanel, list);
   updateTargets(); queueMicrotask(refreshTargets);
-  const timer = setInterval(() => { if (!section.isConnected) clearInterval(timer); else updateTargets(); }, 1000);
   return section;
 }
 async function extensionAction(id: string, action: string, body: unknown, feedback: HTMLElement = extensionFeedback): Promise<boolean> {
@@ -1276,14 +1116,7 @@ function extensionIcon(kind: string): SVGSVGElement {
   return icon;
 }
 function extensionLink(label: string, path: string, className = "extension-link"): HTMLAnchorElement {
-  return createPageLink({ label, path }, location.hash.slice(1), className, 1);
-}
-function extensionBreadcrumb(item: ExtensionView, page?: ExtensionPageView): HTMLElement {
-  const nav = document.createElement("nav"); nav.className = "extension-breadcrumb"; nav.setAttribute("aria-label", "扩展页面路径");
-  nav.append(extensionLink("已安装扩展", "/extensions/installed"));
-  if (page) nav.append(document.createTextNode(" / "), extensionLink(item.name, extensionPath(item.id)), document.createTextNode(` / ${page.title}`));
-  else nav.append(document.createTextNode(` / ${item.name}`));
-  return nav;
+  return createPageLink({ label, path }, location.hash.slice(1), className);
 }
 function configPage(item: ExtensionView, ui: ExtensionUI): HTMLElement {
   const container = document.createElement("div");
@@ -1355,12 +1188,18 @@ const extensionPageFactories: Record<string, (item: ExtensionView, ui: Extension
 function registerExtensionPages(item: ExtensionView): void {
   const ui: ExtensionUI = { sections: [], statuses: [], errors: [], fields: new Map(), tools: new Map() };
   extensionPages.set(item.id, ui);
-  const register = (path: string, title: string, index: number, content: HTMLElement): void => {
+  const register = (path: string, title: string, content: HTMLElement): void => {
     const section = document.createElement("section"); section.className = "nav-page content-section extension-detail"; section.dataset.page = path; section.hidden = true; section.inert = true;
-    content.dataset.transitionOrder = "2"; section.append(content); pageStage.append(section); navPages.push(section); ui.sections.push(section);
-    extensionRoutes.set(path, { page: { label: title, path }, index, section, owner: item.id });
+    section.append(content); pageStage.append(section); navPages.push(section); ui.sections.push(section);
+    extensionRoutes.set(path, { page: { label: title, path }, section, owner: item.id });
   };
-  const root = document.createElement("div"); root.append(extensionBreadcrumb(item));
+  const root = document.createElement("div"); root.className = "extension-detail-frame extension-overview-frame";
+  const identity = document.createElement("div"); identity.className = "extension-identity-frame";
+  const iconBox = document.createElement("span"); iconBox.className = "extension-icon-box extension-identity-icon"; iconBox.append(extensionIcon("extension"));
+  const identityCopy = document.createElement("div"); identityCopy.className = "extension-identity-copy";
+  const version = document.createElement("p"); version.className = "extension-detail-kicker"; version.textContent = `${item.type} · ${item.version}`;
+  const title = document.createElement("h2"); title.className = "extension-detail-title"; title.textContent = item.name;
+  identityCopy.append(version, title); identity.append(iconBox, identityCopy);
   const description = document.createElement("p"); description.textContent = item.description;
   const status = document.createElement("p"); status.setAttribute("role", "status"); ui.statuses.push(status);
   const error = document.createElement("p"); error.setAttribute("role", "status"); ui.errors.push(error);
@@ -1376,11 +1215,15 @@ function registerExtensionPages(item: ExtensionView): void {
     const description = document.createElement("span"); description.textContent = page.description;
     copy.append(title, description); link.append(icon, copy); links.append(link);
   }
-  root.append(links); register(extensionPath(item.id), item.name, 1, root);
-  for (const [index, page] of item.managementPages.entries()) {
+  root.prepend(identity); root.append(links); register(extensionPath(item.id), item.name, root);
+  for (const page of item.managementPages) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(page.pageId) || !Object.hasOwn(extensionPageFactories, page.pageKind)) continue;
-    const content = document.createElement("div"); content.append(extensionBreadcrumb(item, page), extensionPageFactories[page.pageKind]!(item, ui));
-    register(`${extensionPath(item.id)}/${page.pageId}`, page.title, index + 2, content);
+    const content = document.createElement("div"); content.className = "extension-detail-frame extension-subpage-frame";
+    const heading = document.createElement("header"); heading.className = "extension-subpage-heading";
+    const icon = document.createElement("span"); icon.className = "extension-icon-box"; icon.append(extensionIcon(page.pageKind));
+    const pageTitle = document.createElement("h2"); pageTitle.className = "extension-detail-title"; pageTitle.textContent = page.title;
+    heading.append(icon, pageTitle); content.append(heading, extensionPageFactories[page.pageKind]!(item, ui));
+    register(`${extensionPath(item.id)}/${page.pageId}`, page.title, content);
   }
 }
 function removeExtensionPages(id: string): void {
@@ -1388,9 +1231,7 @@ function removeExtensionPages(id: string): void {
   for (const [path, route] of extensionRoutes) if (route.owner === id) extensionRoutes.delete(path);
   extensionPages.delete(id);
   if (currentPath === extensionPath(id) || currentPath.startsWith(`${extensionPath(id)}/`)) { history.replaceState(null, "", "#/extensions/installed"); renderNavigation("programmatic"); }
-  window.setTimeout(() => {
-    for (const section of ui.sections) { const index = navPages.indexOf(section); if (index >= 0) navPages.splice(index, 1); section.remove(); }
-  }, navigationMotion.pageDurationMs + 80);
+  for (const section of ui.sections) { const index = navPages.indexOf(section); if (index >= 0) navPages.splice(index, 1); section.remove(); }
 }
 function buildExtensionList(items: ExtensionView[]): void {
   extensionList.replaceChildren(); extensionListStatuses.clear();
@@ -1415,6 +1256,8 @@ async function refreshExtensions(): Promise<void> {
   try {
     const data = await extensionRequest("/api/v1/extensions") as { extensions: ExtensionView[] };
     if (!Array.isArray(data.extensions)) throw new Error("扩展状态不可用。");
+    const installed = data.extensions.filter((item) => item.installed);
+    getElement<HTMLElement>("overview-extensions").textContent = installed.length ? `${installed.length} 个已安装 · ${installed.filter((item) => item.enabled).length} 个已启用` : "尚未安装扩展";
     const signature = data.extensions.map((item) => `${item.id}:${item.installed}`).join("|");
     if (signature !== extensionSignature) { buildExtensionList(data.extensions); extensionSignature = signature; }
     for (const id of extensionPages.keys()) if (!data.extensions.some((item) => item.id === id && item.installed)) removeExtensionPages(id);
@@ -1430,7 +1273,10 @@ async function refreshExtensions(): Promise<void> {
       for (const field of item.fields) { const entry = ui.fields.get(field.key); if (entry?.note) entry.note.textContent = field.configured ? `${field.label} 已配置。` : `${field.label} 未配置。`; }
       for (const tool of item.tools) { const entry = ui.tools.get(tool.name); if (!entry) continue; entry.status.textContent = `${tool.enabled ? "已启用" : "已停用"} · ${tool.available ? "可用" : "不可用"}`; entry.toggle.textContent = tool.enabled ? "停用" : "启用"; entry.toggle.dataset.enabled = String(tool.enabled); }
     }
-  } catch (error) { extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。"; }
+  } catch (error) {
+    getElement<HTMLElement>("overview-extensions").textContent = "扩展状态读取失败";
+    extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。";
+  }
 }
 function showExtensions(): void {
   if (extensionsLoaded) return;
