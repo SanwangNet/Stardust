@@ -59,9 +59,6 @@ const pageTitleBlock = document.createElement("div");
 pageTitleBlock.className = "page-title-block";
 pageTitleBlock.append(pageTitle);
 headingCopy.insertBefore(pageTitleBlock, pageDescription);
-const pageTitleAncestors = document.createElement("div");
-pageTitleAncestors.className = "page-title-hierarchy";
-pageTitleAncestors.hidden = true;
 const sidebarHeading = getElement<HTMLElement>("sidebar-heading");
 const menuToggleLabel = getElement<HTMLElement>("menu-toggle-label");
 const pageStage = getElement<HTMLElement>("page-stage");
@@ -70,8 +67,10 @@ spaceOuter.className = "space-outer";
 const spaceShell = document.createElement("div");
 spaceShell.className = "space-shell";
 pageHeading.before(spaceOuter);
-spaceOuter.append(pageTitleAncestors, spaceShell);
+spaceOuter.append(spaceShell);
 spaceShell.append(pageHeading, pageStage);
+let ancestorTitles: HTMLAnchorElement[] = [];
+const spaceTitleResize = new ResizeObserver(updateSpaceTitleOffsets);
 const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
 const extensionRoutes = new Map<string, { page: MenuPage; section: HTMLElement; owner: string; parentPath?: string }>();
 let extensionsResolved = false;
@@ -93,6 +92,7 @@ let pendingNavigationOrigin: "click" | null = null;
 let pendingNavigationTitleSource: { path: string; element: HTMLElement; rect: DOMRect; color: string } | undefined;
 let titleShrinkAnimation: Animation | undefined;
 let titleExpandAnimation: Animation | undefined;
+let spaceExitLayer: HTMLElement | undefined;
 
 function spaceLevels(path: string): string[] {
   const model = { path: "/model/service", label: "模型服务", icon: "◇" };
@@ -127,28 +127,42 @@ function titleForPath(path: string): string | undefined {
   }
 }
 type MovingTitle = { element: HTMLElement; source: DOMRect; color: string };
+function updateSpaceTitleOffsets(): void {
+  const heights = ancestorTitles.map((title) => title.getBoundingClientRect().height);
+  let offset = 0;
+  ancestorTitles.forEach((title, index) => {
+    title.style.setProperty("--space-title-offset", `${offset}px`);
+    offset += heights[index] ?? 0;
+  });
+  pageHeading.style.setProperty("--space-title-offset", `${offset}px`);
+}
 function renderTitleHierarchy(path: string, previousPath: string, previousTitle: string, clickedTitle?: { element: HTMLElement; rect: DOMRect; color: string }): { previous?: { element: HTMLElement; source: DOMRect; color: string }; entered?: MovingTitle } {
   const levels = spaceLevels(path);
   const ancestors = levels.slice(0, -1);
   let moving: { element: HTMLElement; source: DOMRect; color: string } | undefined;
   const stack = document.createDocumentFragment();
+  let parent: DocumentFragment | HTMLElement = stack;
+  const titles: HTMLAnchorElement[] = [];
   let destination: HTMLAnchorElement | undefined;
-  for (const [depth, ancestorPath] of ancestors.entries()) {
+  for (const ancestorPath of ancestors) {
     const label = titleForPath(ancestorPath) ?? ancestorPath;
     const frame = document.createElement("a");
     frame.className = "space-ancestor-frame";
     frame.href = `#${ancestorPath}`;
     frame.tabIndex = -1;
     frame.setAttribute("aria-hidden", "true");
-    frame.style.setProperty("--space-position", String(depth));
     const link = document.createElement("a");
     link.className = "page-title-ancestor";
     link.href = `#${ancestorPath}`;
     link.textContent = label;
     link.setAttribute("aria-label", label);
-    link.style.setProperty("--space-position", String(depth));
     if (ancestorPath === previousPath) destination = link;
-    stack.append(frame, link);
+    const card = document.createElement("div");
+    card.className = "space-ancestor-card";
+    card.append(frame, link);
+    parent.append(card);
+    parent = card;
+    titles.push(link);
   }
   if (destination && previousTitle) {
     pageTitle.classList.add("page-title-moving");
@@ -172,9 +186,14 @@ function renderTitleHierarchy(path: string, previousPath: string, previousTitle:
     pageTitle.removeAttribute("aria-label");
     pageTitle.textContent = titleForPath(path) ?? currentTitle;
   }
-  spaceOuter.style.setProperty("--space-depth", String(ancestors.length));
-  pageTitleAncestors.replaceChildren(stack);
-  pageTitleAncestors.hidden = ancestors.length === 0;
+  if (spaceShell.parentElement !== spaceOuter || titles.length) {
+    parent.append(spaceShell);
+    spaceOuter.replaceChildren(stack);
+  }
+  spaceTitleResize.disconnect();
+  ancestorTitles = titles;
+  for (const title of titles) spaceTitleResize.observe(title);
+  updateSpaceTitleOffsets();
   let entered: MovingTitle | undefined;
   if (clickedTitle) {
     const title = titleForPath(path) ?? currentTitle;
@@ -249,6 +268,102 @@ function animateEnteredTitle(moving: MovingTitle | undefined): void {
     else moving.element.remove();
     if (titleExpandAnimation === expand) titleExpandAnimation = undefined;
   });
+}
+function clearSpaceExit(): void {
+  if (!spaceExitLayer) return;
+  for (const animation of spaceExitLayer.getAnimations({ subtree: true })) animation.cancel();
+  spaceExitLayer.remove();
+  spaceExitLayer = undefined;
+}
+function animateSpaceExit(exitingPaths: string[]): void {
+  clearSpaceExit();
+  if (!exitingPaths.length || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const layer = document.createElement("div");
+  layer.className = "space-exit-layer";
+  layer.inert = true;
+  layer.setAttribute("aria-hidden", "true");
+  const scrollPositions: { element: Element; top: number; left: number }[] = [];
+  const exiting = new Set(exitingPaths);
+  layer.style.setProperty("--main-gutter", getComputedStyle(spaceOuter).getPropertyValue("--main-gutter"));
+  for (const frame of Array.from(spaceOuter.querySelectorAll<HTMLAnchorElement>(".space-ancestor-frame"))) {
+    if (!exiting.has(frame.hash.slice(1))) continue;
+    const title = frame.nextElementSibling;
+    if (!title) continue;
+    const bounds = frame.getBoundingClientRect();
+    const { card, surface, clippedTop } = createExitCard(bounds, title.getBoundingClientRect().top);
+    surface.classList.add("space-exit-ancestor");
+    const label = title.cloneNode(true) as HTMLElement;
+    label.style.top = `${clippedTop}px`;
+    surface.append(label);
+    layer.append(card);
+  }
+  const activePage = navPages.find((page) => page.dataset.page === currentPath && !page.hidden);
+  if (activePage && exiting.has(currentPath) && spaceShell.classList.contains("is-space")) {
+    const bounds = spaceShell.getBoundingClientRect();
+    const { card, surface, clippedTop } = createExitCard(bounds, pageHeading.getBoundingClientRect().top);
+    const shell = spaceShell.cloneNode(false) as HTMLElement;
+    shell.removeAttribute("style");
+    const heading = pageHeading.cloneNode(true) as HTMLElement;
+    heading.style.top = `${clippedTop}px`;
+    // The real title may still be moving. Give the copy its settled text.
+    heading.querySelector("h1")?.replaceChildren(currentTitle);
+    const stage = pageStage.cloneNode(false) as HTMLElement;
+    const pageCopy = activePage.cloneNode(true) as HTMLElement;
+    stage.append(pageCopy);
+    shell.append(heading, stage);
+    // Preserve the visible part of any nested scroll area in the visual copy.
+    const originals = activePage.querySelectorAll("*");
+    const copies = pageCopy.querySelectorAll("*");
+    originals.forEach((element, index) => {
+      const copy = copies[index];
+      if (copy && (element.scrollTop || element.scrollLeft)) {
+        scrollPositions.push({ element: copy, top: element.scrollTop, left: element.scrollLeft });
+      }
+    });
+    for (const element of Array.from(shell.querySelectorAll("[id], [name], [autofocus], [form]"))) {
+      for (const attribute of ["id", "name", "autofocus", "form"]) element.removeAttribute(attribute);
+    }
+    surface.append(shell);
+    layer.append(card);
+  }
+
+  const cards = Array.from(layer.children).reverse();
+  if (!cards.length) return;
+  document.body.append(layer);
+  for (const { element, top, left } of scrollPositions) element.scrollTo(left, top);
+  spaceExitLayer = layer;
+  const stagger = Math.min(100, 400 / Math.max(1, cards.length - 1));
+  const viewportBottom = layer.getBoundingClientRect().bottom;
+  const animations = cards.map((card, index) => {
+    const distance = Math.max(0, viewportBottom - card.getBoundingClientRect().top + 1);
+    // A quadratic curve gives the card a slow start and increasing speed.
+    const duration = Math.min(420, Math.max(280, Math.sqrt(distance) * 13));
+    return card.animate([
+      { transform: "translateY(0)" },
+      { transform: `translateY(${distance}px)` },
+    ], { duration, delay: index * stagger, easing: "cubic-bezier(.333, 0, .667, .333)", fill: "both" });
+  });
+  void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+    if (spaceExitLayer === layer) clearSpaceExit();
+  });
+}
+function createExitCard(bounds: DOMRect, titleTop: number): { card: HTMLElement; surface: HTMLElement; clippedTop: number } {
+  const card = document.createElement("div");
+  card.className = "space-exit-card";
+  const clippedTop = Math.min(bounds.height, Math.max(0, titleTop - bounds.top));
+  Object.assign(card.style, {
+    top: `${bounds.top + clippedTop}px`,
+    left: `${bounds.left}px`,
+    width: `${bounds.width}px`,
+    height: `${bounds.height - clippedTop}px`,
+  });
+  const surface = document.createElement("div");
+  surface.className = "space-exit-surface";
+  surface.style.height = `${bounds.height}px`;
+  surface.style.top = `${-clippedTop}px`;
+  card.append(surface);
+  return { card, surface, clippedTop };
 }
 function cardFor(section: HTMLElement | undefined, path: string): HTMLElement | null {
   if (!section) return null;
@@ -441,7 +556,9 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const previousPath = currentPath;
   const previousTitle = currentTitle;
   const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
-  const returning = previousPath !== path && previousLevels.includes(path);
+  const returnLevel = previousLevels.indexOf(path);
+  const returning = previousPath !== path && returnLevel !== -1;
+  animateSpaceExit(returning ? previousLevels.slice(returnLevel + 1) : []);
 
   const categoryChanged = activeCategory !== category;
   if (currentPath) saveRouteState(currentPath);
@@ -484,7 +601,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   animateEnteredTitle(movingTitles.entered);
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
-    const target = cardFor(section, previousLevels[previousLevels.indexOf(path) + 1] ?? "");
+    const target = cardFor(section, previousLevels[returnLevel + 1] ?? "");
     target?.focus({ preventScroll: true });
   }
 }
@@ -541,6 +658,7 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
+  clearSpaceExit();
   movePrimaryIndicator();
   moveSecondaryIndicator();
 });
