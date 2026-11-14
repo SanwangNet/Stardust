@@ -220,6 +220,7 @@ h1 { margin: 0; font-size: clamp(26px, 2.6vw, 34px); line-height: 1.3; letter-sp
   border-top: 2px solid var(--text);
   background: var(--panel);
 }
+.space-shell.is-space > .page-heading h1 { font-weight: 600; }
 .space-outer > .space-shell.is-space { border-left: 0; background: transparent; box-shadow: none; }
 .space-outer > .space-shell.is-space > .page-heading { border-top: 0; background: transparent; }
 .space-shell.is-space > .page-stage {
