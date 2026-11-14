@@ -90,12 +90,14 @@ let webTitle = "Stardust";
 let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
+let pendingSidebarTarget: string | undefined;
 let pendingNavigationTitleSource: { path: string; element: HTMLElement; rect: DOMRect; color: string } | undefined;
 let pendingNavigationCardBorder: { path: string; rect: DOMRect; borderWidth: string; borderColor: string } | undefined;
 let titleShrinkAnimation: Animation | undefined;
 let titleExpandAnimation: Animation | undefined;
 let spaceEnterBorder: { element: HTMLElement; animation: Animation; contentAnimations: Animation[]; scrollX: number; scrollY: number } | undefined;
 let spaceExitLayer: HTMLElement | undefined;
+let sidebarEnterAnimation: { animation: Animation; scrollX: number; scrollY: number } | undefined;
 
 function spaceLevels(path: string): string[] {
   const model = { path: "/model/service", label: "模型服务", icon: "◇" };
@@ -228,7 +230,7 @@ function animatePreviousTitle(moving: { element: HTMLElement; source: DOMRect; c
     if (titleShrinkAnimation === shrink) titleShrinkAnimation = undefined;
   });
 }
-function animateEnteredTitle(moving: MovingTitle | undefined): void {
+function animateEnteredTitle(moving: MovingTitle | undefined, returning = false): void {
   titleExpandAnimation?.cancel();
   if (!moving || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   const placeholder = moving.element.cloneNode(true) as HTMLElement;
@@ -253,7 +255,7 @@ function animateEnteredTitle(moving: MovingTitle | undefined): void {
     color: targetStyle.color,
     left: `${destination.left}px`,
     top: `${destination.top}px`,
-    zIndex: "1000",
+    zIndex: returning ? "8" : "1000",
   });
   document.body.append(moving.element);
   const dx = moving.source.left - destination.left, dy = moving.source.top - destination.top;
@@ -279,6 +281,24 @@ function clearSpaceEnter(): void {
   spaceEnterBorder.element.remove();
   spaceEnterBorder = undefined;
   spaceShell.classList.remove("is-entering");
+}
+function clearSidebarEnter(): void {
+  sidebarEnterAnimation?.animation.cancel();
+  sidebarEnterAnimation = undefined;
+}
+function animateSidebarChild(sibling = false): void {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const bounds = spaceShell.getBoundingClientRect();
+  if (!bounds.width || !bounds.height || bounds.top >= window.innerHeight) return;
+  const distance = sibling ? 32 : window.innerHeight - bounds.top + 1;
+  const animation = spaceShell.animate([
+    { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
+    { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
+  ], { duration: sibling ? 360 : 480, easing: "cubic-bezier(.2, .75, .25, 1)" });
+  sidebarEnterAnimation = { animation, scrollX: window.scrollX, scrollY: window.scrollY };
+  void animation.finished.catch(() => {}).finally(() => {
+    if (sidebarEnterAnimation?.animation === animation) sidebarEnterAnimation = undefined;
+  });
 }
 function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCardBorder>): void {
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -338,7 +358,7 @@ function clearSpaceExit(): void {
   spaceExitLayer.remove();
   spaceExitLayer = undefined;
 }
-function animateSpaceExit(exitingPaths: string[]): void {
+function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   clearSpaceExit();
   if (!exitingPaths.length || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
@@ -396,16 +416,16 @@ function animateSpaceExit(exitingPaths: string[]): void {
   document.body.append(layer);
   for (const { element, top, left } of scrollPositions) element.scrollTo(left, top);
   spaceExitLayer = layer;
-  const stagger = Math.min(100, 400 / Math.max(1, cards.length - 1));
+  const stagger = Math.min(65, 260 / Math.max(1, cards.length - 1));
   const viewportBottom = layer.getBoundingClientRect().bottom;
   const animations = cards.map((card, index) => {
-    const distance = Math.max(0, viewportBottom - card.getBoundingClientRect().top + 1);
+    const distance = sibling ? 32 : Math.max(0, viewportBottom - card.getBoundingClientRect().top + 1);
     // A quadratic curve gives the card a slow start and increasing speed.
-    const duration = Math.min(420, Math.max(280, Math.sqrt(distance) * 13));
+    const duration = sibling ? 360 : Math.min(420, Math.max(280, Math.sqrt(distance) * 13));
     return card.animate([
-      { transform: "translateY(0)" },
-      { transform: `translateY(${distance}px)` },
-    ], { duration, delay: index * stagger, easing: "cubic-bezier(.333, 0, .667, .333)", fill: "both" });
+      { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
+      { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
+    ], { duration, delay: index * stagger, easing: sibling ? "cubic-bezier(.2, .75, .25, 1)" : "cubic-bezier(.333, 0, .667, .333)", fill: "both" });
   });
   void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
     if (spaceExitLayer === layer) clearSpaceExit();
@@ -444,6 +464,7 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
   if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
   pendingNavigationTitleSource = undefined;
   pendingNavigationCardBorder = undefined;
+  pendingSidebarTarget = undefined;
   if (location.hash.slice(1) === path) {
     event.preventDefault();
     pageTitle.focus({ preventScroll: true });
@@ -451,6 +472,7 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
   }
   pendingNavigationOrigin = "click";
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#/"]') : null;
+  if (link?.closest("#secondary-nav")) pendingSidebarTarget = path;
   if (link?.matches(spaceCardSelector) && link.closest<HTMLElement>(".nav-page")?.dataset.page === currentPath) {
     const style = getComputedStyle(link);
     pendingNavigationCardBorder = { path, rect: link.getBoundingClientRect(), borderWidth: style.borderWidth, borderColor: style.borderColor };
@@ -624,10 +646,33 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const previousPath = currentPath;
   const previousTitle = currentTitle;
   const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
+  const nextLevels = spaceLevels(path);
   const returnLevel = previousLevels.indexOf(path);
   const returning = previousPath !== path && returnLevel !== -1;
+  const sidebarSibling = origin === "click" && pendingSidebarTarget === path &&
+    activeCategory === category && nextLevels.length > 0 &&
+    previousLevels.length === nextLevels.length + 1 &&
+    nextLevels.slice(0, -1).every((level, index) => level === previousLevels[index + 1]);
+  clearSidebarEnter();
+  let returningTitle: MovingTitle | undefined;
+  if (returning && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const source = ancestorTitles.find((title) => title.hash.slice(1) === path);
+    if (source) {
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const rect = range.getBoundingClientRect();
+      if (rect.width && rect.height && rect.bottom > 0 && rect.top < window.innerHeight) {
+        const element = document.createElement("span");
+        element.className = "page-title-shared";
+        element.textContent = source.textContent;
+        element.setAttribute("aria-hidden", "true");
+        element.setAttribute("role", "presentation");
+        returningTitle = { element, source: rect, color: getComputedStyle(source).color };
+      }
+    }
+  }
   clearSpaceEnter();
-  animateSpaceExit(returning ? previousLevels.slice(returnLevel + 1) : []);
+  animateSpaceExit(sidebarSibling ? [previousPath] : returning ? previousLevels.slice(returnLevel + 1) : [], sidebarSibling);
 
   const categoryChanged = activeCategory !== category;
   if (currentPath) saveRouteState(currentPath);
@@ -638,11 +683,16 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
   const clickedTitle = origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
   pendingNavigationTitleSource = undefined;
-  const nextLevels = spaceLevels(path);
   const enteringChild = nextLevels.length > 0 && (previousPath === "/overview/status" || nextLevels.at(-2) === previousPath);
+  const sidebarChild = origin === "click" && pendingSidebarTarget === path && nextLevels.at(-2) === previousPath;
+  pendingSidebarTarget = undefined;
   const clickedBorder = origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path ? pendingNavigationCardBorder : undefined;
   pendingNavigationCardBorder = undefined;
   const movingTitles = renderTitleHierarchy(path, previousPath, previousTitle, clickedTitle);
+  if (returningTitle) {
+    pageTitle.setAttribute("aria-label", currentTitle);
+    pageTitle.replaceChildren(returningTitle.element);
+  }
   pageDescription.textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
   sidebarHeading.textContent = category.label;
   menuToggleLabel.textContent = `${category.label} / ${page.label}`;
@@ -671,8 +721,9 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   moveSecondaryIndicator();
   restoreRouteState(path, returning ? "history" : origin);
   animatePreviousTitle(movingTitles.previous);
-  animateEnteredTitle(movingTitles.entered);
+  animateEnteredTitle(returningTitle ?? movingTitles.entered, Boolean(returningTitle));
   if (clickedBorder) animateEnteredCardBorder(clickedBorder);
+  if (sidebarChild || sidebarSibling) animateSidebarChild(sidebarSibling);
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
     const target = cardFor(section, previousLevels[returnLevel + 1] ?? "");
@@ -724,6 +775,7 @@ document.addEventListener("focusin", (event) => {
   }
 });
 window.addEventListener("scroll", () => {
+  if (sidebarEnterAnimation && (sidebarEnterAnimation.scrollX !== window.scrollX || sidebarEnterAnimation.scrollY !== window.scrollY)) clearSidebarEnter();
   if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter();
   saveRouteState(currentPath);
 }, { passive: true });
@@ -735,6 +787,7 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
+  clearSidebarEnter();
   clearSpaceEnter();
   clearSpaceExit();
   movePrimaryIndicator();
