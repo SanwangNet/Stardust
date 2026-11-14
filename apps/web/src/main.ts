@@ -98,6 +98,7 @@ let titleExpandAnimation: Animation | undefined;
 let spaceEnterBorder: { element: HTMLElement; animation: Animation; contentAnimations: Animation[]; scrollX: number; scrollY: number } | undefined;
 let spaceExitLayer: HTMLElement | undefined;
 let sidebarEnterAnimation: { animation: Animation; scrollX: number; scrollY: number } | undefined;
+let rootFrameTransition: { element: HTMLElement; animation: Animation; card?: HTMLElement; scrollX: number; scrollY: number } | undefined;
 
 function spaceLevels(path: string): string[] {
   const model = { path: "/model/service", label: "模型服务", icon: "◇" };
@@ -285,6 +286,52 @@ function clearSpaceEnter(): void {
 function clearSidebarEnter(): void {
   sidebarEnterAnimation?.animation.cancel();
   sidebarEnterAnimation = undefined;
+}
+function clearRootFrameTransition(): void {
+  if (!rootFrameTransition) return;
+  rootFrameTransition.animation.cancel();
+  rootFrameTransition.element.remove();
+  rootFrameTransition.card?.classList.remove("is-frame-moving");
+  rootFrameTransition = undefined;
+}
+function animateRootFrame(card: HTMLElement, entering: boolean): void {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const frame = card.querySelector<HTMLElement>(":scope > .space-ancestor-frame");
+  const title = card.querySelector<HTMLElement>(":scope > .page-title-ancestor");
+  const header = document.querySelector<HTMLElement>(".site-header");
+  if (!frame || !title || !header) return;
+  const frameRect = frame.getBoundingClientRect();
+  const titleRect = title.getBoundingClientRect();
+  const sidebarRect = sidebar.getBoundingClientRect();
+  const mobile = getComputedStyle(sidebar).position === "sticky";
+  const headerRect = header.getBoundingClientRect();
+  const navLeft = entering ? (mobile ? 0 : sidebarRect.right) : (mobile ? -1 : sidebarRect.left);
+  const navTop = entering ? (mobile ? Math.max(headerRect.bottom, sidebarRect.bottom) : headerRect.bottom) : headerRect.top;
+  const targetTop = titleRect.top;
+  if (!frameRect.width || frameRect.bottom <= targetTop || targetTop >= window.innerHeight) return;
+  const target = {
+    left: `${frameRect.left}px`, top: `${targetTop}px`,
+    width: `${frameRect.width}px`, height: `${Math.max(0, frameRect.bottom - targetTop)}px`,
+    boxShadow: getComputedStyle(card).boxShadow,
+  };
+  const start = {
+    left: `${navLeft}px`, top: `${navTop}px`,
+    width: `${Math.max(0, frameRect.right - navLeft)}px`,
+    height: `${Math.max(0, frameRect.bottom - navTop)}px`,
+    boxShadow: "none",
+  };
+  const overlay = document.createElement("div");
+  overlay.className = "space-root-frame-transition";
+  overlay.setAttribute("aria-hidden", "true");
+  document.body.append(overlay);
+  if (entering) card.classList.add("is-frame-moving");
+  const animation = overlay.animate(entering ? [start, target] : [target, start], {
+    duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)", fill: "both",
+  });
+  rootFrameTransition = { element: overlay, animation, card: entering ? card : undefined, scrollX: window.scrollX, scrollY: window.scrollY };
+  void animation.finished.catch(() => {}).finally(() => {
+    if (rootFrameTransition?.animation === animation) clearRootFrameTransition();
+  });
 }
 function animateSidebarChild(sibling = false): void {
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -649,6 +696,10 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const nextLevels = spaceLevels(path);
   const returnLevel = previousLevels.indexOf(path);
   const returning = previousPath !== path && returnLevel !== -1;
+  clearRootFrameTransition();
+  const rootReturning = returning && nextLevels.length === 1 && previousLevels[1] === path;
+  const oldRootCard = rootReturning ? spaceOuter.querySelector<HTMLElement>(":scope > .space-ancestor-card") : null;
+  if (oldRootCard) animateRootFrame(oldRootCard, false);
   const sidebarSibling = origin === "click" && pendingSidebarTarget === path &&
     activeCategory === category && nextLevels.length > 0 &&
     previousLevels.length === nextLevels.length + 1 &&
@@ -720,10 +771,18 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   movePrimaryIndicator();
   moveSecondaryIndicator();
   restoreRouteState(path, returning ? "history" : origin);
+  if (rootFrameTransition) {
+    rootFrameTransition.scrollX = window.scrollX;
+    rootFrameTransition.scrollY = window.scrollY;
+  }
   animatePreviousTitle(movingTitles.previous);
   animateEnteredTitle(returningTitle ?? movingTitles.entered, Boolean(returningTitle));
   if (clickedBorder) animateEnteredCardBorder(clickedBorder);
   if (sidebarChild || sidebarSibling) animateSidebarChild(sidebarSibling);
+  if (previousLevels.length === 2 && nextLevels.length > 1 && nextLevels[0] === previousPath) {
+    const rootCard = spaceOuter.querySelector<HTMLElement>(":scope > .space-ancestor-card");
+    if (rootCard) animateRootFrame(rootCard, true);
+  }
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
     const target = cardFor(section, previousLevels[returnLevel + 1] ?? "");
@@ -775,6 +834,7 @@ document.addEventListener("focusin", (event) => {
   }
 });
 window.addEventListener("scroll", () => {
+  if (rootFrameTransition && (rootFrameTransition.scrollX !== window.scrollX || rootFrameTransition.scrollY !== window.scrollY)) clearRootFrameTransition();
   if (sidebarEnterAnimation && (sidebarEnterAnimation.scrollX !== window.scrollX || sidebarEnterAnimation.scrollY !== window.scrollY)) clearSidebarEnter();
   if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter();
   saveRouteState(currentPath);
@@ -787,6 +847,7 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
+  clearRootFrameTransition();
   clearSidebarEnter();
   clearSpaceEnter();
   clearSpaceExit();
