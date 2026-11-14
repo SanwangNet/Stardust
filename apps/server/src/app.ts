@@ -393,16 +393,17 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
 
     const staticFile = staticFiles[pathname];
-    if (!staticFile) {
+    const fontPath = /^\/fonts\/(?:wght\.css|LICENSE|files\/noto-sans-sc-[a-z0-9-]+\.woff2)$/.test(pathname) ? pathname.slice(1) : undefined;
+    if (!staticFile && !fontPath) {
       sendJson(response, 404, { error: "NOT_FOUND" });
       return;
     }
 
     try {
-      const file = await readFile(join(staticDir, staticFile.filename));
+      const file = await readFile(join(staticDir, staticFile?.filename ?? fontPath!));
       response.writeHead(200, {
         ...securityHeaders,
-        "Content-Type": staticFile.contentType,
+        "Content-Type": staticFile?.contentType ?? (fontPath?.endsWith(".css") ? "text/css; charset=utf-8" : fontPath?.endsWith(".woff2") ? "font/woff2" : "text/plain; charset=utf-8"),
         "Cache-Control": "no-cache",
       });
       response.end(request.method === "HEAD" ? undefined : file);

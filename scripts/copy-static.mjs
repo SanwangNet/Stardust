@@ -1,4 +1,4 @@
-import { copyFile, mkdir } from "node:fs/promises";
+import { cp, copyFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -8,4 +8,5 @@ await mkdir(join(webRoot, "dist"), { recursive: true });
 for (const filename of ["index.html", "style.css", "favicon.svg"]) {
   await copyFile(join(webRoot, "src", filename), join(webRoot, "dist", filename));
 }
+await cp(join(webRoot, "src", "fonts"), join(webRoot, "dist", "fonts"), { recursive: true, force: true });
 console.log("[Stardust] 前端静态文件已准备好");

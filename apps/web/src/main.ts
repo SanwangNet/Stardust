@@ -51,20 +51,29 @@ const primaryNav = getElement<HTMLElement>("primary-nav");
 const secondaryNav = getElement<HTMLElement>("secondary-nav");
 const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
 const menuToggle = getElement<HTMLButtonElement>("menu-toggle");
-const pageTitle = getElement<HTMLElement>("page-title");
+let pageTitle = getElement<HTMLElement>("page-title");
 const pageDescription = getElement<HTMLElement>("page-description");
 const pageHeading = document.querySelector<HTMLElement>(".page-heading")!;
 const headingCopy = document.querySelector<HTMLElement>(".heading-copy")!;
+const pageTitleBlock = document.createElement("div");
+pageTitleBlock.className = "page-title-block";
+pageTitleBlock.append(pageTitle);
+headingCopy.insertBefore(pageTitleBlock, pageDescription);
+const pageTitleAncestors = document.createElement("div");
+pageTitleAncestors.className = "page-title-hierarchy";
+pageTitleAncestors.hidden = true;
 const sidebarHeading = getElement<HTMLElement>("sidebar-heading");
 const menuToggleLabel = getElement<HTMLElement>("menu-toggle-label");
 const pageStage = getElement<HTMLElement>("page-stage");
-const spaceHeading = document.createElement("nav");
-spaceHeading.className = "space-heading";
-spaceHeading.setAttribute("aria-label", "卡片层级");
-spaceHeading.hidden = true;
-pageStage.prepend(spaceHeading);
+const spaceOuter = document.createElement("div");
+spaceOuter.className = "space-outer";
+const spaceShell = document.createElement("div");
+spaceShell.className = "space-shell";
+pageHeading.before(spaceOuter);
+spaceOuter.append(pageTitleAncestors, spaceShell);
+spaceShell.append(pageHeading, pageStage);
 const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
-const extensionRoutes = new Map<string, { page: MenuPage; section: HTMLElement; owner: string }>();
+const extensionRoutes = new Map<string, { page: MenuPage; section: HTMLElement; owner: string; parentPath?: string }>();
 let extensionsResolved = false;
 const expanded = new Set<string>();
 const lastVisited = new Map<string, string>();
@@ -81,49 +90,165 @@ let webTitle = "Stardust";
 let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
+let pendingNavigationTitleSource: { path: string; element: HTMLElement; rect: DOMRect; color: string } | undefined;
+let titleShrinkAnimation: Animation | undefined;
+let titleExpandAnimation: Animation | undefined;
 
-type SpaceLevel = { path: string; label: string; icon: string };
-function spaceLevels(path: string): SpaceLevel[] {
+function spaceLevels(path: string): string[] {
   const model = { path: "/model/service", label: "模型服务", icon: "◇" };
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
-  if (path === model.path) return [model];
+  if (path === model.path) return [model.path];
   if (path === "/model/service/config" || path === "/model/service/test" || path === "/model/chat") {
     const labels: Record<string, [string, string]> = { "/model/service/config": ["当前配置", "◇"], "/model/service/test": ["连接测试", "◎"], "/model/chat": ["模型测试对话", "✦"] };
-    return [model, { path, label: labels[path]![0], icon: labels[path]![1] }];
+    return [model.path, path];
   }
-  if (path === "/model/logs") return [{ path, label: "运行日志", icon: "≡" }];
-  if (path === extensions.path) return [extensions];
-  const route = extensionRoutes.get(path);
-  if (!route) return [];
-  const ownerPath = `/extensions/installed/${route.owner}`;
-  const owner = extensionRoutes.get(ownerPath);
-  const levels = [extensions, { path: ownerPath, label: owner?.page.label ?? route.page.label, icon: "⊞" }];
-  if (path !== ownerPath) levels.push({ path, label: route.page.label, icon: "◇" });
+  if (path === "/model/logs") return [path];
+  if (path === extensions.path) return [extensions.path];
+  if (!extensionRoutes.has(path)) return [];
+  const levels: string[] = [];
+  const visited = new Set<string>();
+  let cursor = path;
+  while (cursor !== extensions.path && !visited.has(cursor)) {
+    visited.add(cursor);
+    levels.unshift(cursor);
+    const route = extensionRoutes.get(cursor);
+    if (!route) break;
+    cursor = route.parentPath ?? `/extensions/installed/${route.owner}`;
+  }
+  if (cursor === extensions.path) levels.unshift(extensions.path);
   return levels;
 }
-function renderSpaceHeading(path: string): void {
-  const levels = spaceLevels(path);
-  headingCopy.append(pageTitle, pageDescription);
-  spaceHeading.replaceChildren();
-  spaceHeading.hidden = !levels.length;
-  pageHeading.hidden = Boolean(levels.length);
-  pageStage.classList.toggle("is-space", Boolean(levels.length));
-  for (const [index, level] of levels.entries()) {
-    const isCurrent = index === levels.length - 1;
-    const item = document.createElement(isCurrent ? "div" : "a");
-    item.className = "space-level";
-    if (item instanceof HTMLAnchorElement) item.href = `#${level.path}`;
-    else item.setAttribute("aria-current", "page");
-    const icon = document.createElement("span"); icon.className = "space-level-icon"; icon.setAttribute("aria-hidden", "true");
-    const source = navPages.map((section) => cardFor(section, level.path)).find((card) => card !== null);
-    const originalIcon = source?.querySelector<HTMLElement>(".workspace-icon, .space-card-icon, .extension-icon-box");
-    const svg = originalIcon?.querySelector("svg");
-    if (svg) icon.append(svg.cloneNode(true)); else icon.textContent = originalIcon?.textContent || level.icon;
-    const label = document.createElement("span"); label.className = "space-level-copy";
-    if (isCurrent) { pageTitle.textContent = level.label; label.append(pageTitle, pageDescription); }
-    else label.textContent = level.label;
-    item.append(icon, label); spaceHeading.append(item);
+function titleForPath(path: string): string | undefined {
+  const extension = extensionRoutes.get(path);
+  if (extension) return extension.page.label;
+  for (const category of menu) {
+    const page = pages(category).find((candidate) => candidate.path === path);
+    if (page) return page.label;
   }
+}
+type MovingTitle = { element: HTMLElement; source: DOMRect; color: string };
+function renderTitleHierarchy(path: string, previousPath: string, previousTitle: string, clickedTitle?: { element: HTMLElement; rect: DOMRect; color: string }): { previous?: { element: HTMLElement; source: DOMRect; color: string }; entered?: MovingTitle } {
+  const levels = spaceLevels(path);
+  const ancestors = levels.slice(0, -1);
+  let moving: { element: HTMLElement; source: DOMRect; color: string } | undefined;
+  const stack = document.createDocumentFragment();
+  let destination: HTMLAnchorElement | undefined;
+  for (const [depth, ancestorPath] of ancestors.entries()) {
+    const label = titleForPath(ancestorPath) ?? ancestorPath;
+    const frame = document.createElement("a");
+    frame.className = "space-ancestor-frame";
+    frame.href = `#${ancestorPath}`;
+    frame.tabIndex = -1;
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.setProperty("--space-position", String(depth));
+    const link = document.createElement("a");
+    link.className = "page-title-ancestor";
+    link.href = `#${ancestorPath}`;
+    link.textContent = label;
+    link.setAttribute("aria-label", label);
+    link.style.setProperty("--space-position", String(depth));
+    if (ancestorPath === previousPath) destination = link;
+    stack.append(frame, link);
+  }
+  if (destination && previousTitle) {
+    pageTitle.classList.add("page-title-moving");
+    // Capture before removing the old ancestor row, which is part of the title's current position.
+    const source = pageTitle.getBoundingClientRect();
+    const color = getComputedStyle(pageTitle).color;
+    pageTitle.textContent = previousTitle;
+    pageTitle.id = "";
+    pageTitle.removeAttribute("tabindex");
+    pageTitle.setAttribute("aria-hidden", "true");
+    pageTitle.setAttribute("role", "presentation");
+    pageTitle.classList.add("page-title-ancestor-heading");
+    const nextTitle = document.createElement("h1");
+    nextTitle.id = "page-title"; nextTitle.tabIndex = -1;
+    nextTitle.textContent = titleForPath(path) ?? currentTitle;
+    pageTitle.replaceWith(nextTitle);
+    destination.replaceChildren(pageTitle);
+    moving = { element: pageTitle, source, color };
+    pageTitle = nextTitle;
+  } else {
+    pageTitle.removeAttribute("aria-label");
+    pageTitle.textContent = titleForPath(path) ?? currentTitle;
+  }
+  spaceOuter.style.setProperty("--space-depth", String(ancestors.length));
+  pageTitleAncestors.replaceChildren(stack);
+  pageTitleAncestors.hidden = ancestors.length === 0;
+  let entered: MovingTitle | undefined;
+  if (clickedTitle) {
+    const title = titleForPath(path) ?? currentTitle;
+    const placeholder = clickedTitle.element.cloneNode(true);
+    clickedTitle.element.replaceWith(placeholder);
+    clickedTitle.element.textContent = title;
+    clickedTitle.element.classList.add("page-title-shared");
+    clickedTitle.element.setAttribute("aria-hidden", "true");
+    clickedTitle.element.setAttribute("role", "presentation");
+    pageTitle.setAttribute("aria-label", title);
+    pageTitle.replaceChildren(clickedTitle.element);
+    entered = { element: clickedTitle.element, source: clickedTitle.rect, color: clickedTitle.color };
+  }
+  return { previous: moving, entered };
+}
+function animatePreviousTitle(moving: { element: HTMLElement; source: DOMRect; color: string } | undefined): void {
+  titleShrinkAnimation?.cancel();
+  if (!moving || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const destination = moving.element.getBoundingClientRect();
+  if (!destination.width || !destination.height || !moving.source.width || !moving.source.height) return;
+  const dx = moving.source.left - destination.left, dy = moving.source.top - destination.top;
+  const shrink = moving.element.animate([
+    { transform: `translate(${dx}px, ${dy}px) scale(${moving.source.width / destination.width}, ${moving.source.height / destination.height})`, transformOrigin: "top left", color: moving.color },
+    { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left", color: getComputedStyle(moving.element).color },
+  ], { duration: 280, easing: "cubic-bezier(.2, .75, .25, 1)" });
+  titleShrinkAnimation = shrink;
+  void shrink.finished.catch(() => {}).finally(() => {
+    moving.element.classList.remove("page-title-moving");
+    if (titleShrinkAnimation === shrink) titleShrinkAnimation = undefined;
+  });
+}
+function animateEnteredTitle(moving: MovingTitle | undefined): void {
+  titleExpandAnimation?.cancel();
+  if (!moving || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const placeholder = moving.element.cloneNode(true) as HTMLElement;
+  placeholder.classList.add("page-title-shared-placeholder");
+  placeholder.setAttribute("aria-hidden", "true");
+  moving.element.replaceWith(placeholder);
+  const destination = placeholder.getBoundingClientRect();
+  if (!destination.width || !destination.height || !moving.source.width || !moving.source.height) {
+    placeholder.replaceWith(moving.element);
+    return;
+  }
+  const targetStyle = getComputedStyle(placeholder);
+  const originalStyle = moving.element.getAttribute("style");
+  moving.element.classList.add("page-title-shared-flight");
+  Object.assign(moving.element.style, {
+    fontFamily: targetStyle.fontFamily,
+    fontSize: targetStyle.fontSize,
+    fontWeight: targetStyle.fontWeight,
+    fontStyle: targetStyle.fontStyle,
+    lineHeight: targetStyle.lineHeight,
+    letterSpacing: targetStyle.letterSpacing,
+    color: targetStyle.color,
+    left: `${destination.left}px`,
+    top: `${destination.top}px`,
+    zIndex: "1000",
+  });
+  document.body.append(moving.element);
+  const dx = moving.source.left - destination.left, dy = moving.source.top - destination.top;
+  const scale = moving.source.height / destination.height;
+  const expand = moving.element.animate([
+    { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, transformOrigin: "top left", color: moving.color },
+    { transform: "translate(0, 0) scale(1)", transformOrigin: "top left", color: targetStyle.color },
+  ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" });
+  titleExpandAnimation = expand;
+  void expand.finished.catch(() => {}).finally(() => {
+    moving.element.classList.remove("page-title-shared-flight");
+    if (originalStyle === null) moving.element.removeAttribute("style");
+    else moving.element.setAttribute("style", originalStyle);
+    if (placeholder.isConnected) placeholder.replaceWith(moving.element);
+    else moving.element.remove();
+    if (titleExpandAnimation === expand) titleExpandAnimation = undefined;
+  });
 }
 function cardFor(section: HTMLElement | undefined, path: string): HTMLElement | null {
   if (!section) return null;
@@ -139,12 +264,23 @@ function closeMenu(): void {
 }
 function markNavigationIntent(path: string, event: MouseEvent): void {
   if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  pendingNavigationTitleSource = undefined;
   if (location.hash.slice(1) === path) {
     event.preventDefault();
     pageTitle.focus({ preventScroll: true });
     return;
   }
   pendingNavigationOrigin = "click";
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#/"]') : null;
+  const title = link?.querySelector<HTMLElement>("h2, h3, strong");
+  if (link && title) {
+    pendingNavigationTitleSource = {
+      path,
+      element: title,
+      rect: title.getBoundingClientRect(),
+      color: getComputedStyle(title).color,
+    };
+  }
 }
 function createPageLink(page: MenuPage, path: string, className: string): HTMLAnchorElement {
   const link = document.createElement("a");
@@ -303,7 +439,8 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   }
 
   const previousPath = currentPath;
-  const previousLevels = ["/overview/status", ...spaceLevels(previousPath).map((level) => level.path)];
+  const previousTitle = currentTitle;
+  const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
   const returning = previousPath !== path && previousLevels.includes(path);
 
   const categoryChanged = activeCategory !== category;
@@ -313,9 +450,9 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   currentTitle = page.label;
   lastVisited.set(category.label, path);
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
-  pageTitle.textContent = page.label;
-  getElement<HTMLElement>("page-category").textContent = category.label;
-  getElement<HTMLElement>("page-index").textContent = String(menu.indexOf(category) + 1).padStart(2, "0");
+  const clickedTitle = origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
+  pendingNavigationTitleSource = undefined;
+  const movingTitles = renderTitleHierarchy(path, previousPath, previousTitle, clickedTitle);
   pageDescription.textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
   sidebarHeading.textContent = category.label;
   menuToggleLabel.textContent = `${category.label} / ${page.label}`;
@@ -326,7 +463,10 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
     section.inert = hidden;
     section.removeAttribute("aria-hidden");
   }
-  renderSpaceHeading(path);
+  pageHeading.hidden = false;
+  pageTitleBlock.append(pageTitle);
+  headingCopy.append(pageTitleBlock, pageDescription);
+  spaceShell.classList.toggle("is-space", Boolean(spaceLevels(path).length));
   refreshButton.hidden = path !== "/overview/status";
   primaryLinks.forEach((link, item) => {
     const targetPath = lastVisited.get(item.label) ?? pages(item)[0]!.path;
@@ -340,6 +480,8 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   movePrimaryIndicator();
   moveSecondaryIndicator();
   restoreRouteState(path, returning ? "history" : origin);
+  animatePreviousTitle(movingTitles.previous);
+  animateEnteredTitle(movingTitles.entered);
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
     const target = cardFor(section, previousLevels[previousLevels.indexOf(path) + 1] ?? "");
@@ -1256,7 +1398,7 @@ function registerExtensionPages(item: ExtensionView): void {
   const register = (path: string, title: string, content: HTMLElement): void => {
     const section = document.createElement("section"); section.className = "nav-page content-section extension-detail"; section.dataset.page = path; section.hidden = true; section.inert = true;
     section.append(content); pageStage.append(section); navPages.push(section); ui.sections.push(section);
-    extensionRoutes.set(path, { page: { label: title, path }, section, owner: item.id });
+    extensionRoutes.set(path, { page: { label: title, path }, section, owner: item.id, parentPath: path === extensionPath(item.id) ? "/extensions/installed" : extensionPath(item.id) });
   };
   const root = document.createElement("div"); root.className = "extension-detail-frame extension-overview-frame";
   const version = document.createElement("p"); version.className = "extension-detail-kicker"; version.textContent = `${item.type} · ${item.version}`;
@@ -1303,13 +1445,66 @@ function buildExtensionList(items: ExtensionView[]): void {
     const status = document.createElement("span"); status.className = "extension-card-status"; status.setAttribute("role", "status"); extensionListStatuses.set(item.id, status);
     copy.append(title, description, status); card.append(icon, copy); extensionList.append(card);
   }
+  extensionList.append(buildNavigationTestCard());
   const available = items.filter((item) => !item.installed);
   if (available.length) {
     const heading = document.createElement("h2"); heading.className = "extension-available"; heading.textContent = "可添加的扩展"; extensionList.append(heading);
     for (const item of available) { const install = extensionButton(`添加${item.name}`); install.addEventListener("click", () => { void extensionAction(item.id, "install", {}); }); extensionList.append(install); }
   }
 }
+
+const navigationTestStarId = "navigation-test-star";
+function buildNavigationTestCard(): HTMLAnchorElement {
+  const card = extensionLink("", extensionPath(navigationTestStarId), "extension-card");
+  const icon = document.createElement("span"); icon.className = "extension-icon-box extension-card-icon"; icon.append(extensionIcon("extension"));
+  const copy = document.createElement("span"); copy.className = "extension-card-copy";
+  const title = document.createElement("h2"); title.textContent = "导航测试星核";
+  const description = document.createElement("p"); description.textContent = "用于检查五级子页面的标题层级与返回导航。";
+  const status = document.createElement("span"); status.className = "extension-card-status"; status.textContent = "本地测试页面";
+  copy.append(title, description, status); card.append(icon, copy);
+  return card;
+}
+function registerNavigationTestStar(): void {
+  const id = navigationTestStarId;
+  if (extensionRoutes.has(extensionPath(id))) return;
+  const register = (path: string, title: string, parentPath: string, content: HTMLElement): void => {
+    const section = document.createElement("section"); section.className = "nav-page content-section extension-detail"; section.dataset.page = path; section.hidden = true; section.inert = true;
+    const frame = document.createElement("div"); frame.className = "extension-detail-frame extension-subpage-frame"; frame.append(content); section.append(frame);
+    pageStage.append(section); navPages.push(section);
+    extensionRoutes.set(path, { page: { label: title, path }, section, owner: id, parentPath });
+  };
+  const root = extensionPath(id);
+  const rootContent = document.createElement("div"); rootContent.className = "extension-detail-frame extension-overview-frame";
+  const kicker = document.createElement("p"); kicker.className = "extension-detail-kicker"; kicker.textContent = "导航演示 · 本地页面";
+  const description = document.createElement("p"); description.textContent = "沿着子页面逐层进入，用于检查深层标题与跨级返回。";
+  const links = document.createElement("div"); links.className = "extension-page-links";
+  const firstPath = `${root}/level-1`;
+  const firstLink = extensionLink("", firstPath, "extension-page-link");
+  const firstIcon = document.createElement("span"); firstIcon.className = "extension-icon-box"; firstIcon.append(extensionIcon("extension"));
+  const firstCopy = document.createElement("span"); firstCopy.className = "extension-page-copy";
+  const firstTitle = document.createElement("strong"); firstTitle.textContent = "第 1 层";
+  const firstDescription = document.createElement("span"); firstDescription.textContent = "进入五级空白页面链。";
+  firstCopy.append(firstTitle, firstDescription); firstLink.append(firstIcon, firstCopy); links.append(firstLink);
+  rootContent.append(kicker, description, links);
+  register(root, "导航测试星核", "/extensions/installed", rootContent);
+  for (let depth = 1; depth <= 5; depth++) {
+    const path = `${root}/level-${depth}`;
+    const parentPath = depth === 1 ? root : `${root}/level-${depth - 1}`;
+    const content = document.createElement("div");
+    if (depth < 5) {
+      const links = document.createElement("div"); links.className = "extension-page-links";
+      const link = extensionLink("", `${root}/level-${depth + 1}`, "extension-page-link");
+      const icon = document.createElement("span"); icon.className = "extension-icon-box"; icon.append(extensionIcon("extension"));
+      const copy = document.createElement("span"); copy.className = "extension-page-copy";
+      const title = document.createElement("strong"); title.textContent = `第 ${depth + 1} 层`;
+      const hint = document.createElement("span"); hint.textContent = "继续进入下一层。";
+      copy.append(title, hint); link.append(icon, copy); links.append(link); content.append(links);
+    }
+    register(path, `第 ${depth} 层`, parentPath, content);
+  }
+}
 async function refreshExtensions(): Promise<void> {
+  registerNavigationTestStar();
   try {
     const data = await extensionRequest("/api/v1/extensions") as { extensions: ExtensionView[] };
     if (!Array.isArray(data.extensions)) throw new Error("扩展状态不可用。");
@@ -1333,6 +1528,9 @@ async function refreshExtensions(): Promise<void> {
   } catch (error) {
     getElement<HTMLElement>("overview-extensions").textContent = "扩展状态读取失败";
     extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。";
+    if (!Array.from(extensionList.querySelectorAll<HTMLAnchorElement>(".extension-card")).some((card) => card.hash.slice(1) === extensionPath(navigationTestStarId))) extensionList.append(buildNavigationTestCard());
+    extensionsResolved = true;
+    if (!currentPath || (location.hash.slice(1).startsWith("/extensions/installed/") && currentPath !== location.hash.slice(1))) renderNavigation(currentPath ? "history" : "initial");
   }
 }
 function showExtensions(): void {

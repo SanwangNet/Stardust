@@ -2,6 +2,8 @@
 
 独立 TypeScript 后端和 WebUI，支持单个 OpenAI-compatible 模型，以及项目内提供的 QQ 官方机器人渠道扩展。
 
+WebUI 使用项目内自托管的 Noto Sans SC 可变字体，避免依赖用户设备预装字体或外部字体 CDN；字重范围为 100–900，字体文件遵循 OFL-1.1，许可文本随静态资源提供。
+
 ## 环境要求
 
 - Node.js 22.12 或更高版本（推荐当前受支持的 LTS）
