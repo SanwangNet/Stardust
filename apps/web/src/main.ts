@@ -32,12 +32,13 @@ type MenuGroup = { label: string; id: string; children: MenuPage[] };
 type MenuCategory = { label: string; items: (MenuPage | MenuGroup)[] };
 const menu: MenuCategory[] = [
   { label: "概览", items: [{ label: "运行概况", path: "/overview/status" }] },
-  { label: "模型", items: [{ label: "模型服务", id: "model-service", children: [{ label: "模型测试对话", path: "/model/chat" }, { label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
-  { label: "扩展", items: [{ label: "已安装扩展", path: "/extensions/installed" }] },
+  { label: "模型", items: [{ label: "模型服务", id: "model-service", children: [{ label: "模型服务首页", path: "/model/service" }, { label: "模型测试对话", path: "/model/chat" }, { label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
+  { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
 ];
 const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
+  "/model/service": "配置、测试和使用你的模型服务。",
   "/model/chat": "与当前模型对话，验证你的想法。",
   "/model/service/config": "连接模型，调整请求方式与访问凭证。",
   "/model/service/test": "确认当前模型配置可以正常响应。",
@@ -51,9 +52,17 @@ const secondaryNav = getElement<HTMLElement>("secondary-nav");
 const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
 const menuToggle = getElement<HTMLButtonElement>("menu-toggle");
 const pageTitle = getElement<HTMLElement>("page-title");
+const pageDescription = getElement<HTMLElement>("page-description");
+const pageHeading = document.querySelector<HTMLElement>(".page-heading")!;
+const headingCopy = document.querySelector<HTMLElement>(".heading-copy")!;
 const sidebarHeading = getElement<HTMLElement>("sidebar-heading");
 const menuToggleLabel = getElement<HTMLElement>("menu-toggle-label");
 const pageStage = getElement<HTMLElement>("page-stage");
+const spaceHeading = document.createElement("nav");
+spaceHeading.className = "space-heading";
+spaceHeading.setAttribute("aria-label", "卡片层级");
+spaceHeading.hidden = true;
+pageStage.prepend(spaceHeading);
 const navPages = Array.from(document.querySelectorAll<HTMLElement>(".nav-page"));
 const extensionRoutes = new Map<string, { page: MenuPage; section: HTMLElement; owner: string }>();
 let extensionsResolved = false;
@@ -73,6 +82,54 @@ let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
 
+type SpaceLevel = { path: string; label: string; icon: string };
+function spaceLevels(path: string): SpaceLevel[] {
+  const model = { path: "/model/service", label: "模型服务", icon: "◇" };
+  const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
+  if (path === model.path) return [model];
+  if (path === "/model/service/config" || path === "/model/service/test" || path === "/model/chat") {
+    const labels: Record<string, [string, string]> = { "/model/service/config": ["当前配置", "◇"], "/model/service/test": ["连接测试", "◎"], "/model/chat": ["模型测试对话", "✦"] };
+    return [model, { path, label: labels[path]![0], icon: labels[path]![1] }];
+  }
+  if (path === "/model/logs") return [{ path, label: "运行日志", icon: "≡" }];
+  if (path === extensions.path) return [extensions];
+  const route = extensionRoutes.get(path);
+  if (!route) return [];
+  const ownerPath = `/extensions/installed/${route.owner}`;
+  const owner = extensionRoutes.get(ownerPath);
+  const levels = [extensions, { path: ownerPath, label: owner?.page.label ?? route.page.label, icon: "⊞" }];
+  if (path !== ownerPath) levels.push({ path, label: route.page.label, icon: "◇" });
+  return levels;
+}
+function renderSpaceHeading(path: string): void {
+  const levels = spaceLevels(path);
+  headingCopy.append(pageTitle, pageDescription);
+  spaceHeading.replaceChildren();
+  spaceHeading.hidden = !levels.length;
+  pageHeading.hidden = Boolean(levels.length);
+  pageStage.classList.toggle("is-space", Boolean(levels.length));
+  for (const [index, level] of levels.entries()) {
+    const isCurrent = index === levels.length - 1;
+    const item = document.createElement(isCurrent ? "div" : "a");
+    item.className = "space-level";
+    if (item instanceof HTMLAnchorElement) item.href = `#${level.path}`;
+    else item.setAttribute("aria-current", "page");
+    const icon = document.createElement("span"); icon.className = "space-level-icon"; icon.setAttribute("aria-hidden", "true");
+    const source = navPages.map((section) => cardFor(section, level.path)).find((card) => card !== null);
+    const originalIcon = source?.querySelector<HTMLElement>(".workspace-icon, .space-card-icon, .extension-icon-box");
+    const svg = originalIcon?.querySelector("svg");
+    if (svg) icon.append(svg.cloneNode(true)); else icon.textContent = originalIcon?.textContent || level.icon;
+    const label = document.createElement("span"); label.className = "space-level-copy";
+    if (isCurrent) { pageTitle.textContent = level.label; label.append(pageTitle, pageDescription); }
+    else label.textContent = level.label;
+    item.append(icon, label); spaceHeading.append(item);
+  }
+}
+function cardFor(section: HTMLElement | undefined, path: string): HTMLElement | null {
+  if (!section) return null;
+  return Array.from(section.querySelectorAll<HTMLAnchorElement>(".workspace-card, .space-card, .extension-card, .extension-page-link"))
+    .find((link) => link.hash.slice(1) === path) ?? null;
+}
 function pages(category: MenuCategory): MenuPage[] {
   return category.items.flatMap((item) => "children" in item ? item.children : [item]);
 }
@@ -240,12 +297,14 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   } else if (!location.hash) history.replaceState(null, "", `#${path}`);
   const page = dynamic?.page ?? pages(category).find((item) => item.path === path)!;
   const sidebarPath = dynamic ? "/extensions/installed" : path;
-  const pageHeading = document.querySelector<HTMLElement>(".page-heading")!;
-  pageHeading.classList.toggle("is-extension-detail", Boolean(dynamic));
   if (currentPath === path && currentPath) {
     if (origin === "programmatic") pageTitle.focus({ preventScroll: true });
     return;
   }
+
+  const previousPath = currentPath;
+  const previousLevels = ["/overview/status", ...spaceLevels(previousPath).map((level) => level.path)];
+  const returning = previousPath !== path && previousLevels.includes(path);
 
   const categoryChanged = activeCategory !== category;
   if (currentPath) saveRouteState(currentPath);
@@ -257,7 +316,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   pageTitle.textContent = page.label;
   getElement<HTMLElement>("page-category").textContent = category.label;
   getElement<HTMLElement>("page-index").textContent = String(menu.indexOf(category) + 1).padStart(2, "0");
-  getElement<HTMLElement>("page-description").textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
+  pageDescription.textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
   sidebarHeading.textContent = category.label;
   menuToggleLabel.textContent = `${category.label} / ${page.label}`;
   document.title = `${currentTitle} · ${webTitle}`;
@@ -267,6 +326,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
     section.inert = hidden;
     section.removeAttribute("aria-hidden");
   }
+  renderSpaceHeading(path);
   refreshButton.hidden = path !== "/overview/status";
   primaryLinks.forEach((link, item) => {
     const targetPath = lastVisited.get(item.label) ?? pages(item)[0]!.path;
@@ -279,7 +339,12 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   closeMenu();
   movePrimaryIndicator();
   moveSecondaryIndicator();
-  restoreRouteState(path, origin);
+  restoreRouteState(path, returning ? "history" : origin);
+  const section = navPages.find((item) => item.dataset.page === path);
+  if (section && returning && origin === "click") {
+    const target = cardFor(section, previousLevels[previousLevels.indexOf(path) + 1] ?? "");
+    target?.focus({ preventScroll: true });
+  }
 }
 function setWebTitle(title: string): void {
   webTitle = title;
@@ -1194,12 +1259,7 @@ function registerExtensionPages(item: ExtensionView): void {
     extensionRoutes.set(path, { page: { label: title, path }, section, owner: item.id });
   };
   const root = document.createElement("div"); root.className = "extension-detail-frame extension-overview-frame";
-  const identity = document.createElement("div"); identity.className = "extension-identity-frame";
-  const iconBox = document.createElement("span"); iconBox.className = "extension-icon-box extension-identity-icon"; iconBox.append(extensionIcon("extension"));
-  const identityCopy = document.createElement("div"); identityCopy.className = "extension-identity-copy";
   const version = document.createElement("p"); version.className = "extension-detail-kicker"; version.textContent = `${item.type} · ${item.version}`;
-  const title = document.createElement("h2"); title.className = "extension-detail-title"; title.textContent = item.name;
-  identityCopy.append(version, title); identity.append(iconBox, identityCopy);
   const description = document.createElement("p"); description.textContent = item.description;
   const status = document.createElement("p"); status.setAttribute("role", "status"); ui.statuses.push(status);
   const error = document.createElement("p"); error.setAttribute("role", "status"); ui.errors.push(error);
@@ -1215,14 +1275,11 @@ function registerExtensionPages(item: ExtensionView): void {
     const description = document.createElement("span"); description.textContent = page.description;
     copy.append(title, description); link.append(icon, copy); links.append(link);
   }
-  root.prepend(identity); root.append(links); register(extensionPath(item.id), item.name, root);
+  root.prepend(version); root.append(links); register(extensionPath(item.id), item.name, root);
   for (const page of item.managementPages) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(page.pageId) || !Object.hasOwn(extensionPageFactories, page.pageKind)) continue;
     const content = document.createElement("div"); content.className = "extension-detail-frame extension-subpage-frame";
-    const heading = document.createElement("header"); heading.className = "extension-subpage-heading";
-    const icon = document.createElement("span"); icon.className = "extension-icon-box"; icon.append(extensionIcon(page.pageKind));
-    const pageTitle = document.createElement("h2"); pageTitle.className = "extension-detail-title"; pageTitle.textContent = page.title;
-    heading.append(icon, pageTitle); content.append(heading, extensionPageFactories[page.pageKind]!(item, ui));
+    content.append(extensionPageFactories[page.pageKind]!(item, ui));
     register(`${extensionPath(item.id)}/${page.pageId}`, page.title, content);
   }
 }
