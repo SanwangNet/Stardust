@@ -204,6 +204,14 @@ h1 { margin: 0; font-size: clamp(26px, 2.6vw, 34px); line-height: 1.3; letter-sp
   margin-right: var(--main-gutter);
   padding-bottom: 24px;
 }
+.space-shell.is-entering { border-left-color: transparent; }
+.space-shell.is-entering > .page-heading { border-top-color: transparent; }
+.space-enter-border {
+  position: fixed;
+  z-index: 9;
+  border-style: solid;
+  pointer-events: none;
+}
 .space-exit-layer {
   position: fixed;
   z-index: 9;

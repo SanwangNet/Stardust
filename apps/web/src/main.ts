@@ -84,14 +84,17 @@ const secondaryIndicator = document.createElement("span");
 secondaryIndicator.className = "secondary-indicator";
 secondaryIndicator.setAttribute("aria-hidden", "true");
 const primaryLinks = new Map<MenuCategory, HTMLAnchorElement>();
+const spaceCardSelector = ".workspace-card, .space-card, .extension-card, .extension-page-link";
 let currentTitle = "运行概况";
 let webTitle = "Stardust";
 let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
 let pendingNavigationTitleSource: { path: string; element: HTMLElement; rect: DOMRect; color: string } | undefined;
+let pendingNavigationCardBorder: { path: string; rect: DOMRect; borderWidth: string; borderColor: string } | undefined;
 let titleShrinkAnimation: Animation | undefined;
 let titleExpandAnimation: Animation | undefined;
+let spaceEnterBorder: { element: HTMLElement; animation: Animation; contentAnimations: Animation[]; scrollX: number; scrollY: number } | undefined;
 let spaceExitLayer: HTMLElement | undefined;
 
 function spaceLevels(path: string): string[] {
@@ -269,6 +272,66 @@ function animateEnteredTitle(moving: MovingTitle | undefined): void {
     if (titleExpandAnimation === expand) titleExpandAnimation = undefined;
   });
 }
+function clearSpaceEnter(): void {
+  if (!spaceEnterBorder) return;
+  spaceEnterBorder.animation.cancel();
+  for (const animation of spaceEnterBorder.contentAnimations) animation.cancel();
+  spaceEnterBorder.element.remove();
+  spaceEnterBorder = undefined;
+  spaceShell.classList.remove("is-entering");
+}
+function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCardBorder>): void {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const shell = spaceShell.getBoundingClientRect();
+  const heading = pageHeading.getBoundingClientRect();
+  if (!source.rect.width || !source.rect.height || !shell.width || shell.bottom <= heading.top) return;
+
+  const shellStyle = getComputedStyle(spaceShell);
+  const headingStyle = getComputedStyle(pageHeading);
+  const borderWidth = `${headingStyle.borderTopWidth} 0px 0px ${shellStyle.borderLeftWidth}`;
+  const borderColor = `${headingStyle.borderTopColor} transparent transparent ${shellStyle.borderLeftColor}`;
+  const border = document.createElement("div");
+  border.className = "space-enter-border";
+  border.setAttribute("aria-hidden", "true");
+  document.body.append(border);
+  spaceShell.classList.add("is-entering");
+  const animation = border.animate([
+    {
+      left: `${source.rect.left}px`, top: `${source.rect.top}px`,
+      width: `${source.rect.width}px`, height: `${source.rect.height}px`,
+      borderWidth: source.borderWidth, borderColor: source.borderColor,
+    },
+    {
+      left: `${shell.left}px`, top: `${heading.top}px`,
+      width: `${shell.width}px`, height: `${shell.bottom - heading.top}px`,
+      borderWidth, borderColor,
+    },
+  ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)", fill: "both" });
+  const contentAnimations: Animation[] = [];
+  const contentBounds = pageStage.getBoundingClientRect();
+  if (contentBounds.width && contentBounds.height) {
+    const left = Math.max(0, Math.min(contentBounds.width, source.rect.left - contentBounds.left));
+    const right = Math.max(left, Math.min(contentBounds.width, source.rect.right - contentBounds.left));
+    const top = Math.max(0, Math.min(contentBounds.height, source.rect.top - contentBounds.top));
+    const bottom = Math.max(top, Math.min(contentBounds.height, source.rect.bottom - contentBounds.top));
+    contentAnimations.push(pageStage.animate([
+      { clipPath: `inset(${top}px ${contentBounds.width - right}px ${contentBounds.height - bottom}px ${left}px)`, opacity: 0 },
+      { opacity: 0.4, offset: 0.45 },
+      { clipPath: "inset(0px)", opacity: 1 },
+    ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" }));
+  }
+  if (!pageDescription.hidden) {
+    contentAnimations.push(pageDescription.animate([
+      { opacity: 0, transform: "translateY(8px)" },
+      { opacity: 0, offset: 0.2 },
+      { opacity: 1, transform: "translateY(0)" },
+    ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" }));
+  }
+  spaceEnterBorder = { element: border, animation, contentAnimations, scrollX: window.scrollX, scrollY: window.scrollY };
+  void animation.finished.catch(() => {}).finally(() => {
+    if (spaceEnterBorder?.animation === animation) clearSpaceEnter();
+  });
+}
 function clearSpaceExit(): void {
   if (!spaceExitLayer) return;
   for (const animation of spaceExitLayer.getAnimations({ subtree: true })) animation.cancel();
@@ -367,7 +430,7 @@ function createExitCard(bounds: DOMRect, titleTop: number): { card: HTMLElement;
 }
 function cardFor(section: HTMLElement | undefined, path: string): HTMLElement | null {
   if (!section) return null;
-  return Array.from(section.querySelectorAll<HTMLAnchorElement>(".workspace-card, .space-card, .extension-card, .extension-page-link"))
+  return Array.from(section.querySelectorAll<HTMLAnchorElement>(spaceCardSelector))
     .find((link) => link.hash.slice(1) === path) ?? null;
 }
 function pages(category: MenuCategory): MenuPage[] {
@@ -380,6 +443,7 @@ function closeMenu(): void {
 function markNavigationIntent(path: string, event: MouseEvent): void {
   if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
   pendingNavigationTitleSource = undefined;
+  pendingNavigationCardBorder = undefined;
   if (location.hash.slice(1) === path) {
     event.preventDefault();
     pageTitle.focus({ preventScroll: true });
@@ -387,6 +451,10 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
   }
   pendingNavigationOrigin = "click";
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#/"]') : null;
+  if (link?.matches(spaceCardSelector) && link.closest<HTMLElement>(".nav-page")?.dataset.page === currentPath) {
+    const style = getComputedStyle(link);
+    pendingNavigationCardBorder = { path, rect: link.getBoundingClientRect(), borderWidth: style.borderWidth, borderColor: style.borderColor };
+  }
   const title = link?.querySelector<HTMLElement>("h2, h3, strong");
   if (link && title) {
     pendingNavigationTitleSource = {
@@ -558,6 +626,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
   const returnLevel = previousLevels.indexOf(path);
   const returning = previousPath !== path && returnLevel !== -1;
+  clearSpaceEnter();
   animateSpaceExit(returning ? previousLevels.slice(returnLevel + 1) : []);
 
   const categoryChanged = activeCategory !== category;
@@ -569,6 +638,10 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
   const clickedTitle = origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
   pendingNavigationTitleSource = undefined;
+  const nextLevels = spaceLevels(path);
+  const enteringChild = nextLevels.length > 0 && (previousPath === "/overview/status" || nextLevels.at(-2) === previousPath);
+  const clickedBorder = origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path ? pendingNavigationCardBorder : undefined;
+  pendingNavigationCardBorder = undefined;
   const movingTitles = renderTitleHierarchy(path, previousPath, previousTitle, clickedTitle);
   pageDescription.textContent = pageDescriptions[path] ?? "配置扩展，管理它的连接与服务能力。";
   sidebarHeading.textContent = category.label;
@@ -583,7 +656,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   pageHeading.hidden = false;
   pageTitleBlock.append(pageTitle);
   headingCopy.append(pageTitleBlock, pageDescription);
-  spaceShell.classList.toggle("is-space", Boolean(spaceLevels(path).length));
+  spaceShell.classList.toggle("is-space", nextLevels.length > 0);
   refreshButton.hidden = path !== "/overview/status";
   primaryLinks.forEach((link, item) => {
     const targetPath = lastVisited.get(item.label) ?? pages(item)[0]!.path;
@@ -599,6 +672,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   restoreRouteState(path, returning ? "history" : origin);
   animatePreviousTitle(movingTitles.previous);
   animateEnteredTitle(movingTitles.entered);
+  if (clickedBorder) animateEnteredCardBorder(clickedBorder);
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
     const target = cardFor(section, previousLevels[returnLevel + 1] ?? "");
@@ -649,7 +723,10 @@ document.addEventListener("focusin", (event) => {
     routeStates.set(currentPath, { ...previous, scrollX: window.scrollX, scrollY: window.scrollY, sidebarScrollTop: sidebar.scrollTop, focus: target });
   }
 });
-window.addEventListener("scroll", () => saveRouteState(currentPath), { passive: true });
+window.addEventListener("scroll", () => {
+  if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter();
+  saveRouteState(currentPath);
+}, { passive: true });
 const indicatorResize = new ResizeObserver(() => {
   if (!activeCategory) return;
   movePrimaryIndicator();
@@ -658,6 +735,7 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
+  clearSpaceEnter();
   clearSpaceExit();
   movePrimaryIndicator();
   moveSecondaryIndicator();
