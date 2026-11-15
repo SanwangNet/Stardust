@@ -91,10 +91,15 @@ let currentPath = "";
 let activeCategory: MenuCategory | null = null;
 let pendingNavigationOrigin: "click" | null = null;
 let pendingSidebarTarget: string | undefined;
-let pendingNavigationTitleSource: { path: string; element: HTMLElement; rect: DOMRect; color: string } | undefined;
+let pendingNavigationTitleSource: (MovingTitle & { path: string }) | undefined;
 let pendingNavigationCardBorder: { path: string; rect: DOMRect; borderWidth: string; borderColor: string } | undefined;
-let titleShrinkAnimation: Animation | undefined;
-let titleExpandAnimation: Animation | undefined;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+// Shared titles, frames and surfaces finish together; only return stacks are staggered.
+const spaceMotion = {
+  duration: 360, sidebar: 420, sibling: 300, stagger: 45, maxStagger: 180,
+  easing: "cubic-bezier(.2, .75, .25, 1)", fallEasing: "cubic-bezier(.333, 0, .667, .333)",
+};
+const titleFlights = new Set<{ animation: Animation; restore: () => void; scrollX: number; scrollY: number }>();
 let spaceEnterBorder: { element: HTMLElement; animation: Animation; contentAnimations: Animation[]; scrollX: number; scrollY: number } | undefined;
 let spaceExitLayer: HTMLElement | undefined;
 let sidebarEnterAnimation: { animation: Animation; scrollX: number; scrollY: number } | undefined;
@@ -132,7 +137,7 @@ function titleForPath(path: string): string | undefined {
     if (page) return page.label;
   }
 }
-type MovingTitle = { element: HTMLElement; source: DOMRect; color: string };
+type MovingTitle = { element: HTMLElement; source: DOMRect; color: string; fontSize: number };
 function updateSpaceTitleOffsets(): void {
   const heights = ancestorTitles.map((title) => title.getBoundingClientRect().height);
   let offset = 0;
@@ -142,10 +147,10 @@ function updateSpaceTitleOffsets(): void {
   });
   pageHeading.style.setProperty("--space-title-offset", `${offset}px`);
 }
-function renderTitleHierarchy(path: string, previousPath: string, previousTitle: string, clickedTitle?: { element: HTMLElement; rect: DOMRect; color: string }): { previous?: { element: HTMLElement; source: DOMRect; color: string }; entered?: MovingTitle } {
+function renderTitleHierarchy(path: string, previousPath: string, previousTitle: string, clickedTitle?: MovingTitle): { previous?: MovingTitle; entered?: MovingTitle } {
   const levels = spaceLevels(path);
   const ancestors = levels.slice(0, -1);
-  let moving: { element: HTMLElement; source: DOMRect; color: string } | undefined;
+  let moving: MovingTitle | undefined;
   const stack = document.createDocumentFragment();
   let parent: DocumentFragment | HTMLElement = stack;
   const titles: HTMLAnchorElement[] = [];
@@ -171,10 +176,9 @@ function renderTitleHierarchy(path: string, previousPath: string, previousTitle:
     titles.push(link);
   }
   if (destination && previousTitle) {
-    pageTitle.classList.add("page-title-moving");
     // Capture before removing the old ancestor row, which is part of the title's current position.
     const source = pageTitle.getBoundingClientRect();
-    const color = getComputedStyle(pageTitle).color;
+    const { color, fontSize } = getComputedStyle(pageTitle);
     pageTitle.textContent = previousTitle;
     pageTitle.id = "";
     pageTitle.removeAttribute("tabindex");
@@ -186,7 +190,7 @@ function renderTitleHierarchy(path: string, previousPath: string, previousTitle:
     nextTitle.textContent = titleForPath(path) ?? currentTitle;
     pageTitle.replaceWith(nextTitle);
     destination.replaceChildren(pageTitle);
-    moving = { element: pageTitle, source, color };
+    moving = { element: pageTitle, source, color, fontSize: parseFloat(fontSize) };
     pageTitle = nextTitle;
   } else {
     pageTitle.removeAttribute("aria-label");
@@ -211,29 +215,20 @@ function renderTitleHierarchy(path: string, previousPath: string, previousTitle:
     clickedTitle.element.setAttribute("role", "presentation");
     pageTitle.setAttribute("aria-label", title);
     pageTitle.replaceChildren(clickedTitle.element);
-    entered = { element: clickedTitle.element, source: clickedTitle.rect, color: clickedTitle.color };
+    entered = clickedTitle;
   }
   return { previous: moving, entered };
 }
-function animatePreviousTitle(moving: { element: HTMLElement; source: DOMRect; color: string } | undefined): void {
-  titleShrinkAnimation?.cancel();
-  if (!moving || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const destination = moving.element.getBoundingClientRect();
-  if (!destination.width || !destination.height || !moving.source.width || !moving.source.height) return;
-  const dx = moving.source.left - destination.left, dy = moving.source.top - destination.top;
-  const shrink = moving.element.animate([
-    { transform: `translate(${dx}px, ${dy}px) scale(${moving.source.width / destination.width}, ${moving.source.height / destination.height})`, transformOrigin: "top left", color: moving.color },
-    { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left", color: getComputedStyle(moving.element).color },
-  ], { duration: 280, easing: "cubic-bezier(.2, .75, .25, 1)" });
-  titleShrinkAnimation = shrink;
-  void shrink.finished.catch(() => {}).finally(() => {
-    moving.element.classList.remove("page-title-moving");
-    if (titleShrinkAnimation === shrink) titleShrinkAnimation = undefined;
-  });
+function clearTitleFlights(): void {
+  // Restore synchronously before the next route captures or reparents a title.
+  for (const flight of titleFlights) {
+    flight.animation.cancel();
+    flight.restore();
+  }
 }
-function animateEnteredTitle(moving: MovingTitle | undefined, returning = false): void {
-  titleExpandAnimation?.cancel();
-  if (!moving || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+function animateTitle(moving: MovingTitle | undefined, returning = false): void {
+  if (!moving || reducedMotion.matches || moving.source.bottom <= 0 || moving.source.top >= window.innerHeight) return;
+  const element = moving.element;
   const placeholder = moving.element.cloneNode(true) as HTMLElement;
   placeholder.classList.add("page-title-shared-placeholder");
   placeholder.setAttribute("aria-hidden", "true");
@@ -253,6 +248,9 @@ function animateEnteredTitle(moving: MovingTitle | undefined, returning = false)
     fontStyle: targetStyle.fontStyle,
     lineHeight: targetStyle.lineHeight,
     letterSpacing: targetStyle.letterSpacing,
+    width: `${destination.width}px`,
+    whiteSpace: targetStyle.whiteSpace,
+    overflowWrap: targetStyle.overflowWrap,
     color: targetStyle.color,
     left: `${destination.left}px`,
     top: `${destination.top}px`,
@@ -260,20 +258,23 @@ function animateEnteredTitle(moving: MovingTitle | undefined, returning = false)
   });
   document.body.append(moving.element);
   const dx = moving.source.left - destination.left, dy = moving.source.top - destination.top;
-  const scale = moving.source.height / destination.height;
+  // A single scale preserves glyph proportions, including when a long title wraps.
+  const scale = moving.fontSize / parseFloat(targetStyle.fontSize);
   const expand = moving.element.animate([
     { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, transformOrigin: "top left", color: moving.color },
     { transform: "translate(0, 0) scale(1)", transformOrigin: "top left", color: targetStyle.color },
-  ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" });
-  titleExpandAnimation = expand;
-  void expand.finished.catch(() => {}).finally(() => {
-    moving.element.classList.remove("page-title-shared-flight");
-    if (originalStyle === null) moving.element.removeAttribute("style");
-    else moving.element.setAttribute("style", originalStyle);
-    if (placeholder.isConnected) placeholder.replaceWith(moving.element);
-    else moving.element.remove();
-    if (titleExpandAnimation === expand) titleExpandAnimation = undefined;
-  });
+  ], { duration: spaceMotion.duration, easing: spaceMotion.easing });
+  const flight = { animation: expand, restore, scrollX: window.scrollX, scrollY: window.scrollY };
+  function restore(): void {
+    if (!titleFlights.delete(flight)) return;
+    element.classList.remove("page-title-shared-flight");
+    if (originalStyle === null) element.removeAttribute("style");
+    else element.setAttribute("style", originalStyle);
+    if (placeholder.isConnected) placeholder.replaceWith(element);
+    else element.remove();
+  }
+  titleFlights.add(flight);
+  void expand.finished.then(restore, restore);
 }
 function clearSpaceEnter(): void {
   if (!spaceEnterBorder) return;
@@ -289,13 +290,20 @@ function clearSidebarEnter(): void {
 }
 function clearRootFrameTransition(): void {
   if (!rootFrameTransition) return;
+  const card = rootFrameTransition.card;
+  if (card) {
+    // Commit the real border immediately, without transitioning from transparent.
+    card.classList.add("is-frame-settling");
+    card.classList.remove("is-frame-moving");
+    void card.offsetWidth;
+  }
   rootFrameTransition.animation.cancel();
   rootFrameTransition.element.remove();
-  rootFrameTransition.card?.classList.remove("is-frame-moving");
+  card?.classList.remove("is-frame-settling");
   rootFrameTransition = undefined;
 }
 function animateRootFrame(card: HTMLElement, entering: boolean): void {
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (reducedMotion.matches) return;
   const frame = card.querySelector<HTMLElement>(":scope > .space-ancestor-frame");
   const title = card.querySelector<HTMLElement>(":scope > .page-title-ancestor");
   const header = document.querySelector<HTMLElement>(".site-header");
@@ -326,7 +334,7 @@ function animateRootFrame(card: HTMLElement, entering: boolean): void {
   document.body.append(overlay);
   if (entering) card.classList.add("is-frame-moving");
   const animation = overlay.animate(entering ? [start, target] : [target, start], {
-    duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)", fill: "both",
+    duration: spaceMotion.duration, easing: spaceMotion.easing, fill: "both",
   });
   rootFrameTransition = { element: overlay, animation, card: entering ? card : undefined, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
@@ -334,21 +342,21 @@ function animateRootFrame(card: HTMLElement, entering: boolean): void {
   });
 }
 function animateSidebarChild(sibling = false): void {
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (reducedMotion.matches) return;
   const bounds = spaceShell.getBoundingClientRect();
   if (!bounds.width || !bounds.height || bounds.top >= window.innerHeight) return;
   const distance = sibling ? 32 : window.innerHeight - bounds.top + 1;
   const animation = spaceShell.animate([
     { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
     { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
-  ], { duration: sibling ? 360 : 480, easing: "cubic-bezier(.2, .75, .25, 1)" });
+  ], { duration: sibling ? spaceMotion.sibling : spaceMotion.sidebar, easing: spaceMotion.easing });
   sidebarEnterAnimation = { animation, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
     if (sidebarEnterAnimation?.animation === animation) sidebarEnterAnimation = undefined;
   });
 }
 function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCardBorder>): void {
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (reducedMotion.matches || source.rect.bottom <= 0 || source.rect.top >= window.innerHeight) return;
   const shell = spaceShell.getBoundingClientRect();
   const heading = pageHeading.getBoundingClientRect();
   if (!source.rect.width || !source.rect.height || !shell.width || shell.bottom <= heading.top) return;
@@ -373,26 +381,30 @@ function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCa
       width: `${shell.width}px`, height: `${shell.bottom - heading.top}px`,
       borderWidth, borderColor,
     },
-  ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)", fill: "both" });
+  ], { duration: spaceMotion.duration, easing: spaceMotion.easing, fill: "both" });
   const contentAnimations: Animation[] = [];
+  // Reveal the surface and its shadow from the source card, not just its content.
+  const left = Math.max(0, Math.min(shell.width, source.rect.left - shell.left));
+  const right = Math.max(left, Math.min(shell.width, source.rect.right - shell.left));
+  const top = Math.max(0, Math.min(shell.height, source.rect.top - shell.top));
+  const bottom = Math.max(top, Math.min(shell.height, source.rect.bottom - shell.top));
+  contentAnimations.push(spaceShell.animate([
+    { clipPath: `inset(${top}px ${shell.width - right}px ${shell.height - bottom}px ${left}px)`, boxShadow: "none" },
+    { clipPath: "inset(-24px)", boxShadow: shellStyle.boxShadow },
+  ], { duration: spaceMotion.duration, easing: spaceMotion.easing }));
   const contentBounds = pageStage.getBoundingClientRect();
   if (contentBounds.width && contentBounds.height) {
-    const left = Math.max(0, Math.min(contentBounds.width, source.rect.left - contentBounds.left));
-    const right = Math.max(left, Math.min(contentBounds.width, source.rect.right - contentBounds.left));
-    const top = Math.max(0, Math.min(contentBounds.height, source.rect.top - contentBounds.top));
-    const bottom = Math.max(top, Math.min(contentBounds.height, source.rect.bottom - contentBounds.top));
     contentAnimations.push(pageStage.animate([
-      { clipPath: `inset(${top}px ${contentBounds.width - right}px ${contentBounds.height - bottom}px ${left}px)`, opacity: 0 },
-      { opacity: 0.4, offset: 0.45 },
-      { clipPath: "inset(0px)", opacity: 1 },
-    ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" }));
+      { opacity: 0, transform: "translateY(8px)" },
+      { opacity: 1, transform: "translateY(0)" },
+    ], { delay: 60, duration: spaceMotion.duration - 60, easing: spaceMotion.easing, fill: "both" }));
   }
   if (!pageDescription.hidden) {
     contentAnimations.push(pageDescription.animate([
       { opacity: 0, transform: "translateY(8px)" },
       { opacity: 0, offset: 0.2 },
       { opacity: 1, transform: "translateY(0)" },
-    ], { duration: 360, easing: "cubic-bezier(.2, .75, .25, 1)" }));
+    ], { duration: spaceMotion.duration, easing: spaceMotion.easing }));
   }
   spaceEnterBorder = { element: border, animation, contentAnimations, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
@@ -407,7 +419,7 @@ function clearSpaceExit(): void {
 }
 function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   clearSpaceExit();
-  if (!exitingPaths.length || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (!exitingPaths.length || reducedMotion.matches) return;
 
   const layer = document.createElement("div");
   layer.className = "space-exit-layer";
@@ -422,6 +434,7 @@ function animateSpaceExit(exitingPaths: string[], sibling = false): void {
     if (!title) continue;
     const bounds = frame.getBoundingClientRect();
     const { card, surface, clippedTop } = createExitCard(bounds, title.getBoundingClientRect().top);
+    card.style.boxShadow = getComputedStyle(frame.parentElement!).boxShadow;
     surface.classList.add("space-exit-ancestor");
     const label = title.cloneNode(true) as HTMLElement;
     label.style.top = `${clippedTop}px`;
@@ -432,6 +445,8 @@ function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   if (activePage && exiting.has(currentPath) && spaceShell.classList.contains("is-space")) {
     const bounds = spaceShell.getBoundingClientRect();
     const { card, surface, clippedTop } = createExitCard(bounds, pageHeading.getBoundingClientRect().top);
+    card.style.boxShadow = getComputedStyle(spaceShell).boxShadow;
+    card.classList.toggle("is-root-exit", spaceShell.parentElement === spaceOuter);
     const shell = spaceShell.cloneNode(false) as HTMLElement;
     shell.removeAttribute("style");
     const heading = pageHeading.cloneNode(true) as HTMLElement;
@@ -463,16 +478,16 @@ function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   document.body.append(layer);
   for (const { element, top, left } of scrollPositions) element.scrollTo(left, top);
   spaceExitLayer = layer;
-  const stagger = Math.min(65, 260 / Math.max(1, cards.length - 1));
+  const stagger = Math.min(spaceMotion.stagger, spaceMotion.maxStagger / Math.max(1, cards.length - 1));
   const viewportBottom = layer.getBoundingClientRect().bottom;
   const animations = cards.map((card, index) => {
     const distance = sibling ? 32 : Math.max(0, viewportBottom - card.getBoundingClientRect().top + 1);
     // A quadratic curve gives the card a slow start and increasing speed.
-    const duration = sibling ? 360 : Math.min(420, Math.max(280, Math.sqrt(distance) * 13));
+    const duration = sibling ? spaceMotion.sibling : Math.min(380, Math.max(260, Math.sqrt(distance) * 12));
     return card.animate([
       { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
       { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
-    ], { duration, delay: index * stagger, easing: sibling ? "cubic-bezier(.2, .75, .25, 1)" : "cubic-bezier(.333, 0, .667, .333)", fill: "both" });
+    ], { duration, delay: index * stagger, easing: sibling ? spaceMotion.easing : spaceMotion.fallEasing, fill: "both" });
   });
   void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
     if (spaceExitLayer === layer) clearSpaceExit();
@@ -518,6 +533,7 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
     return;
   }
   pendingNavigationOrigin = "click";
+  clearTitleFlights();
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href^="#/"]') : null;
   if (link?.closest("#secondary-nav")) pendingSidebarTarget = path;
   if (link?.matches(spaceCardSelector) && link.closest<HTMLElement>(".nav-page")?.dataset.page === currentPath) {
@@ -526,11 +542,13 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
   }
   const title = link?.querySelector<HTMLElement>("h2, h3, strong");
   if (link && title) {
+    const style = getComputedStyle(title);
     pendingNavigationTitleSource = {
       path,
       element: title,
-      rect: title.getBoundingClientRect(),
-      color: getComputedStyle(title).color,
+      source: title.getBoundingClientRect(),
+      color: style.color,
+      fontSize: parseFloat(style.fontSize),
     };
   }
 }
@@ -696,6 +714,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const nextLevels = spaceLevels(path);
   const returnLevel = previousLevels.indexOf(path);
   const returning = previousPath !== path && returnLevel !== -1;
+  clearTitleFlights();
   clearRootFrameTransition();
   const rootReturning = returning && nextLevels.length === 1 && previousLevels[1] === path;
   const oldRootCard = rootReturning ? spaceOuter.querySelector<HTMLElement>(":scope > .space-ancestor-card") : null;
@@ -706,7 +725,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
     nextLevels.slice(0, -1).every((level, index) => level === previousLevels[index + 1]);
   clearSidebarEnter();
   let returningTitle: MovingTitle | undefined;
-  if (returning && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (returning && !reducedMotion.matches) {
     const source = ancestorTitles.find((title) => title.hash.slice(1) === path);
     if (source) {
       const range = document.createRange();
@@ -718,7 +737,8 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
         element.textContent = source.textContent;
         element.setAttribute("aria-hidden", "true");
         element.setAttribute("role", "presentation");
-        returningTitle = { element, source: rect, color: getComputedStyle(source).color };
+        const style = getComputedStyle(source);
+        returningTitle = { element, source: rect, color: style.color, fontSize: parseFloat(style.fontSize) };
       }
     }
   }
@@ -775,8 +795,8 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
     rootFrameTransition.scrollX = window.scrollX;
     rootFrameTransition.scrollY = window.scrollY;
   }
-  animatePreviousTitle(movingTitles.previous);
-  animateEnteredTitle(returningTitle ?? movingTitles.entered, Boolean(returningTitle));
+  animateTitle(movingTitles.previous);
+  animateTitle(returningTitle ?? movingTitles.entered, Boolean(returningTitle));
   if (clickedBorder) animateEnteredCardBorder(clickedBorder);
   if (sidebarChild || sidebarSibling) animateSidebarChild(sidebarSibling);
   if (previousLevels.length === 2 && nextLevels.length > 1 && nextLevels[0] === previousPath) {
@@ -834,6 +854,7 @@ document.addEventListener("focusin", (event) => {
   }
 });
 window.addEventListener("scroll", () => {
+  if (Array.from(titleFlights).some((flight) => flight.scrollX !== window.scrollX || flight.scrollY !== window.scrollY)) clearTitleFlights();
   if (rootFrameTransition && (rootFrameTransition.scrollX !== window.scrollX || rootFrameTransition.scrollY !== window.scrollY)) clearRootFrameTransition();
   if (sidebarEnterAnimation && (sidebarEnterAnimation.scrollX !== window.scrollX || sidebarEnterAnimation.scrollY !== window.scrollY)) clearSidebarEnter();
   if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter();
@@ -847,12 +868,21 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
+  clearTitleFlights();
   clearRootFrameTransition();
   clearSidebarEnter();
   clearSpaceEnter();
   clearSpaceExit();
   movePrimaryIndicator();
   moveSecondaryIndicator();
+});
+reducedMotion.addEventListener("change", () => {
+  if (!reducedMotion.matches) return;
+  clearTitleFlights();
+  clearRootFrameTransition();
+  clearSidebarEnter();
+  clearSpaceEnter();
+  clearSpaceExit();
 });
 getElement<HTMLElement>("settings-access-url").textContent = location.origin;
 createPrimaryNavigation();
