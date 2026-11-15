@@ -10,6 +10,8 @@ import { createConfigStore } from "../apps/server/dist/config.js";
 import { createSecretStore } from "../apps/server/dist/model-secret.js";
 import { createEnvLoader } from "../apps/server/dist/env.js";
 import { ModelService } from "../apps/server/dist/model.js";
+import { classifyModel } from "../apps/server/dist/model-classification.js";
+import { classifyModelName } from "../apps/web/dist/model-classification.js";
 import { collectModelStream } from "../apps/server/dist/model-stream.js";
 import { safeTarget } from "../apps/server/dist/model-diagnostics.js";
 import { SetupService } from "../apps/server/dist/setup.js";
@@ -30,11 +32,19 @@ async function fixture(t) {
     let body = "";
     req.on("data", (chunk) => body += chunk);
     req.on("end", () => {
-      lastRequest = { path: req.url, authorization: req.headers.authorization, accept: req.headers.accept, body: JSON.parse(body) };
+      lastRequest = { path: req.url, authorization: req.headers.authorization, accept: req.headers.accept, body: body ? JSON.parse(body) : null };
+      if (req.url === "/v1/models" && mode === "models") { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ data: [{ id: "z-model" }, { id: "a-model" }, { id: "a-model" }] })); return; }
+      if (req.url === "/v1/models" && mode === "models-secret") { res.end(JSON.stringify({ data: [{ id: "private-key" }] })); return; }
       if (mode === "timeout") return;
       if (mode.startsWith("sse-")) {
         res.writeHead(200, { "Content-Type": mode === "sse-wrong-type" ? "text/plain" : "text/event-stream; charset=utf-8", "X-Request-ID": "req-stream" });
-        if (mode === "sse-valid") {
+        if (mode === "sse-live") {
+          res.write('data: {"choices":[{"delta":{"content":"hello streaming response "}}]}\n\n');
+          setTimeout(() => res.end('data: {"choices":[{"delta":{"content":"world"}}]}\n\ndata: [DONE]\n\n'), 150);
+        } else if (mode === "sse-split-secret") {
+          res.write('data: {"choices":[{"delta":{"content":"before private-"}}]}\n\n');
+          res.end('data: {"choices":[{"delta":{"content":"key after"}}]}\n\ndata: [DONE]\n\n');
+        } else if (mode === "sse-valid") {
           const data = Buffer.from(': heartbeat\r\ndata: {"choices":\r\ndata: [{"delta":{"content":"你好"}}]}\r\n\r\ndata:{"choices":[{"delta":{"content":"世界"}}]}\n\ndata: [DONE]\n\n');
           const position = data.indexOf(Buffer.from("你"));
           const chunks = [data.subarray(0, 3), data.subarray(3, position + 1), data.subarray(position + 1, position + 2), data.subarray(position + 2)];
@@ -114,6 +124,64 @@ function post(origin, path, input, headers = {}) {
   return fetch(`${origin}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(input) });
 }
 const options = (baseUrl, extra = {}) => ({ baseUrl, modelId: "demo", timeoutMs: 1000, keyAction: "keep", ...extra });
+
+test("扫描已保存的模型服务，验证权限、结果和密钥保护", async (t) => {
+  const { setup, origin, upstreamUrl, last, mode } = await fixture(t);
+  assert.equal((await post(origin, "/api/v1/model/list", {})).status, 403);
+  await setup.completeInitialization({});
+  await post(origin, "/api/v1/model/config", options(upstreamUrl, { keyAction: "set", apiKey: "private-key" }));
+  assert.equal((await post(origin, "/api/v1/model/list", {}, { Origin: "https://cross.example" })).status, 403);
+  assert.equal((await post(origin, "/api/v1/model/list", { extra: true })).status, 400);
+  mode("models");
+  const response = await post(origin, "/api/v1/model/list", {});
+  assert.deepEqual(await response.json(), { models: ["a-model", "z-model"], categories: { "a-model": "other", "z-model": "other" } });
+  assert.equal(last().path, "/v1/models");
+  assert.equal(last().authorization, "Bearer private-key");
+  mode("models-secret");
+  const invalid = await post(origin, "/api/v1/model/list", {});
+  assert.equal(invalid.status, 502);
+  assert.doesNotMatch(await invalid.text(), /private-key/);
+});
+
+test("聊天流逐段发送、掩盖跨片段密钥并报告中途错误", async (t) => {
+  const { setup, origin, upstreamUrl, mode, last } = await fixture(t);
+  await setup.completeInitialization({});
+  await post(origin, "/api/v1/model/config", options(upstreamUrl, { stream: true, keyAction: "set", apiKey: "private-key" }));
+  mode("sse-live");
+  let response = await post(origin, "/api/v1/model/chat-stream", { message: "hello" });
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let result = "";
+  while (!result.includes("event: delta")) { const part = await reader.read(); assert.equal(part.done, false); result += decoder.decode(part.value, { stream: true }); }
+  assert.doesNotMatch(result, /event: done/);
+  for (;;) { const part = await reader.read(); if (part.done) break; result += decoder.decode(part.value, { stream: true }); }
+  assert.match(result, /event: done/);
+  assert.equal(last().body.stream, true);
+  assert.deepEqual(last().body.messages, [{ role: "user", content: "hello" }]);
+  mode("sse-split-secret"); response = await post(origin, "/api/v1/model/chat-stream", { message: "hello" });
+  result = await response.text(); assert.doesNotMatch(result, /private-key|private-/); assert.match(result, /\[REDACTED\]/);
+  mode("sse-truncated"); response = await post(origin, "/api/v1/model/chat-stream", { message: "hello" });
+  result = await response.text(); assert.match(result, /event: error/); assert.match(result, /STREAM_INCOMPLETE/); assert.doesNotMatch(result, /event: done/);
+});
+
+test("模型分类优先使用能力信息，名称只作为后备，未知模型保留在其他类别", () => {
+  assert.equal(classifyModel("vendor/private-v2", { capabilities: { chat: true } }), "chat");
+  assert.equal(classifyModel("gpt-image-2", {}), "other");
+  assert.equal(classifyModel("gpt-5.5-openai-compact", {}), "other");
+  assert.equal(classifyModel("gpt-5.5-openai-compact", { capabilities: { chat: true } }), "other");
+  assert.equal(classifyModel("gpt-6.1-sol", {}), "chat");
+  assert.equal(classifyModel("custom-instruct-v3", {}), "chat");
+  assert.equal(classifyModel("custom-embedding-v2", {}), "other");
+  assert.equal(classifyModel("unknown-model", {}), "other");
+  assert.equal(classifyModel("gpt-6", { type: "embedding" }), "other");
+  assert.equal(classifyModel("custom-image", { capabilities: { chat: true } }), "chat");
+  assert.equal(classifyModel("gpt-6", { capabilities: { chat: false } }), "other");
+});
+
+test("旧后端仅返回模型 ID 时，前端名称分类与服务端一致", () => {
+  for (const id of ["gpt-5.5", "gpt-5.5-openai-compact", "gpt-6.1-terra", "gpt-image-2", "custom-instruct-v3", "custom-embedding-v2", "codex-auto-review"]) {
+    assert.equal(classifyModelName(id), classifyModel(id, {}), id);
+  }
+});
 
 test("密钥增删替换保留其他环境变量和注释，并遵循进程变量优先级", async (t) => {
   const { root, secrets, processEnv } = await fixture(t);

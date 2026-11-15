@@ -4,6 +4,7 @@ import { networkDiagnostic, safeTarget, upstreamDiagnostic, type ModelDiagnostic
 import { collectModelStream, collectModelTurn } from "./model-stream.js";
 import { randomUUID } from "node:crypto";
 import { logger, type LogService } from "./logger.js";
+import { classifyModel, type ModelCategory } from "./model-classification.js";
 
 export class ModelError extends Error {
   readonly diagnostic: ModelDiagnostic;
@@ -64,12 +65,64 @@ export class ModelService {
     return this.getConfig();
   }
 
-  async chat(message: unknown, cancellation?: AbortSignal, context?: { eventId?: string }): Promise<string> {
+  async listModels(cancellation?: AbortSignal): Promise<{ models: string[]; categories: Record<string, ModelCategory> }> {
+    const { baseUrl, timeoutMs } = this.store.loadConfig().model;
+    if (!baseUrl) throw new ModelError("NOT_CONFIGURED", 400);
+    const { key, fileKey } = this.secrets.getKey();
+    const endpoint = `${baseUrl.replace(/\/+$/, "")}/models`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
+    try {
+      const response = await this.request(endpoint, { headers, redirect: "error", signal });
+      if (!response.ok) {
+        const diagnostic = await upstreamDiagnostic(response, endpoint, [key, fileKey], "");
+        throw new ModelError(diagnostic.category, 502, diagnostic);
+      }
+      const invalid = () => new ModelError("INVALID_RESPONSE", 502);
+      if (Number(response.headers.get("content-length")) > maxResponse || !response.body) throw invalid();
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = []; let size = 0; let ended = false;
+      const cancel = () => { void reader.cancel().catch(() => {}); };
+      signal.addEventListener("abort", cancel, { once: true });
+      if (signal.aborted) cancel();
+      try {
+        for (;;) {
+          const part = await reader.read();
+          if (signal.aborted) throw signal.reason;
+          if (part.done) { ended = true; break; }
+          size += part.value.length; if (size > maxResponse) throw invalid();
+          chunks.push(part.value);
+        }
+      } finally { signal.removeEventListener("abort", cancel); if (!ended) cancel(); reader.releaseLock(); }
+      let data: unknown;
+      try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw invalid(); }
+      const entries = (data as { data?: unknown })?.data;
+      if (!Array.isArray(entries) || entries.length > 10000) throw invalid();
+      const ids = entries.map((entry: unknown) => (entry as { id?: unknown } | null)?.id);
+      if (ids.some((id) => typeof id !== "string" || !id.trim() || id.length > 256 || /[\x00-\x1f\x7f]/.test(id) || [key, fileKey].some((secret) => secret && id.includes(secret)))) throw invalid();
+      const categories: Record<string, ModelCategory> = Object.create(null) as Record<string, ModelCategory>;
+      for (let i = 0; i < entries.length; i++) {
+        const id = ids[i] as string;
+        const category = classifyModel(id, entries[i]);
+        categories[id] = categories[id] === "chat" || category === "chat" ? "chat" : "other";
+      }
+      return { models: [...new Set(ids as string[])].sort((a, b) => a.localeCompare(b)), categories };
+    } catch (error) {
+      if (error instanceof ModelError) throw error;
+      if (cancellation?.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
+      const diagnostic = networkDiagnostic(error, timeout.aborted, endpoint, [key, fileKey], "");
+      throw new ModelError(diagnostic.category, diagnostic.category === "TIMEOUT" ? 504 : 502, diagnostic);
+    }
+  }
+
+  async chat(message: unknown, cancellation?: AbortSignal, context?: { eventId?: string }, onContent?: (chunk: string) => void): Promise<string> {
     const requestId = randomUUID();
     const started = Date.now();
     this.logs.write("DEBUG", "model", "模型请求开始。", { requestId, eventId: context?.eventId });
     try {
-      const reply = await this.performChat(message, cancellation);
+      const reply = await this.performChat(message, cancellation, onContent);
       this.logs.write("INFO", "model", "模型请求完成。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started });
       return reply;
     } catch (error) {
@@ -130,7 +183,7 @@ export class ModelService {
       throw normalized;
     }
   }
-  private async performChat(message: unknown, cancellation?: AbortSignal): Promise<string> {
+  private async performChat(message: unknown, cancellation?: AbortSignal, onContent?: (chunk: string) => void): Promise<string> {
     if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > maxMessage) throw new ModelError("INVALID_INPUT", 400);
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
     if (!baseUrl || !modelId) throw new ModelError("NOT_CONFIGURED", 400);
@@ -158,7 +211,26 @@ export class ModelService {
           diagnostic.status = response.status;
           return new ModelError(diagnostic.category, 502, diagnostic);
         };
-        const text = await collectModelStream(response, signal, maxResponse, invalidResponse, incomplete, streamError);
+        const secrets = [key, fileKey].filter(Boolean);
+        let pending = "";
+        const emit = (chunk: string, final = false) => {
+          pending += chunk;
+          let end = pending.length;
+          if (!final) for (const secret of secrets) {
+            for (let length = Math.min(secret.length - 1, pending.length); length > 0; length--) {
+              if (pending.endsWith(secret.slice(0, length))) { end = Math.min(end, pending.length - length); break; }
+            }
+          }
+          // A complete secret can cross a boundary caused by a different secret's prefix.
+          for (const secret of secrets) for (let index = pending.indexOf(secret); index !== -1 && index < end; index = pending.indexOf(secret, index + 1)) {
+            if (index + secret.length > end) end = index;
+          }
+          const safe = secrets.reduce((value, secret) => value.replaceAll(secret, "[REDACTED]"), pending.slice(0, end));
+          pending = pending.slice(end);
+          if (safe) onContent?.(safe);
+        };
+        const text = await collectModelStream(response, signal, maxResponse, invalidResponse, incomplete, streamError, onContent ? (chunk) => emit(chunk) : undefined);
+        if (onContent) emit("", true);
         return [key, fileKey].filter(Boolean).reduce((value, secret) => value.replaceAll(secret, "[REDACTED]"), text);
       }
       const reader = response.body?.getReader();

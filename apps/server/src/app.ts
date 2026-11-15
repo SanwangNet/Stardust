@@ -330,7 +330,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
-    if (["/api/v1/model/config", "/api/v1/model/test", "/api/v1/model/chat"].includes(pathname)) {
+    if (["/api/v1/model/config", "/api/v1/model/test", "/api/v1/model/chat", "/api/v1/model/chat-stream", "/api/v1/model/list"].includes(pathname)) {
       try {
         if (!setup.getInitializationState().initialized) throw new ModelError("SETUP_REQUIRED", 403);
         if (pathname === "/api/v1/model/config" && request.method === "GET") { sendJson(response, 200, model.getConfig()); return; }
@@ -348,10 +348,28 @@ export function createStardustServer(options: AppOptions = {}): Server {
         response.on("close", onClose);
         if (response.destroyed) cancellation.abort();
         try {
-          if (pathname === "/api/v1/model/test") {
+          if (pathname === "/api/v1/model/list") {
+            if (Object.keys(fields).length) throw new ModelError("INVALID_INPUT", 400);
+            const result = await model.listModels(cancellation.signal);
+            if (!response.destroyed) sendJson(response, 200, result);
+          } else if (pathname === "/api/v1/model/test") {
             if (Object.keys(fields).length) throw new ModelError("INVALID_INPUT", 400);
             await model.testConnection(cancellation.signal);
             if (!response.destroyed) sendJson(response, 200, { ok: true });
+          } else if (pathname === "/api/v1/model/chat-stream") {
+            if (Object.keys(fields).some((key) => key !== "message")) throw new ModelError("INVALID_INPUT", 400);
+            response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
+            response.flushHeaders();
+            const send = (event: string, data: unknown) => { if (!response.destroyed) response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+            try {
+              let emitted = false;
+              const reply = await model.chat(fields.message, cancellation.signal, undefined, (chunk) => { emitted = true; send("delta", { content: chunk }); });
+              if (!emitted) send("delta", { content: reply });
+              send("done", {});
+            } catch (error) {
+              send("error", { error: error instanceof ModelError ? error.diagnostic : { source: "stardust", category: "MODEL_SERVICE_FAILED", code: "MODEL_SERVICE_FAILED" } });
+            }
+            if (!response.destroyed) response.end();
           } else {
             if (Object.keys(fields).some((key) => key !== "message")) throw new ModelError("INVALID_INPUT", 400);
             const reply = await model.chat(fields.message, cancellation.signal);

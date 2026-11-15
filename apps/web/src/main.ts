@@ -1,4 +1,6 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
+import { classifyModelName, isCompactModel } from "./model-classification.js";
+import { appendChatHistory, readChatHistory, type ChatMessage } from "./chat-history.js";
 
 interface HealthResponse {
   status: "ok";
@@ -32,14 +34,14 @@ type MenuGroup = { label: string; id: string; children: MenuPage[] };
 type MenuCategory = { label: string; items: (MenuPage | MenuGroup)[] };
 const menu: MenuCategory[] = [
   { label: "概览", items: [{ label: "运行概况", path: "/overview/status" }] },
-  { label: "模型", items: [{ label: "模型服务", id: "model-service", children: [{ label: "模型服务首页", path: "/model/service" }, { label: "模型测试对话", path: "/model/chat" }, { label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
+  { label: "模型", items: [{ label: "模型服务", id: "model-service", children: [{ label: "模型服务首页", path: "/model/service" }, { label: "模型对话", path: "/model/chat" }, { label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
 ];
 const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
   "/model/service": "配置、测试和使用你的模型服务。",
-  "/model/chat": "与当前模型对话，验证你的想法。",
+  "/model/chat": "与当前模型对话，记录你的想法。",
   "/model/service/config": "连接模型，调整请求方式与访问凭证。",
   "/model/service/test": "确认当前模型配置可以正常响应。",
   "/model/logs": "观察服务、模型与扩展的实时运行记录。",
@@ -110,7 +112,7 @@ function spaceLevels(path: string): string[] {
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
   if (path === model.path) return [model.path];
   if (path === "/model/service/config" || path === "/model/service/test" || path === "/model/chat") {
-    const labels: Record<string, [string, string]> = { "/model/service/config": ["当前配置", "◇"], "/model/service/test": ["连接测试", "◎"], "/model/chat": ["模型测试对话", "✦"] };
+    const labels: Record<string, [string, string]> = { "/model/service/config": ["当前配置", "◇"], "/model/service/test": ["连接测试", "◎"], "/model/chat": ["模型对话", "✦"] };
     return [model.path, path];
   }
   if (path === "/model/logs") return [path];
@@ -455,6 +457,18 @@ function animateSpaceExit(exitingPaths: string[], sibling = false): void {
     heading.querySelector("h1")?.replaceChildren(currentTitle);
     const stage = pageStage.cloneNode(false) as HTMLElement;
     const pageCopy = activePage.cloneNode(true) as HTMLElement;
+    const originalComposer = activePage.querySelector<HTMLElement>(".chat-form");
+    const composerCopy = pageCopy.querySelector<HTMLElement>(".chat-form");
+    if (originalComposer && composerCopy) {
+      const composerBounds = originalComposer.getBoundingClientRect();
+      Object.assign(composerCopy.style, {
+        position: "absolute",
+        top: `${composerBounds.top - bounds.top}px`,
+        left: `${composerBounds.left - bounds.left}px`,
+        width: `${composerBounds.width}px`,
+        bottom: "auto",
+      });
+    }
     stage.append(pageCopy);
     shell.append(heading, stage);
     // Preserve the visible part of any nested scroll area in the visual copy.
@@ -1145,6 +1159,10 @@ type ModelView = { baseUrl: string; modelId: string; timeoutMs: number; stream: 
 const modelForm = getElement<HTMLFormElement>("model-form");
 const modelUrl = getElement<HTMLInputElement>("model-url");
 const modelId = getElement<HTMLInputElement>("model-id");
+const modelList = getElement<HTMLSelectElement>("model-list");
+const modelListLabel = getElement<HTMLElement>("model-list-label");
+const modelScan = getElement<HTMLButtonElement>("model-scan");
+const modelScanStatus = getElement<HTMLElement>("model-scan-status");
 const modelTimeout = getElement<HTMLInputElement>("model-timeout");
 const modelStream = getElement<HTMLInputElement>("model-stream");
 const modelKey = getElement<HTMLInputElement>("model-key");
@@ -1159,6 +1177,7 @@ const chatInput = getElement<HTMLTextAreaElement>("chat-input");
 const chatSend = getElement<HTMLButtonElement>("chat-send");
 const chatStatus = getElement<HTMLElement>("chat-status");
 const chatMessages = getElement<HTMLElement>("chat-messages");
+const chatHistoryStatus = getElement<HTMLElement>("chat-history-status");
 const adminForm = getElement<HTMLFormElement>("tool-admin-form");
 const adminToken = getElement<HTMLInputElement>("tool-admin-token");
 const adminStatus = getElement<HTMLElement>("tool-admin-status");
@@ -1166,7 +1185,31 @@ let adminAuthenticated = false;
 let activeToolRun = "";
 let toolRunSignature = "";
 let toolRunPanel: HTMLElement | undefined;
+let toolReply: HTMLElement | undefined;
 let modelLoaded = false;
+let savedModelBaseUrl = "";
+const modelListStorageKey = "stardust.model.lists.v1";
+function displayModelList(models: string[], categories?: Record<string, "chat" | "other">): void {
+  const groups = ([['chat', '对话模型'], ['other', '其他模型']] as const).map(([category, label]) => {
+    const group = document.createElement("optgroup"); group.label = label;
+    for (const id of models.filter((item) => (isCompactModel(item) ? "other" : categories?.[item] ?? classifyModelName(item)) === category)) group.append(new Option(id, id));
+    return group;
+  });
+  modelList.replaceChildren(new Option("选择模型", ""), ...groups.filter((group) => group.childElementCount));
+  modelList.value = models.includes(modelId.value) ? modelId.value : "";
+  modelListLabel.hidden = models.length === 0;
+}
+function restoreModelList(baseUrl: string): void {
+  modelList.replaceChildren(); modelListLabel.hidden = true;
+  try {
+    const data: unknown = JSON.parse(localStorage.getItem(modelListStorageKey) ?? "{}");
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+    const saved = (data as Record<string, { models?: unknown; categories?: Record<string, "chat" | "other"> }>)[baseUrl];
+    if (!saved || !Array.isArray(saved.models) || !saved.models.every((id: unknown) => typeof id === "string")) return;
+    displayModelList(saved.models as string[], saved.categories);
+    if (saved.models.length) modelScanStatus.textContent = `已恢复 ${saved.models.length} 个扫描结果；可重新扫描更新。`;
+  } catch { /* Scanning remains available if browser storage is unavailable. */ }
+}
 
 async function modelRequest(path: string, body?: unknown): Promise<unknown> {
   let response: Response;
@@ -1189,6 +1232,7 @@ async function modelRequest(path: string, body?: unknown): Promise<unknown> {
   return data;
 }
 function renderModelConfig(config: ModelView): void {
+  savedModelBaseUrl = config.baseUrl;
   getElement<HTMLElement>("overview-model").textContent = config.modelId || "尚未配置模型";
   modelUrl.value = config.baseUrl;
   modelId.value = config.modelId;
@@ -1196,6 +1240,7 @@ function renderModelConfig(config: ModelView): void {
   modelStream.checked = config.stream;
   modelKey.value = "";
   modelClearKey.checked = false;
+  restoreModelList(config.baseUrl);
   modelKey.disabled = false;
   if (config.processOverride) {
     modelKeyStatus.textContent = `当前使用进程环境变量，文件中的密钥修改不会生效，直至移除进程变量并重启。文件密钥${config.fileKeyConfigured ? "已配置" : "未配置"}。`;
@@ -1214,7 +1259,25 @@ function showModel(): void {
     modelStatus.textContent = error instanceof Error ? error.message : "无法读取模型配置。";
   });
 }
-function setModelBusy(busy: boolean): void { modelSave.disabled = busy; modelTest.disabled = busy; }
+function setModelBusy(busy: boolean): void { modelSave.disabled = busy; modelTest.disabled = busy; modelScan.disabled = busy; }
+modelScan.addEventListener("click", () => {
+  if (modelScan.disabled) return;
+  setModelBusy(true);
+  modelScanStatus.textContent = "正在扫描已保存的服务…";
+  void modelRequest("/api/v1/model/list", {}).then((value) => {
+    const { models, categories } = value as { models: string[]; categories?: Record<string, "chat" | "other"> };
+    displayModelList(models, categories);
+    modelScanStatus.textContent = models.length ? categories ? `找到 ${models.length} 个模型，选择后请保存。` : `找到 ${models.length} 个模型；当前根据名称分类，重启后端可使用服务商能力信息。` : "未找到模型，可手动输入模型 ID。";
+    try {
+      const data = JSON.parse(localStorage.getItem(modelListStorageKey) ?? "{}") as Record<string, unknown>;
+      Object.defineProperty(data, savedModelBaseUrl, { value: { models, categories }, enumerable: true, configurable: true, writable: true });
+      localStorage.setItem(modelListStorageKey, JSON.stringify(data));
+    } catch { modelScanStatus.textContent += " 扫描结果无法保存。"; }
+  }).catch((error: unknown) => { modelScanStatus.textContent = error instanceof Error ? error.message : "扫描失败，请检查已保存的服务配置。"; })
+    .finally(() => setModelBusy(false));
+});
+modelList.addEventListener("change", () => { if (modelList.value) modelId.value = modelList.value; });
+modelId.addEventListener("input", () => { modelList.value = modelId.value; });
 modelClearKey.addEventListener("change", () => { modelKey.disabled = modelClearKey.checked; });
 modelForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1238,18 +1301,75 @@ modelTest.addEventListener("click", () => {
     .catch((error: unknown) => { modelTestStatus.textContent = error instanceof Error ? error.message : "连接测试失败。"; })
     .finally(() => setModelBusy(false));
 });
-function addMessage(role: string, message: string): void {
+function renderChatMessage(message: ChatMessage): void {
   const entry = document.createElement("div");
   entry.className = "chat-message";
-  entry.dataset.role = role === "你" ? "user" : "model";
+  entry.dataset.role = message.role;
   const label = document.createElement("strong");
-  label.textContent = role;
+  label.textContent = message.role === "user" ? "你" : "模型";
   const content = document.createElement("p");
-  content.textContent = message;
+  content.textContent = message.content;
   entry.append(label, content);
   chatMessages.append(entry);
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
+const displayedMessages = new Set<string>();
+function showChatMessage(message: ChatMessage): void {
+  if (displayedMessages.has(message.id)) return;
+  displayedMessages.add(message.id);
+  renderChatMessage(message);
+}
+function addMessage(role: "user" | "model", content: string, id: string = crypto.randomUUID()): void {
+  const message = { id, role, content };
+  try { for (const item of appendChatHistory(localStorage, message)) showChatMessage(item); }
+  catch { showChatMessage(message); chatHistoryStatus.textContent = "聊天记录无法保存到此浏览器，刷新后可能丢失。"; }
+}
+function createReplyPlaceholder(): HTMLElement {
+  const entry = document.createElement("div"); entry.className = "chat-message"; entry.dataset.role = "model";
+  const label = document.createElement("strong"); label.textContent = "模型";
+  const content = document.createElement("p"); content.textContent = "正在等待回复…";
+  entry.append(label, content); chatMessages.append(entry); chatMessages.scrollTop = chatMessages.scrollHeight;
+  return entry;
+}
+function finishReply(placeholder: HTMLElement, content: string, id?: string): void {
+  placeholder.remove();
+  addMessage("model", content, id);
+}
+async function streamChat(message: string, placeholder: HTMLElement): Promise<void> {
+  const content = placeholder.querySelector("p")!;
+  let text = "", done = false, buffer = "";
+  try {
+    const response = await fetch("/api/v1/model/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }), signal: AbortSignal.timeout(130000) });
+    if (!response.ok) { const data = await response.json().catch(() => ({})) as { error?: unknown }; throw new Error(formatModelError(data.error, response.status)); }
+    if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("服务端未返回有效的流式响应。请重启后端。");
+    const reader = response.body.getReader(); const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const part = await reader.read();
+        buffer += decoder.decode(part.value, { stream: !part.done });
+        let boundary: number;
+        while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+          const event = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+          const kind = event.match(/^event: (.+)$/m)?.[1];
+          const raw = event.match(/^data: (.+)$/m)?.[1];
+          if (!raw) continue;
+          const data = JSON.parse(raw) as { content?: string; error?: unknown };
+          if (kind === "delta" && typeof data.content === "string") { text += data.content; content.textContent = text; chatMessages.scrollTop = chatMessages.scrollHeight; }
+          else if (kind === "error") throw new Error(formatModelError(data.error, 502));
+          else if (kind === "done") done = true;
+        }
+        if (part.done) break;
+      }
+    } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
+    if (!done) throw new Error("连接中断，模型回复未完成。");
+    finishReply(placeholder, text || "模型未返回内容。");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "发送失败，请重试。";
+    finishReply(placeholder, `${text}${text ? "\n\n" : ""}请求失败：${detail}`);
+  }
+}
+try { for (const message of readChatHistory(localStorage)) showChatMessage(message); }
+catch { chatHistoryStatus.textContent = "无法读取浏览器中的聊天记录；原记录未被覆盖。"; }
 async function toolRequest(path: string, body?: unknown): Promise<unknown> {
   let response: Response;
   try { response = await fetch(path, body === undefined ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
@@ -1262,10 +1382,10 @@ async function refreshAdmin(): Promise<void> {
   try {
     const state = await toolRequest("/api/v1/admin/state") as { configured: boolean; authenticated: boolean };
     adminAuthenticated = state.authenticated; adminForm.hidden = !state.configured || state.authenticated;
-    adminStatus.textContent = state.authenticated ? "管理员已登录，可以在对话中使用已启用的 Tool。" : state.configured ? "登录后可在模型测试对话中使用 Tool。" : "配置 STARDUST_ADMIN_TOKEN（至少 32 字符）并重启后可使用 Tool。";
+    adminStatus.textContent = state.authenticated ? "管理员已登录，可以在对话中使用已启用的 Tool。" : state.configured ? "登录后可在模型对话中使用 Tool。" : "配置 STARDUST_ADMIN_TOKEN（至少 32 字符）并重启后可使用 Tool。";
     if (adminAuthenticated && !activeToolRun) {
       const saved = sessionStorage.getItem("stardust.toolRun");
-      if (saved) { activeToolRun = saved; chatSend.disabled = true; toolRunPanel = document.createElement("div"); chatMessages.append(toolRunPanel); void pollToolRun(); }
+      if (saved) { activeToolRun = saved; chatSend.disabled = true; toolRunPanel = document.createElement("div"); chatMessages.append(toolRunPanel); toolReply = createReplyPlaceholder(); void pollToolRun(); }
     }
   } catch { adminStatus.textContent = "无法读取管理员认证状态。"; }
 }
@@ -1308,8 +1428,9 @@ async function pollToolRun(): Promise<void> {
       }
     }
     if (run.status === "done" || run.status === "error") {
-      if (run.reply) addMessage("模型", run.reply);
-      chatStatus.textContent = run.status === "error" ? `工具对话失败：${run.error ?? "未知错误"}${run.errorDetail?.status ? `（HTTP ${run.errorDetail.status}）` : ""}${run.errorDetail?.code ? ` · ${run.errorDetail.code}` : ""}${run.errorDetail?.message ? ` · ${run.errorDetail.message}` : ""}` : "";
+      const result = run.status === "error" ? `工具对话失败：${run.error ?? "未知错误"}${run.errorDetail?.status ? `（HTTP ${run.errorDetail.status}）` : ""}${run.errorDetail?.code ? ` · ${run.errorDetail.code}` : ""}${run.errorDetail?.message ? ` · ${run.errorDetail.message}` : ""}` : run.reply || "模型未返回内容。";
+      if (toolReply) finishReply(toolReply, result, `tool:${id}`); else addMessage("model", result, `tool:${id}`);
+      toolReply = undefined; chatStatus.textContent = "";
       activeToolRun = ""; sessionStorage.removeItem("stardust.toolRun"); chatSend.disabled = false; return;
     }
     chatStatus.textContent = run.status === "waiting" ? "等待管理员确认。" : run.status === "executing" ? "正在执行 Tool…" : "模型处理中…";
@@ -1318,32 +1439,37 @@ async function pollToolRun(): Promise<void> {
     const message = error instanceof Error ? error.message : "无法读取工具对话状态。";
     chatStatus.textContent = message;
     if (message === "RUN_NOT_FOUND" || message === "AUTH_REQUIRED") {
+      if (toolReply) finishReply(toolReply, `工具对话失败：${message}`, `tool:${id}`);
+      toolReply = undefined;
       activeToolRun = ""; sessionStorage.removeItem("stardust.toolRun"); chatSend.disabled = false;
       if (message === "AUTH_REQUIRED") { adminAuthenticated = false; void refreshAdmin(); }
     } else if (activeToolRun === id) setTimeout(() => { if (activeToolRun === id) void pollToolRun(); }, 3000);
   }
 }
 void refreshAdmin();
+chatInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (!event.repeat && !chatSend.disabled && chatInput.value.trim()) chatForm.requestSubmit();
+});
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (chatSend.disabled || !chatInput.value.trim()) return;
   const message = chatInput.value;
-  addMessage("你", message);
+  addMessage("user", message);
+  const placeholder = createReplyPlaceholder();
   chatInput.value = "";
   chatSend.disabled = true;
   chatStatus.textContent = "正在等待回复…";
   if (adminAuthenticated) {
+    toolReply = placeholder;
     void toolRequest("/api/v1/tool-runs", { message }).then((value) => {
       activeToolRun = (value as { id: string }).id; sessionStorage.setItem("stardust.toolRun", activeToolRun);
-      toolRunSignature = ""; toolRunPanel = document.createElement("div"); chatMessages.append(toolRunPanel); void pollToolRun();
-    }).catch((error: unknown) => { chatStatus.textContent = error instanceof Error ? error.message : "工具对话失败。"; chatSend.disabled = false; });
+      toolRunSignature = ""; toolRunPanel = document.createElement("div"); placeholder.before(toolRunPanel); void pollToolRun();
+    }).catch((error: unknown) => { finishReply(placeholder, `工具对话失败：${error instanceof Error ? error.message : "请重试。"}`); toolReply = undefined; chatStatus.textContent = ""; chatSend.disabled = false; });
     return;
   }
-  void modelRequest("/api/v1/model/chat", { message }).then((value) => {
-    addMessage("模型", (value as { reply: string }).reply);
-    chatStatus.textContent = "";
-  }).catch((error: unknown) => { chatStatus.textContent = error instanceof Error ? error.message : "发送失败，请重试。"; })
-    .finally(() => { chatSend.disabled = false; });
+  void streamChat(message, placeholder).finally(() => { chatStatus.textContent = ""; chatSend.disabled = false; });
 });
 
 type ExtensionFieldView = { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string };

@@ -6,6 +6,7 @@ export async function collectModelTurn(
   invalid: () => Error,
   incomplete: () => Error,
   streamError: (data: string) => Promise<Error>,
+  onContent?: (chunk: string) => void,
 ): Promise<{ content: string; toolCalls: { id: string; name: string; arguments: string }[] }> {
   if (!/^text\/event-stream(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
     void response.body?.cancel().catch(() => {});
@@ -49,7 +50,7 @@ export async function collectModelTurn(
       if (delta == null) continue;
       if (typeof delta !== "object" || Array.isArray(delta)) throw invalid();
       const content = (delta as { content?: unknown }).content;
-      if (content != null) { if (typeof content !== "string") throw invalid(); text += content; }
+      if (content != null) { if (typeof content !== "string") throw invalid(); text += content; onContent?.(content); }
       const fragments = (delta as { tool_calls?: unknown }).tool_calls;
       if (fragments != null) {
         if (!Array.isArray(fragments) || fragments.length > 8) throw invalid();
@@ -131,8 +132,8 @@ export async function collectModelTurn(
   }
 }
 
-export async function collectModelStream(response: Response, signal: AbortSignal, limit: number, invalid: () => Error, incomplete: () => Error, streamError: (data: string) => Promise<Error>): Promise<string> {
-  const result = await collectModelTurn(response, signal, limit, invalid, incomplete, streamError);
+export async function collectModelStream(response: Response, signal: AbortSignal, limit: number, invalid: () => Error, incomplete: () => Error, streamError: (data: string) => Promise<Error>, onContent?: (chunk: string) => void): Promise<string> {
+  const result = await collectModelTurn(response, signal, limit, invalid, incomplete, streamError, onContent);
   if (!result.content.trim() || result.toolCalls.length) throw invalid();
   return result.content;
 }
