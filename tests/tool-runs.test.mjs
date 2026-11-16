@@ -18,6 +18,7 @@ import { LogService } from "../apps/server/dist/logger.js";
 import { createQQBotExtension } from "../apps/server/dist/extensions/qq-bot.js";
 import { ModelService } from "../apps/server/dist/model.js";
 import { createSecretStore } from "../apps/server/dist/model-secret.js";
+import { ConversationService } from "../apps/server/dist/conversation.js";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "stardust-tool-"));
@@ -47,6 +48,56 @@ async function until(fn) {
   for (let i = 0; i < 200; i++) { const value = fn(); if (value) return value; await new Promise((resolve) => setTimeout(resolve, 5)); }
   throw new Error("timed out");
 }
+
+test("conversation tool calls need one user confirmation and retain the conversation history", async (t) => {
+  const f = await fixture(t);
+  const setup = new SetupService(createConfigStore(f.root)); await setup.completeInitialization({});
+  const conversations = new ConversationService(f.model, ":memory:");
+  const server = createStardustServer({ setupService: setup, extensionManager: f.extensions, modelService: f.model, conversationService: conversations });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, data, headers = {}) => fetch(origin + path, { method: "POST", headers: { "content-type": "application/json", origin, ...headers }, body: JSON.stringify(data) });
+  const created = await post("/api/v1/conversations", {});
+  assert.equal(created.status, 201);
+  const conversation = (await created.json()).conversation;
+  const requestId = randomUUID();
+  const pending = post(`/api/v1/conversations/${conversation.id}/messages`, { requestId, content: "发送消息" });
+  const toolPath = `/api/v1/conversations/${conversation.id}/messages/${requestId}/tool`;
+  let run;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    run = (await (await fetch(origin + toolPath)).json()).run;
+    if (run?.status === "waiting") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(run?.status, "waiting");
+  assert.equal(f.sent.length, 0);
+  assert.equal((await post(toolPath + "/decision", { toolCallId: "call_1", approved: true }, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await post(toolPath + "/decision", { toolCallId: "call_1", approved: true })).status, 200);
+  assert.equal((await post(toolPath + "/decision", { toolCallId: "call_1", approved: true })).status, 409);
+  assert.equal((await pending).status, 200);
+  assert.equal(f.sent.length, 1);
+  const history = await (await fetch(`${origin}/api/v1/conversations/${conversation.id}/messages`)).json();
+  assert.deepEqual(history.messages.map((message) => [message.role, message.content]), [["user", "发送消息"], ["assistant", "最终回答"]]);
+  assert.equal(f.calls[0].messages.at(-1).content, "发送消息");
+  assert.equal(JSON.parse(f.calls[1].messages.at(-1).content).status, "sent");
+  const secondId = randomUUID();
+  const second = post(`/api/v1/conversations/${conversation.id}/messages`, { requestId: secondId, content: "继续" });
+  const secondTool = `/api/v1/conversations/${conversation.id}/messages/${secondId}/tool`;
+  let secondRun;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    secondRun = (await (await fetch(origin + secondTool)).json()).run;
+    if (secondRun?.status === "waiting") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(secondRun?.status, "waiting");
+  assert.deepEqual(f.calls[2].messages.slice(-3).map(({ role, content }) => ({ role, content })), [
+    { role: "user", content: "发送消息" }, { role: "assistant", content: "最终回答" }, { role: "user", content: "继续" },
+  ]);
+  assert.equal((await post(secondTool + "/decision", { toolCallId: "call_1", approved: false })).status, 200);
+  assert.equal((await second).status, 200);
+  assert.equal(f.sent.length, 1);
+});
 
 test("tool approval binds immutable arguments, executes once, and returns the result to the model", async (t) => {
   const f = await fixture(t);
@@ -120,7 +171,7 @@ test("streaming tool_calls reassemble arguments split across UTF-8 and SSE chunk
   assert.deepEqual(turn.toolCalls, [{ id: "call_1", name: "send_message", arguments: "{\"content\":\"你好\"}" }]);
 });
 
-test("tool HTTP endpoints require a same-origin local administrator session", async (t) => {
+test("tool HTTP endpoints work locally without login and reject cross-origin requests", async (t) => {
   const f = await fixture(t); const setup = new SetupService(createConfigStore(f.root)); await setup.completeInitialization({});
   const token = "a-secure-test-token-at-least-32-characters";
   const server = createStardustServer({ setupService: setup, extensionManager: f.extensions, modelService: f.model, adminAuth: new AdminAuth(token) });
@@ -128,15 +179,15 @@ test("tool HTTP endpoints require a same-origin local administrator session", as
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const origin = `http://127.0.0.1:${server.address().port}`;
   const post = (path, body, headers = {}) => fetch(origin + path, { method: "POST", headers: { "Content-Type": "application/json", Origin: origin, ...headers }, body: JSON.stringify(body) });
-  assert.equal((await post("/api/v1/tool-runs", { message: "hello" })).status, 401);
+  assert.equal((await post("/api/v1/tool-runs", { message: "hello" }, { Origin: "https://evil.example" })).status, 403);
   assert.equal((await post("/api/v1/admin/login", { token }, { Origin: "https://evil.example" })).status, 403);
   assert.equal((await post("/api/v1/admin/login", { token: "incorrect" })).status, 401);
   const login = await post("/api/v1/admin/login", { token }); assert.equal(login.status, 200);
-  const cookie = login.headers.get("set-cookie").split(";")[0]; assert.match(login.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
-  const response = await post("/api/v1/tool-runs", { message: "hello" }, { Cookie: cookie }); assert.equal(response.status, 202);
+  assert.match(login.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
+  const response = await post("/api/v1/tool-runs", { message: "hello" }); assert.equal(response.status, 202);
   const { id } = await response.json();
-  assert.equal((await fetch(`${origin}/api/v1/tool-runs/${id}`)).status, 401);
-  const state = await fetch(`${origin}/api/v1/tool-runs/${id}`, { headers: { Cookie: cookie } }); assert.equal(state.status, 200);
+  assert.equal((await fetch(`${origin}/api/v1/tool-runs/${id}`, { headers: { Origin: "https://evil.example" } })).status, 403);
+  const state = await fetch(`${origin}/api/v1/tool-runs/${id}`); assert.equal(state.status, 200);
   assert.doesNotMatch(await state.text(), new RegExp(token));
 });
 

@@ -20,13 +20,14 @@ function freezeInput(value: unknown): void {
 export class ToolRuns {
   private readonly runs = new Map<string, Run>();
   constructor(private readonly model: Pick<ModelService, "chatWithTools">, private readonly extensions: ExtensionManager, private readonly logs: LogService = logger) {}
-  start(owner: string, text: unknown): string {
+  start(owner: string, text: unknown, history?: ModelTurnMessage[]): string {
     if (typeof text !== "string" || !text.trim() || Buffer.byteLength(text, "utf8") > 32000) throw new Error("INVALID_INPUT");
     for (const [id, run] of this.runs) if (Date.now() - run.created > 30 * 60_000 && run.status !== "executing") { run.controller.abort(); this.runs.delete(id); }
     if (this.runs.size >= 100) throw new Error("RUN_LIMIT");
     const targets = this.extensions.availableTools().length ? this.extensions.availableTargets() : [];
     const prompt = `以下是已知的可用消息渠道及目标引用。仅可使用这些引用；同类型多个目标无法明确区分时必须询问用户，不可猜测。\n${JSON.stringify(targets)}`;
-    const run: Run = { id: randomUUID(), owner, status: "working", messages: [{ role: "system", content: prompt }, { role: "user", content: text }], calls: [], queue: [], count: 0, created: Date.now(), controller: new AbortController() };
+    const messages: ModelTurnMessage[] = history ? structuredClone(history) : [{ role: "user", content: text }];
+    const run: Run = { id: randomUUID(), owner, status: "working", messages: [{ role: "system", content: prompt }, ...messages], calls: [], queue: [], count: 0, created: Date.now(), controller: new AbortController() };
     this.runs.set(run.id, run); void this.advance(run); return run.id;
   }
   get(owner: string, id: string) {

@@ -10,8 +10,8 @@
   "scripts": {
     "build": "tsc -p apps/server/tsconfig.json && tsc -p apps/web/tsconfig.json && node scripts/copy-static.mjs",
     "dev": "node scripts/dev.mjs",
-    "start": "node apps/server/dist/main.js",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "start": "node --experimental-sqlite apps/server/dist/main.js",
+    "test": "npm run build && node --experimental-sqlite --test tests/*.test.mjs",
     "check": "tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
   },
   "devDependencies": {

@@ -9,6 +9,7 @@ import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { AdminAuth } from "./admin-auth.js";
 import { ToolRuns } from "./tool-runs.js";
+import type { ConversationService } from "./conversation.js";
 
 export interface AppOptions {
   version?: string;
@@ -19,6 +20,7 @@ export interface AppOptions {
   extensionManager?: ExtensionManager;
   logService?: LogService;
   adminAuth?: AdminAuth;
+  conversationService?: ConversationService;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -114,6 +116,9 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/index.html": { filename: "index.html", contentType: "text/html; charset=utf-8" },
   "/main.js": { filename: "main.js", contentType: "text/javascript; charset=utf-8" },
   "/model-errors.js": { filename: "model-errors.js", contentType: "text/javascript; charset=utf-8" },
+  "/model-classification.js": { filename: "model-classification.js", contentType: "text/javascript; charset=utf-8" },
+  "/chat-history.js": { filename: "chat-history.js", contentType: "text/javascript; charset=utf-8" },
+  "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };
@@ -129,6 +134,11 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const admin = options.adminAuth ?? new AdminAuth();
   const toolRuns = new ToolRuns(model, extensions, logs);
   const streams = new Set<ServerResponse>();
+  let conversations = options.conversationService;
+  let conversationOpening: Promise<ConversationService> | undefined;
+  const conversationRuns = new Map<string, string>();
+  const localConversationOwner = "local-conversation";
+  let serverClosing = false;
 
   const server = createServer(async (request, response) => {
     let pathname: string;
@@ -139,6 +149,87 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
+    if (pathname === "/api/v1/conversations" || pathname.startsWith("/api/v1/conversations/")) {
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
+        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        const toolRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/tool(?:\/(decision))?$/i.exec(pathname);
+        if (toolRoute) {
+          const key = `${toolRoute[1]}/${toolRoute[2]}`;
+          const runId = conversationRuns.get(key);
+          if (!runId) { sendJson(response, request.method === "GET" ? 200 : 409, request.method === "GET" ? { run: null } : { error: "TOOL_UNAVAILABLE" }); return; }
+          if (request.method === "GET" && !toolRoute[3]) { sendJson(response, 200, { run: toolRuns.get(localConversationOwner, runId) }); return; }
+          if (request.method === "POST" && toolRoute[3]) {
+            if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            let body: unknown; try { body = await readSetupBody(request); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 2 || typeof (body as Record<string, unknown>).toolCallId !== "string" || typeof (body as Record<string, unknown>).approved !== "boolean") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            const fields = body as { toolCallId: string; approved: boolean };
+            toolRuns.decide(localConversationOwner, runId, fields.toolCallId, fields.approved);
+            sendJson(response, 200, { ok: true }); return;
+          }
+          sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return;
+        }
+        const match = /^\/api\/v1\/conversations\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(\/messages)?$/i.exec(pathname);
+        if (pathname !== "/api/v1/conversations" && !match) { sendJson(response, 404, { error: "NOT_FOUND" }); return; }
+        if (!conversations) {
+          conversationOpening ??= import("./conversation.js").then(({ ConversationService }) => new ConversationService(model));
+          try { conversations = await conversationOpening; }
+          catch (error) { conversationOpening = undefined; throw error; }
+        }
+        const store = conversations;
+        const id = match?.[1];
+        if (request.method === "GET") {
+          if (!id) { sendJson(response, 200, { conversations: store.list() }); return; }
+          if (!match?.[2]) { sendJson(response, 200, { conversation: store.get(id) }); return; }
+          const url = new URL(request.url ?? "/", "http://localhost");
+          const after = url.searchParams.get("after") ?? "0", limit = url.searchParams.get("limit") ?? "100";
+          if (!/^\d{1,15}$/.test(after) || !/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > 200 || !Number.isSafeInteger(Number(after))) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          const messages = store.messages(id, Number(after), Number(limit));
+          sendJson(response, 200, { messages }); return;
+        }
+        if (request.method === "DELETE" && id && !match?.[2]) { store.delete(id); sendJson(response, 200, { ok: true }); return; }
+        if (request.method !== "POST" && request.method !== "PATCH") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+        if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+        let body: unknown;
+        try { body = await readSetupBody(request, 64 * 1024); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+        if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+        const fields = body as Record<string, unknown>;
+        if (!id && request.method === "POST" && Object.keys(fields).every((key) => key === "title") && (fields.title === undefined || typeof fields.title === "string")) {
+          sendJson(response, 201, { conversation: store.create(fields.title as string | undefined) }); return;
+        }
+        if (id && !match?.[2] && request.method === "PATCH" && Object.keys(fields).length === 1 && typeof fields.title === "string") {
+          sendJson(response, 200, { conversation: store.rename(id, fields.title) }); return;
+        }
+        if (id && match?.[2] && request.method === "POST" && Object.keys(fields).every((key) => ["content", "requestId", "retry"].includes(key)) && typeof fields.content === "string" && typeof fields.requestId === "string" && (fields.retry === undefined || typeof fields.retry === "boolean")) {
+          const requestId = fields.requestId;
+          const content = fields.content;
+          const execute = extensions.availableTools().length ? async (context: import("./conversation-context.js").ConversationContextMessage[]) => {
+            const key = `${id}/${requestId}`;
+            const runId = toolRuns.start(localConversationOwner, content, context);
+            conversationRuns.set(key, runId);
+            try {
+              while (!serverClosing) {
+                const run = toolRuns.get(localConversationOwner, runId);
+                if (run.status === "done") return run.reply ?? "";
+                if (run.status === "error") throw new ModelError(run.error ?? "TOOL_RUN_FAILED", 502);
+                await new Promise<void>((resolve) => setTimeout(resolve, 200));
+              }
+              throw new ModelError("REQUEST_CANCELLED", 499);
+            } finally { conversationRuns.delete(key); }
+          } : undefined;
+          const messages = await store.submit(id, requestId, content, fields.retry === true, execute);
+          if (!response.destroyed) sendJson(response, 200, { messages });
+          return;
+        }
+        sendJson(response, 400, { error: "INVALID_INPUT" });
+      } catch (error) {
+        if (response.destroyed) return;
+        const code = error instanceof Error && ["NOT_FOUND", "INVALID_INPUT", "CONTEXT_TOO_LARGE", "CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "CONVERSATION_FAILED";
+        sendJson(response, code === "NOT_FOUND" ? 404 : code === "INVALID_INPUT" || code === "CONTEXT_TOO_LARGE" ? 400 : ["CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(code) ? 409 : 500, { error: code });
+      }
+      return;
+    }
     if (pathname.startsWith("/api/v1/admin/") || pathname === "/api/v1/tool-runs" || pathname.startsWith("/api/v1/tool-runs/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
@@ -157,7 +248,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
             response.setHeader("Set-Cookie", `stardust_admin=${session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`);
             sendJson(response, 200, { authenticated: true }); return;
           }
-          const owner = admin.session(request);
+          const owner = pathname.startsWith("/api/v1/tool-runs") ? localConversationOwner : admin.session(request);
           if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
           if (pathname === "/api/v1/tool-runs") {
             if (Object.keys(fields).length !== 1 || typeof fields.message !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
@@ -169,7 +260,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
             toolRuns.decide(owner, decision[1]!, fields.toolCallId, fields.approved); sendJson(response, 202, { ok: true }); return;
           }
         } else if (request.method === "GET") {
-          const owner = admin.session(request);
+          if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+          const owner = pathname.startsWith("/api/v1/tool-runs") ? localConversationOwner : admin.session(request);
           if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
           const match = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})$/.exec(pathname);
           if (match) { sendJson(response, 200, toolRuns.get(owner, match[1]!)); return; }
@@ -431,7 +523,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
   });
   server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
-  server.on("close", () => { toolRuns.shutdown(); void extensions.shutdown(); });
+  server.on("close", () => { serverClosing = true; toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;

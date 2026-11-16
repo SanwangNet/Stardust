@@ -5,6 +5,7 @@ import { collectModelStream, collectModelTurn } from "./model-stream.js";
 import { randomUUID } from "node:crypto";
 import { logger, type LogService } from "./logger.js";
 import { classifyModel, type ModelCategory } from "./model-classification.js";
+import type { ConversationContextMessage } from "./conversation-context.js";
 
 export class ModelError extends Error {
   readonly diagnostic: ModelDiagnostic;
@@ -133,6 +134,11 @@ export class ModelService {
       throw error;
     }
   }
+  async chatContext(messages: ConversationContextMessage[], cancellation?: AbortSignal): Promise<string> {
+    if (!Array.isArray(messages) || !messages.length || messages.some((entry) => !entry || !["system", "user", "assistant"].includes(entry.role) || typeof entry.content !== "string" || !entry.content.trim()) || messages.at(-1)?.role !== "user") throw new ModelError("INVALID_INPUT", 400);
+    const last = messages.at(-1)!;
+    return this.performChat(last.content, cancellation, undefined, messages);
+  }
   async chatWithTools(messages: ModelTurnMessage[], tools: { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }[], cancellation?: AbortSignal): Promise<{ content: string; toolCalls: ToolCall[] }> {
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
     if (!baseUrl || !modelId) throw new ModelError("NOT_CONFIGURED", 400);
@@ -183,8 +189,9 @@ export class ModelService {
       throw normalized;
     }
   }
-  private async performChat(message: unknown, cancellation?: AbortSignal, onContent?: (chunk: string) => void): Promise<string> {
+  private async performChat(message: unknown, cancellation?: AbortSignal, onContent?: (chunk: string) => void, messages?: ConversationContextMessage[]): Promise<string> {
     if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > maxMessage) throw new ModelError("INVALID_INPUT", 400);
+    const privateText = messages?.map((entry) => entry.content).join("\n") ?? message;
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
     if (!baseUrl || !modelId) throw new ModelError("NOT_CONFIGURED", 400);
     const { key, fileKey } = this.secrets.getKey();
@@ -194,20 +201,20 @@ export class ModelService {
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
     try {
-      const response = await this.request(endpoint, { method: "POST", headers, body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], stream }), redirect: "error", signal });
+      const response = await this.request(endpoint, { method: "POST", headers, body: JSON.stringify({ model: modelId, messages: messages ?? [{ role: "user", content: message }], stream }), redirect: "error", signal });
       if (!response.ok) {
-        const diagnostic = await upstreamDiagnostic(response, endpoint, [key, fileKey], message);
+        const diagnostic = await upstreamDiagnostic(response, endpoint, [key, fileKey], privateText);
         throw new ModelError(diagnostic.category, 502, diagnostic);
       }
-      const invalidResponse = () => new ModelError("INVALID_RESPONSE", 502, { source: "upstream", category: "INVALID_RESPONSE", status: response.status, target: safeTarget(endpoint, [key, fileKey], message) });
+      const invalidResponse = () => new ModelError("INVALID_RESPONSE", 502, { source: "upstream", category: "INVALID_RESPONSE", status: response.status, target: safeTarget(endpoint, [key, fileKey], privateText) });
       if (Number(response.headers.get("content-length")) > maxResponse) { await response.body?.cancel(); throw invalidResponse(); }
       if (stream) {
-        const incomplete = () => new ModelError("STREAM_INCOMPLETE", 502, { source: "upstream", category: "STREAM_INCOMPLETE", status: response.status, target: safeTarget(endpoint, [key, fileKey], message) });
+        const incomplete = () => new ModelError("STREAM_INCOMPLETE", 502, { source: "upstream", category: "STREAM_INCOMPLETE", status: response.status, target: safeTarget(endpoint, [key, fileKey], privateText) });
         const streamError = async (data: string) => {
           const errorHeaders = new Headers({ "content-type": "application/json" });
           const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
           if (requestId) errorHeaders.set("x-request-id", requestId);
-          const diagnostic = await upstreamDiagnostic(new Response(data, { status: 200, headers: errorHeaders }), endpoint, [key, fileKey], message);
+          const diagnostic = await upstreamDiagnostic(new Response(data, { status: 200, headers: errorHeaders }), endpoint, [key, fileKey], privateText);
           diagnostic.status = response.status;
           return new ModelError(diagnostic.category, 502, diagnostic);
         };
@@ -265,7 +272,7 @@ export class ModelService {
     } catch (error) {
       if (error instanceof ModelError) throw error;
       if (cancellation?.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
-      const diagnostic = networkDiagnostic(error, timeout.aborted, endpoint, [key, fileKey], message);
+      const diagnostic = networkDiagnostic(error, timeout.aborted, endpoint, [key, fileKey], privateText);
       throw new ModelError(diagnostic.category, diagnostic.category === "TIMEOUT" ? 504 : 502, diagnostic);
     }
   }

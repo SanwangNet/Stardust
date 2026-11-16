@@ -1,6 +1,6 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
 import { classifyModelName, isCompactModel } from "./model-classification.js";
-import { appendChatHistory, readChatHistory, type ChatMessage } from "./chat-history.js";
+import { initializeConversationUI } from "./conversation-ui.js";
 
 interface HealthResponse {
   status: "ok";
@@ -34,7 +34,18 @@ type MenuGroup = { label: string; id: string; children: MenuPage[] };
 type MenuCategory = { label: string; items: (MenuPage | MenuGroup)[] };
 const menu: MenuCategory[] = [
   { label: "概览", items: [{ label: "运行概况", path: "/overview/status" }] },
-  { label: "模型", items: [{ label: "模型服务", id: "model-service", children: [{ label: "模型服务首页", path: "/model/service" }, { label: "模型对话", path: "/model/chat" }, { label: "当前配置", path: "/model/service/config" }, { label: "连接测试", path: "/model/service/test" }] }, { label: "日志", path: "/model/logs" }] },
+  {
+    label: "模型",
+    items: [
+      { label: "模型服务", id: "model-service", children: [
+        { label: "模型服务首页", path: "/model/service" },
+        { label: "当前配置", path: "/model/service/config" },
+        { label: "连接测试", path: "/model/service/test" },
+      ] },
+      { label: "模型对话", path: "/model/chat" },
+      { label: "日志", path: "/model/logs" },
+    ],
+  },
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
 ];
@@ -106,16 +117,62 @@ let spaceEnterBorder: { element: HTMLElement; animation: Animation; contentAnima
 let spaceExitLayer: HTMLElement | undefined;
 let sidebarEnterAnimation: { animation: Animation; scrollX: number; scrollY: number } | undefined;
 let rootFrameTransition: { element: HTMLElement; animation: Animation; card?: HTMLElement; scrollX: number; scrollY: number } | undefined;
+let rootPageMotion: { incoming: Animation; outgoing: Animation; snapshot: HTMLElement } | undefined;
+
+function captureRootPage(): HTMLElement | undefined {
+  if (reducedMotion.matches) return;
+  const rect = spaceOuter.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const snapshot = spaceOuter.cloneNode(true) as HTMLElement;
+  snapshot.inert = true;
+  snapshot.setAttribute("aria-hidden", "true");
+  // The snapshot is attached to body, outside the main element that supplies
+  // these layout variables. Preserve them so its contents do not reflow.
+  const sourceStyle = getComputedStyle(spaceOuter);
+  for (const property of ["--main-gutter", "--space-sticky-top"]) {
+    snapshot.style.setProperty(property, sourceStyle.getPropertyValue(property));
+  }
+  Object.assign(snapshot.style, {
+    position: "fixed", left: `${rect.left}px`, top: `${rect.top}px`,
+    width: `${rect.width}px`, height: `${rect.height}px`, margin: "0",
+    pointerEvents: "none", zIndex: "10", opacity: sourceStyle.opacity,
+  });
+  document.body.append(snapshot);
+  return snapshot;
+}
+function clearRootPageMotion(): void {
+  if (!rootPageMotion) return;
+  rootPageMotion.incoming.cancel();
+  rootPageMotion.outgoing.cancel();
+  rootPageMotion.snapshot.remove();
+  rootPageMotion = undefined;
+  document.documentElement.classList.remove("is-root-page-transitioning");
+}
+function animateRootPage(snapshot: HTMLElement, direction: number): void {
+  document.documentElement.classList.add("is-root-page-transitioning");
+  const distance = 48 * direction;
+  const options: KeyframeAnimationOptions = { duration: spaceMotion.sibling, easing: spaceMotion.easing };
+  const incoming = spaceOuter.animate([
+    { transform: `translateX(${distance}px)`, opacity: 0 },
+    { transform: "translateX(0)", opacity: 1 },
+  ], options);
+  const outgoing = snapshot.animate([
+    { transform: "translateX(0)", opacity: snapshot.style.opacity },
+    { transform: `translateX(${-distance}px)`, opacity: 0 },
+  ], options);
+  rootPageMotion = { incoming, outgoing, snapshot };
+  void incoming.finished.then(() => {
+    if (rootPageMotion?.incoming === incoming) clearRootPageMotion();
+  }, () => {});
+}
 
 function spaceLevels(path: string): string[] {
-  const model = { path: "/model/service", label: "模型服务", icon: "◇" };
+  const modelServicePath = "/model/service";
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
-  if (path === model.path) return [model.path];
-  if (path === "/model/service/config" || path === "/model/service/test" || path === "/model/chat") {
-    const labels: Record<string, [string, string]> = { "/model/service/config": ["当前配置", "◇"], "/model/service/test": ["连接测试", "◎"], "/model/chat": ["模型对话", "✦"] };
-    return [model.path, path];
+  if (path === modelServicePath || path === "/model/chat" || path === "/model/logs") return [path];
+  if (path === "/model/service/config" || path === "/model/service/test") {
+    return [modelServicePath, path];
   }
-  if (path === "/model/logs") return [path];
   if (path === extensions.path) return [extensions.path];
   if (!extensionRoutes.has(path)) return [];
   const levels: string[] = [];
@@ -323,12 +380,14 @@ function animateRootFrame(card: HTMLElement, entering: boolean): void {
     left: `${frameRect.left}px`, top: `${targetTop}px`,
     width: `${frameRect.width}px`, height: `${Math.max(0, frameRect.bottom - targetTop)}px`,
     boxShadow: getComputedStyle(card).boxShadow,
+    borderRightColor: "var(--space-frame-color)",
   };
   const start = {
     left: `${navLeft}px`, top: `${navTop}px`,
     width: `${Math.max(0, frameRect.right - navLeft)}px`,
     height: `${Math.max(0, frameRect.bottom - navTop)}px`,
     boxShadow: "none",
+    borderRightColor: "transparent",
   };
   const overlay = document.createElement("div");
   overlay.className = "space-root-frame-transition";
@@ -365,8 +424,8 @@ function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCa
 
   const shellStyle = getComputedStyle(spaceShell);
   const headingStyle = getComputedStyle(pageHeading);
-  const borderWidth = `${headingStyle.borderTopWidth} 0px 0px ${shellStyle.borderLeftWidth}`;
-  const borderColor = `${headingStyle.borderTopColor} transparent transparent ${shellStyle.borderLeftColor}`;
+  const borderWidth = `${headingStyle.borderTopWidth} ${shellStyle.borderRightWidth} 0px ${shellStyle.borderLeftWidth}`;
+  const borderColor = `${headingStyle.borderTopColor} ${shellStyle.borderRightColor} transparent ${shellStyle.borderLeftColor}`;
   const border = document.createElement("div");
   border.className = "space-enter-border";
   border.setAttribute("aria-hidden", "true");
@@ -695,6 +754,7 @@ function restoreRouteState(path: string, origin: "click" | "history" | "programm
   const state = routeStates.get(path);
   const section = navPages.find((page) => page.dataset.page === path);
   if (origin === "history" && state?.focus?.isConnected && section?.contains(state.focus)) state.focus.focus({ preventScroll: true });
+  else if (path === "/model/chat") section?.focus({ preventScroll: true });
   else pageTitle.focus({ preventScroll: true });
   if (origin === "history" && state) {
     window.scrollTo({ left: state.scrollX, top: state.scrollY, behavior: "instant" });
@@ -724,10 +784,15 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
 
   const previousPath = currentPath;
   const previousTitle = currentTitle;
+  const categoryChanged = activeCategory !== category;
+  const rootSwitch = Boolean(previousPath && categoryChanged);
+  const direction = activeCategory && menu.indexOf(category) < menu.indexOf(activeCategory) ? -1 : 1;
+  const rootSnapshot = rootSwitch ? captureRootPage() : undefined;
+  clearRootPageMotion();
   const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
   const nextLevels = spaceLevels(path);
   const returnLevel = previousLevels.indexOf(path);
-  const returning = previousPath !== path && returnLevel !== -1;
+  const returning = !rootSwitch && previousPath !== path && returnLevel !== -1;
   clearTitleFlights();
   clearRootFrameTransition();
   const rootReturning = returning && nextLevels.length === 1 && previousLevels[1] === path;
@@ -759,19 +824,18 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   clearSpaceEnter();
   animateSpaceExit(sidebarSibling ? [previousPath] : returning ? previousLevels.slice(returnLevel + 1) : [], sidebarSibling);
 
-  const categoryChanged = activeCategory !== category;
   if (currentPath) saveRouteState(currentPath);
   currentPath = path;
   activeCategory = category;
   currentTitle = page.label;
   lastVisited.set(category.label, path);
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
-  const clickedTitle = origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
+  const clickedTitle = !rootSwitch && origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
   pendingNavigationTitleSource = undefined;
   const enteringChild = nextLevels.length > 0 && (previousPath === "/overview/status" || nextLevels.at(-2) === previousPath);
   const sidebarChild = origin === "click" && pendingSidebarTarget === path && nextLevels.at(-2) === previousPath;
   pendingSidebarTarget = undefined;
-  const clickedBorder = origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path ? pendingNavigationCardBorder : undefined;
+  const clickedBorder = !rootSwitch && origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path ? pendingNavigationCardBorder : undefined;
   pendingNavigationCardBorder = undefined;
   const movingTitles = renderTitleHierarchy(path, previousPath, previousTitle, clickedTitle);
   if (returningTitle) {
@@ -805,6 +869,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   movePrimaryIndicator();
   moveSecondaryIndicator();
   restoreRouteState(path, returning ? "history" : origin);
+  if (rootSnapshot) animateRootPage(rootSnapshot, direction);
   if (rootFrameTransition) {
     rootFrameTransition.scrollX = window.scrollX;
     rootFrameTransition.scrollY = window.scrollY;
@@ -1172,20 +1237,6 @@ const modelStatus = getElement<HTMLElement>("model-status");
 const modelTestStatus = getElement<HTMLElement>("model-test-status");
 const modelSave = getElement<HTMLButtonElement>("model-save");
 const modelTest = getElement<HTMLButtonElement>("model-test");
-const chatForm = getElement<HTMLFormElement>("chat-form");
-const chatInput = getElement<HTMLTextAreaElement>("chat-input");
-const chatSend = getElement<HTMLButtonElement>("chat-send");
-const chatStatus = getElement<HTMLElement>("chat-status");
-const chatMessages = getElement<HTMLElement>("chat-messages");
-const chatHistoryStatus = getElement<HTMLElement>("chat-history-status");
-const adminForm = getElement<HTMLFormElement>("tool-admin-form");
-const adminToken = getElement<HTMLInputElement>("tool-admin-token");
-const adminStatus = getElement<HTMLElement>("tool-admin-status");
-let adminAuthenticated = false;
-let activeToolRun = "";
-let toolRunSignature = "";
-let toolRunPanel: HTMLElement | undefined;
-let toolReply: HTMLElement | undefined;
 let modelLoaded = false;
 let savedModelBaseUrl = "";
 const modelListStorageKey = "stardust.model.lists.v1";
@@ -1250,7 +1301,7 @@ function renderModelConfig(config: ModelView): void {
 }
 function showModel(): void {
   showExtensions();
-  void refreshAdmin();
+  window.dispatchEvent(new Event("stardust-conversations-ready"));
   if (modelLoaded) return;
   modelLoaded = true;
   void modelRequest("/api/v1/model/config").then((value) => renderModelConfig(value as ModelView)).catch((error: unknown) => {
@@ -1301,176 +1352,7 @@ modelTest.addEventListener("click", () => {
     .catch((error: unknown) => { modelTestStatus.textContent = error instanceof Error ? error.message : "连接测试失败。"; })
     .finally(() => setModelBusy(false));
 });
-function renderChatMessage(message: ChatMessage): void {
-  const entry = document.createElement("div");
-  entry.className = "chat-message";
-  entry.dataset.role = message.role;
-  const label = document.createElement("strong");
-  label.textContent = message.role === "user" ? "你" : "模型";
-  const content = document.createElement("p");
-  content.textContent = message.content;
-  entry.append(label, content);
-  chatMessages.append(entry);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-const displayedMessages = new Set<string>();
-function showChatMessage(message: ChatMessage): void {
-  if (displayedMessages.has(message.id)) return;
-  displayedMessages.add(message.id);
-  renderChatMessage(message);
-}
-function addMessage(role: "user" | "model", content: string, id: string = crypto.randomUUID()): void {
-  const message = { id, role, content };
-  try { for (const item of appendChatHistory(localStorage, message)) showChatMessage(item); }
-  catch { showChatMessage(message); chatHistoryStatus.textContent = "聊天记录无法保存到此浏览器，刷新后可能丢失。"; }
-}
-function createReplyPlaceholder(): HTMLElement {
-  const entry = document.createElement("div"); entry.className = "chat-message"; entry.dataset.role = "model";
-  const label = document.createElement("strong"); label.textContent = "模型";
-  const content = document.createElement("p"); content.textContent = "正在等待回复…";
-  entry.append(label, content); chatMessages.append(entry); chatMessages.scrollTop = chatMessages.scrollHeight;
-  return entry;
-}
-function finishReply(placeholder: HTMLElement, content: string, id?: string): void {
-  placeholder.remove();
-  addMessage("model", content, id);
-}
-async function streamChat(message: string, placeholder: HTMLElement): Promise<void> {
-  const content = placeholder.querySelector("p")!;
-  let text = "", done = false, buffer = "";
-  try {
-    const response = await fetch("/api/v1/model/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }), signal: AbortSignal.timeout(130000) });
-    if (!response.ok) { const data = await response.json().catch(() => ({})) as { error?: unknown }; throw new Error(formatModelError(data.error, response.status)); }
-    if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("服务端未返回有效的流式响应。请重启后端。");
-    const reader = response.body.getReader(); const decoder = new TextDecoder();
-    try {
-      for (;;) {
-        const part = await reader.read();
-        buffer += decoder.decode(part.value, { stream: !part.done });
-        let boundary: number;
-        while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-          const event = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
-          const kind = event.match(/^event: (.+)$/m)?.[1];
-          const raw = event.match(/^data: (.+)$/m)?.[1];
-          if (!raw) continue;
-          const data = JSON.parse(raw) as { content?: string; error?: unknown };
-          if (kind === "delta" && typeof data.content === "string") { text += data.content; content.textContent = text; chatMessages.scrollTop = chatMessages.scrollHeight; }
-          else if (kind === "error") throw new Error(formatModelError(data.error, 502));
-          else if (kind === "done") done = true;
-        }
-        if (part.done) break;
-      }
-    } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
-    if (!done) throw new Error("连接中断，模型回复未完成。");
-    finishReply(placeholder, text || "模型未返回内容。");
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "发送失败，请重试。";
-    finishReply(placeholder, `${text}${text ? "\n\n" : ""}请求失败：${detail}`);
-  }
-}
-try { for (const message of readChatHistory(localStorage)) showChatMessage(message); }
-catch { chatHistoryStatus.textContent = "无法读取浏览器中的聊天记录；原记录未被覆盖。"; }
-async function toolRequest(path: string, body?: unknown): Promise<unknown> {
-  let response: Response;
-  try { response = await fetch(path, body === undefined ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
-  catch { throw new Error("无法连接 Stardust 服务端。"); }
-  const data = await response.json() as { error?: string };
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
-async function refreshAdmin(): Promise<void> {
-  try {
-    const state = await toolRequest("/api/v1/admin/state") as { configured: boolean; authenticated: boolean };
-    adminAuthenticated = state.authenticated; adminForm.hidden = !state.configured || state.authenticated;
-    adminStatus.textContent = state.authenticated ? "管理员已登录，可以在对话中使用已启用的 Tool。" : state.configured ? "登录后可在模型对话中使用 Tool。" : "配置 STARDUST_ADMIN_TOKEN（至少 32 字符）并重启后可使用 Tool。";
-    if (adminAuthenticated && !activeToolRun) {
-      const saved = sessionStorage.getItem("stardust.toolRun");
-      if (saved) { activeToolRun = saved; chatSend.disabled = true; toolRunPanel = document.createElement("div"); chatMessages.append(toolRunPanel); toolReply = createReplyPlaceholder(); void pollToolRun(); }
-    }
-  } catch { adminStatus.textContent = "无法读取管理员认证状态。"; }
-}
-adminForm.addEventListener("submit", (event) => {
-  event.preventDefault(); const token = adminToken.value; adminToken.value = "";
-  void toolRequest("/api/v1/admin/login", { token }).then(() => refreshAdmin()).catch(() => { adminStatus.textContent = "管理员登录失败，请检查口令。"; });
-});
-type ToolRunView = { id: string; status: "working" | "waiting" | "executing" | "done" | "error"; reply?: string; error?: string; errorDetail?: { status?: number; code?: string; message?: string }; calls: { id: string; name: string; status: string; input?: Record<string, unknown>; approval?: { operation: string; targetDescription: string; channel?: string; content?: string; risk: string }; expiresAt?: string; result?: unknown }[] };
-async function pollToolRun(): Promise<void> {
-  const id = activeToolRun; if (!id) return;
-  try {
-    const run = await toolRequest(`/api/v1/tool-runs/${encodeURIComponent(id)}`) as ToolRunView;
-    if (activeToolRun !== id) return;
-    const signature = JSON.stringify(run);
-    if (signature !== toolRunSignature && toolRunPanel) {
-      toolRunSignature = signature; toolRunPanel.replaceChildren();
-      for (const call of run.calls) {
-        const card = document.createElement("details"); card.className = "tool-call"; card.open = call.status === "waiting";
-        const labels: Record<string, string> = { validating: "正在校验", waiting: "等待管理员确认", executing: "执行中", sent: "请求成功", denied: "已拒绝", expired: "审批已过期", failed: "校验失败", unavailable: "不可用", rejected: "渠道拒绝", unknown_outcome: "发送结果未知" };
-        const title = document.createElement("summary"); title.textContent = `Tool：${call.name} · ${labels[call.status] ?? call.status}`; card.append(title);
-        if (call.approval) {
-          const info = document.createElement("p"); info.textContent = `渠道：${call.approval.channel ?? "—"} · 目标：${call.approval.targetDescription} · 操作：${call.approval.operation}`;
-          const content = document.createElement("pre"); content.textContent = call.approval.content ?? "";
-          const warning = document.createElement("p"); warning.textContent = `${call.approval.risk} 审批有效期至 ${call.expiresAt ? new Date(call.expiresAt).toLocaleTimeString() : "—"}。`;
-          const parameters = document.createElement("pre"); parameters.textContent = JSON.stringify(call.input, null, 2);
-          card.append(info, content, parameters, warning);
-        }
-        if (call.result) { const result = document.createElement("pre"); result.textContent = JSON.stringify(call.result, null, 2); card.append(result); }
-        if (call.status === "waiting") {
-          const controls = document.createElement("div"); controls.className = "extension-actions";
-          const approve = document.createElement("button"); approve.type = "button"; approve.className = "setup-primary"; approve.textContent = "批准一次";
-          const deny = document.createElement("button"); deny.type = "button"; deny.className = "setup-secondary"; deny.textContent = "拒绝";
-          const decide = (approved: boolean) => {
-            approve.disabled = true; deny.disabled = true;
-            void toolRequest(`/api/v1/tool-runs/${encodeURIComponent(id)}/decision`, { toolCallId: call.id, approved }).then(() => pollToolRun()).catch((error: unknown) => { chatStatus.textContent = error instanceof Error ? error.message : "审批失败。"; void pollToolRun(); });
-          };
-          approve.addEventListener("click", () => decide(true)); deny.addEventListener("click", () => decide(false)); controls.append(approve, deny); card.append(controls);
-        }
-        toolRunPanel.append(card);
-      }
-    }
-    if (run.status === "done" || run.status === "error") {
-      const result = run.status === "error" ? `工具对话失败：${run.error ?? "未知错误"}${run.errorDetail?.status ? `（HTTP ${run.errorDetail.status}）` : ""}${run.errorDetail?.code ? ` · ${run.errorDetail.code}` : ""}${run.errorDetail?.message ? ` · ${run.errorDetail.message}` : ""}` : run.reply || "模型未返回内容。";
-      if (toolReply) finishReply(toolReply, result, `tool:${id}`); else addMessage("model", result, `tool:${id}`);
-      toolReply = undefined; chatStatus.textContent = "";
-      activeToolRun = ""; sessionStorage.removeItem("stardust.toolRun"); chatSend.disabled = false; return;
-    }
-    chatStatus.textContent = run.status === "waiting" ? "等待管理员确认。" : run.status === "executing" ? "正在执行 Tool…" : "模型处理中…";
-    setTimeout(() => { if (activeToolRun === id) void pollToolRun(); }, 1200);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "无法读取工具对话状态。";
-    chatStatus.textContent = message;
-    if (message === "RUN_NOT_FOUND" || message === "AUTH_REQUIRED") {
-      if (toolReply) finishReply(toolReply, `工具对话失败：${message}`, `tool:${id}`);
-      toolReply = undefined;
-      activeToolRun = ""; sessionStorage.removeItem("stardust.toolRun"); chatSend.disabled = false;
-      if (message === "AUTH_REQUIRED") { adminAuthenticated = false; void refreshAdmin(); }
-    } else if (activeToolRun === id) setTimeout(() => { if (activeToolRun === id) void pollToolRun(); }, 3000);
-  }
-}
-void refreshAdmin();
-chatInput.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229) return;
-  event.preventDefault();
-  if (!event.repeat && !chatSend.disabled && chatInput.value.trim()) chatForm.requestSubmit();
-});
-chatForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (chatSend.disabled || !chatInput.value.trim()) return;
-  const message = chatInput.value;
-  addMessage("user", message);
-  const placeholder = createReplyPlaceholder();
-  chatInput.value = "";
-  chatSend.disabled = true;
-  chatStatus.textContent = "正在等待回复…";
-  if (adminAuthenticated) {
-    toolReply = placeholder;
-    void toolRequest("/api/v1/tool-runs", { message }).then((value) => {
-      activeToolRun = (value as { id: string }).id; sessionStorage.setItem("stardust.toolRun", activeToolRun);
-      toolRunSignature = ""; toolRunPanel = document.createElement("div"); placeholder.before(toolRunPanel); void pollToolRun();
-    }).catch((error: unknown) => { finishReply(placeholder, `工具对话失败：${error instanceof Error ? error.message : "请重试。"}`); toolReply = undefined; chatStatus.textContent = ""; chatSend.disabled = false; });
-    return;
-  }
-  void streamChat(message, placeholder).finally(() => { chatStatus.textContent = ""; chatSend.disabled = false; });
-});
+initializeConversationUI();
 
 type ExtensionFieldView = { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string };
 type ExtensionToolView = { name: string; description: string; parameters: Record<string, unknown>; enabled: boolean; available: boolean };

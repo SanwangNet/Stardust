@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const children = new Set();
 let stopping = false;
-function start(script, args = []) {
-  const child = spawn(process.execPath, [script, ...args], { cwd: root, stdio: "inherit" });
+function start(script, args = [], nodeArgs = []) {
+  const child = spawn(process.execPath, [...nodeArgs, script, ...args], { cwd: root, stdio: "inherit" });
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);
@@ -30,6 +30,6 @@ compiler.once("exit", (code) => {
   children.delete(compiler);
   if (stopping) return;
   if (code !== 0) { stop(code || 1); return; }
-  start("apps/server/dist/main.js");
+  start("apps/server/dist/main.js", [], ["--experimental-sqlite"]);
   start("node_modules/vite/bin/vite.js", ["--config", "vite.config.mjs"]);
 });
