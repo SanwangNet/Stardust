@@ -123,6 +123,8 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/chat-history.js": { filename: "chat-history.js", contentType: "text/javascript; charset=utf-8" },
   "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-board.js": { filename: "flow-board.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-data.js": { filename: "flow-data.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };

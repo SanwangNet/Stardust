@@ -2,6 +2,7 @@ import { formatModelError, noModelResponseMessage } from "./model-errors.js";
 import { classifyModelName, isCompactModel } from "./model-classification.js";
 import { initializeConversationUI } from "./conversation-ui.js";
 import { initializeGlobalContextUI } from "./global-context-ui.js";
+import { initializeFlowBoard } from "./flow-board.js";
 
 interface HealthResponse {
   status: "ok";
@@ -44,6 +45,7 @@ const menu: MenuCategory[] = [
         { label: "连接测试", path: "/model/service/test" },
       ] },
       { label: "模型对话", path: "/model/chat" },
+      { label: "可视化流程", path: "/model/flow" },
       { label: "全局上下文", path: "/model/context" },
       { label: "日志", path: "/model/logs" },
     ],
@@ -55,6 +57,7 @@ const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
   "/model/service": "配置、测试和使用你的模型服务。",
   "/model/chat": "与当前模型对话，记录你的想法。",
+  "/model/flow": "查看星尘当前的渠道、上下文与工具关系。",
   "/settings/agent": "设置星尘在各渠道共享的主体提示词。",
   "/model/context": "查看从交流中综合的经历和状态。",
   "/model/service/config": "连接模型，调整请求方式与访问凭证。",
@@ -173,7 +176,7 @@ function animateRootPage(snapshot: HTMLElement, direction: number): void {
 function spaceLevels(path: string): string[] {
   const modelServicePath = "/model/service";
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
-  if (path === modelServicePath || path === "/model/chat" || path === "/model/context" || path === "/model/logs") return [path];
+  if (path === modelServicePath || path === "/model/chat" || path === "/model/flow" || path === "/model/context" || path === "/model/logs") return [path];
   if (path === "/model/service/config" || path === "/model/service/test") {
     return [modelServicePath, path];
   }
@@ -1358,6 +1361,7 @@ modelTest.addEventListener("click", () => {
 });
 initializeConversationUI();
 initializeGlobalContextUI();
+initializeFlowBoard();
 
 type ExtensionFieldView = { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string };
 type ExtensionToolView = { name: string; description: string; parameters: Record<string, unknown>; enabled: boolean; available: boolean };
