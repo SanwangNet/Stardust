@@ -19,20 +19,21 @@ export function initializeFlowBoard(): void {
   const edgeElements = new Map<string, SVGPathElement>();
   const liveStatus = new Map<string, string>();
   let registeredChannels: { id: string; name: string; type: string; installed: boolean; enabled: boolean }[] = [];
-  let activeView: FlowViewId = "overview", selected: string | undefined;
-  let graphId = "overview";
+  let activeView: FlowViewId = "web", selected: string | undefined;
+  let graphId = "input";
   let graph: FlowGraph = flowGraphs[0]!;
   let positions = new Map<string, { x: number; y: number }>();
   let scale = 1, panX = 0, panY = 0, initialized = false;
 
   root.className = "flow-board";
-  root.innerHTML = `<div class="flow-toolbar"><div class="flow-view-picker" role="group" aria-label="流程视图"></div><div class="flow-controls"><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button></div></div><nav class="flow-breadcrumb" aria-label="流程层级"></nav>
+  root.innerHTML = `<div class="flow-toolbar"><div class="flow-view-picker" role="group" aria-label="流程视图"></div><div class="flow-controls"><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button></div></div><nav class="flow-breadcrumb" aria-label="功能流程"></nav><div class="flow-summary"><strong>流程总览</strong><span></span></div>
     <div class="flow-content"><div class="flow-canvas-wrap"><div class="flow-canvas" tabindex="0" aria-label="架构画板。拖动空白处平移，滚轮或双指缩放；可用加减号缩放。"><div class="flow-world"><svg class="flow-wires" aria-hidden="true"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs></svg><div class="flow-nodes"></div></div></div><div class="flow-hud"><span class="flow-hint">拖动空白处平移 · 滚轮缩放</span><span class="flow-zoom" aria-live="polite"></span><button type="button" data-action="zoom-out" aria-label="缩小">−</button><button type="button" data-action="zoom-in" aria-label="放大">＋</button></div></div>
     <aside class="flow-inspector" aria-label="节点详情"><div class="flow-inspector-top"><span>NODE / 节点详情</span><button type="button" data-action="close" aria-label="关闭节点详情">×</button></div><div class="flow-inspector-body"></div></aside></div>
     <div class="flow-footer"><span class="flow-view-note"></span><div class="flow-legend"><span><i></i>实际路径</span><span><i class="is-dashed"></i>依赖 / 后台</span><span><i class="is-planned"></i>未接入</span></div></div>`;
   const element = <T extends Element>(selector: string): T => root.querySelector<T>(selector)!;
   const picker = element<HTMLElement>(".flow-view-picker");
   const breadcrumb = element<HTMLElement>(".flow-breadcrumb");
+  const summary = element<HTMLElement>(".flow-summary span");
   const canvas = element<HTMLElement>(".flow-canvas");
   const world = element<HTMLElement>(".flow-world");
   const wires = element<SVGSVGElement>(".flow-wires");
@@ -46,7 +47,7 @@ export function initializeFlowBoard(): void {
     const base = flowGraphs.find((item) => item.id === id)!;
     if (id !== "input") return base;
     const extra: FlowNode[] = registeredChannels.filter((item) => item.type === "channel" && item.installed && item.id !== "web-chat" && item.id !== "qq-bot").map((item, index) => ({
-      id: `channel-${item.id}`, kind: "input", title: item.name, subtitle: "REGISTERED CHANNEL", description: "已安装的渠道；具体执行路径尚未在此图中定义。", owner: `星核 · ${item.id}`, state: "注册信息", registryId: item.id, position: { x: 40, y: 560 + index * 210 }, views: ["overview"],
+      id: `channel-${item.id}`, kind: "input", title: item.name, subtitle: "REGISTERED CHANNEL", description: "已安装的渠道；具体执行路径尚未在此图中定义。", owner: `星核 · ${item.id}`, state: "注册信息", registryId: item.id, position: { x: 40, y: 560 + index * 210 }, views: [],
     }));
     return { ...base, nodes: [...base.nodes, ...extra] };
   }
@@ -143,7 +144,8 @@ export function initializeFlowBoard(): void {
   }
   function setView(view: FlowViewId): void {
     activeView = view;
-    if (graph.availableViews && !graph.availableViews.includes(view)) navigateGraph("overview");
+    if (graph.availableViews && !graph.availableViews.includes(view)) navigateGraph("input");
+    renderBreadcrumb();
     picker.querySelectorAll<HTMLButtonElement>("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === view)));
     for (const node of graph.nodes) {
       const element = nodeElements.get(node.id); element?.classList.toggle("is-muted", !node.views.includes(view));
@@ -161,15 +163,17 @@ export function initializeFlowBoard(): void {
   function renderBreadcrumb(): void {
     breadcrumb.replaceChildren();
     const label = document.createElement("span"); label.className = "flow-breadcrumb-label"; label.textContent = "STARDUST / 流程"; breadcrumb.append(label);
-    if (graph.parentId) {
-      const back = document.createElement("button"); back.type = "button"; back.dataset.graph = graph.parentId; back.textContent = "← 返回总览"; breadcrumb.append(back);
-      const separator = document.createElement("span"); separator.textContent = "/"; breadcrumb.append(separator);
+    for (const item of flowGraphs) {
+      const button = document.createElement("button"); button.type = "button"; button.dataset.graph = item.id; button.textContent = item.title;
+      button.setAttribute("aria-pressed", String(item.id === graph.id));
+      button.disabled = Boolean(item.availableViews && !item.availableViews.includes(activeView));
+      breadcrumb.append(button);
     }
-    const current = document.createElement("span"); current.textContent = graph.title; current.setAttribute("aria-current", "page"); breadcrumb.append(current);
   }
   function renderGraph(): void {
     nodes.replaceChildren(); wires.querySelectorAll(".flow-wire").forEach((item) => item.remove()); nodeElements.clear(); edgeElements.clear();
     root.dataset.graph = graph.id;
+    summary.textContent = graph.summary;
     for (const edge of graph.edges) {
       const path = document.createElementNS(svgNamespace, "path"); path.classList.add("flow-wire");
       if (edge.style) path.classList.add(`is-${edge.style}`);

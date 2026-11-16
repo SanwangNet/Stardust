@@ -446,10 +446,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .flow-page { padding: 0; min-width: 0; }
 .flow-board { border: 1px solid var(--line); border-top: 2px solid var(--text); background: var(--panel); box-shadow: var(--card-shadow); }
 .flow-toolbar { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
-.flow-breadcrumb { min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.flow-breadcrumb { flex-wrap: wrap; min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .flow-breadcrumb-label { font-family: monospace; letter-spacing: .06em; white-space: nowrap; }
 .flow-breadcrumb button { padding: 4px 6px; border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; white-space: nowrap; }
-.flow-breadcrumb [aria-current="page"] { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-breadcrumb button[aria-pressed="true"] { color: var(--text); background: var(--accent-soft); font-weight: 700; }
+.flow-breadcrumb button:disabled { color: var(--muted); opacity: .45; cursor: not-allowed; }
+.flow-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.6; }
+.flow-summary strong { color: var(--text); white-space: nowrap; }
 .flow-view-picker { display: flex; flex-wrap: wrap; gap: 3px; }
 .flow-view-picker button, .flow-controls button, .flow-hud button, .flow-inspector-top button { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .flow-view-picker button { min-height: 38px; padding: 8px 14px; border-bottom: 2px solid transparent; font-size: 12px; font-weight: 600; }

@@ -5,9 +5,9 @@ import { flowGraphs, flowViews } from "../apps/web/dist/flow-data.js";
 const graph = id => flowGraphs.find(item => item.id === id);
 const edge = (item, id) => item.edges.find(value => value.id === id);
 
-test("graphs have stable unique nodes, valid local edges and explicit parent-child links", () => {
+test("feature graphs have stable unique nodes and valid local edges", () => {
   assert.equal(new Set(flowGraphs.map(item => item.id)).size, flowGraphs.length);
-  assert.deepEqual(flowViews.map(view => view.id), ["overview", "web", "qq"]);
+  assert.deepEqual(flowViews.map(view => view.id), ["web", "qq"]);
   for (const item of flowGraphs) {
     const nodes = new Map(item.nodes.map(node => [node.id, node]));
     assert.equal(nodes.size, item.nodes.length);
@@ -17,14 +17,9 @@ test("graphs have stable unique nodes, valid local edges and explicit parent-chi
   }
 });
 
-test("overview contains five stages, with an optional Tool round trip and direct reply", () => {
-  const overview = graph("overview");
-  assert.deepEqual(overview.nodes.map(node => node.id), ["input", "context", "model", "tool", "output"]);
-  assert.equal(overview.edges.length, 5);
-  assert.deepEqual([edge(overview,"model-output").source, edge(overview,"model-output").target], ["model","output"]);
-  assert.deepEqual([edge(overview,"model-tool").source, edge(overview,"model-tool").target], ["model","tool"]);
-  assert.deepEqual([edge(overview,"tool-model").source, edge(overview,"tool-model").target], ["tool","model"]);
-  assert.ok(!edge(overview,"model-tool").views.includes("qq"));
+test("only feature graphs are available", () => {
+  assert.deepEqual(flowGraphs.map(item => item.id), ["input", "context", "model", "tool", "output"]);
+  assert.ok(flowGraphs.every(item => !item.parentId));
 });
 
 test("Web-only history and background synthesis are not shown as QQ execution paths", () => {
