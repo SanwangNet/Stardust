@@ -10,6 +10,8 @@ import { logger, type LogService, type LogEntry } from "./logger.js";
 import { AdminAuth } from "./admin-auth.js";
 import { ToolRuns } from "./tool-runs.js";
 import type { ConversationService } from "./conversation.js";
+import { WEB_CONTEXT_OWNER } from "./global-context.js";
+import { webChatExtension } from "./extensions/web-chat.js";
 
 export interface AppOptions {
   version?: string;
@@ -21,6 +23,7 @@ export interface AppOptions {
   logService?: LogService;
   adminAuth?: AdminAuth;
   conversationService?: ConversationService;
+  startConversations?: boolean;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -119,6 +122,7 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/model-classification.js": { filename: "model-classification.js", contentType: "text/javascript; charset=utf-8" },
   "/chat-history.js": { filename: "chat-history.js", contentType: "text/javascript; charset=utf-8" },
   "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
+  "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };
@@ -130,7 +134,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const setup = options.setupService ?? setupService;
   const model = options.modelService ?? modelService;
   const logs = options.logService ?? logger;
-  const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [], logs);
+  const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [webChatExtension], logs);
   const admin = options.adminAuth ?? new AdminAuth();
   const toolRuns = new ToolRuns(model, extensions, logs);
   const streams = new Set<ServerResponse>();
@@ -139,6 +143,19 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const conversationRuns = new Map<string, string>();
   const localConversationOwner = "local-conversation";
   let serverClosing = false;
+  const webChannelAvailable = (): boolean => typeof extensions.channelEnabled !== "function" || !extensions.list().some((item) => item.id === "web-chat" && item.builtin) || extensions.channelEnabled("web-chat");
+  async function openConversations(): Promise<ConversationService> {
+    if (!conversations) {
+      conversationOpening ??= import("./conversation.js").then(({ ConversationService }) => new ConversationService(model));
+      try { conversations = await conversationOpening; }
+      catch (error) { conversationOpening = undefined; throw error; }
+    }
+    conversations.globalContext.start();
+    return conversations;
+  }
+  if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function" && typeof model.chatContext === "function") {
+    extensions.setChannelChat(async (message, signal) => (await openConversations()).agent.chatChannel(model, message.channelId, message.content, signal, message.eventId));
+  }
 
   const server = createServer(async (request, response) => {
     let pathname: string;
@@ -149,13 +166,57 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
+    if (pathname === "/api/v1/global-context" || pathname.startsWith("/api/v1/global-context/")) {
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
+        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        const store = (await openConversations()).globalContext;
+        if (pathname === "/api/v1/global-context" && request.method === "GET") { sendJson(response, 200, { owner: WEB_CONTEXT_OWNER, entries: store.entries(WEB_CONTEXT_OWNER), counts: store.counts(WEB_CONTEXT_OWNER), lastCompletedAt: store.lastCompletedAt(WEB_CONTEXT_OWNER) }); return; }
+        if (pathname === "/api/v1/global-context/jobs" && request.method === "GET") { sendJson(response, 200, { jobs: store.jobs(WEB_CONTEXT_OWNER), counts: store.counts(WEB_CONTEXT_OWNER) }); return; }
+        if (pathname === "/api/v1/global-context" && request.method === "DELETE") { store.clear(WEB_CONTEXT_OWNER); sendJson(response, 200, { ok: true }); return; }
+        const retry = /^\/api\/v1\/global-context\/jobs\/(\d{1,15})\/retry$/.exec(pathname);
+        if (retry && request.method === "POST") {
+          if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          let body: unknown; try { body = await readSetupBody(request); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          store.retry(WEB_CONTEXT_OWNER, Number(retry[1])); sendJson(response, 200, { ok: true }); return;
+        }
+        sendJson(response, 404, { error: "NOT_FOUND" });
+      } catch (error) {
+        const code = error instanceof Error && ["INVALID_INPUT", "JOB_NOT_RETRYABLE"].includes(error.message) ? error.message : "GLOBAL_CONTEXT_FAILED";
+        sendJson(response, code === "INVALID_INPUT" ? 400 : code === "JOB_NOT_RETRYABLE" ? 409 : 500, { error: code });
+      }
+      return;
+    }
+    if (pathname === "/api/v1/agent/settings") {
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
+        if (!admin.local(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        const store = await openConversations();
+        const tools = [{ name: "search_history", description: "跨会话记忆 Tool" }, ...extensions.availableTools().filter((tool) => tool.name !== "search_history").map(({ name, description }) => ({ name, description }))];
+        if (request.method === "GET") { sendJson(response, 200, { ...store.agent.settings(), tools: tools.map((tool) => ({ ...tool, enabled: store.agent.toolAllowed(tool.name) })) }); return; }
+        if (request.method !== "PATCH" || !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+        const body = await readSetupBody(request, 32 * 1024);
+        store.agent.update(body, tools.map((tool) => tool.name));
+        sendJson(response, 200, { ok: true });
+      } catch (error) { sendJson(response, error instanceof Error && error.message === "INVALID_INPUT" ? 400 : 500, { error: "INVALID_INPUT" }); }
+      return;
+    }
     if (pathname === "/api/v1/conversations" || pathname.startsWith("/api/v1/conversations/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
         if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        const activityRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/activity$/i.exec(pathname);
+        if (activityRoute && request.method === "GET") {
+          const store = await openConversations();
+          store.getWeb(activityRoute[1]!);
+          sendJson(response, 200, { activity: store.activity(activityRoute[1]!, activityRoute[2]!) }); return;
+        }
         const toolRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/tool(?:\/(decision))?$/i.exec(pathname);
         if (toolRoute) {
+          (await openConversations()).getWeb(toolRoute[1]!);
           const key = `${toolRoute[1]}/${toolRoute[2]}`;
           const runId = conversationRuns.get(key);
           if (!runId) { sendJson(response, request.method === "GET" ? 200 : 409, request.method === "GET" ? { run: null } : { error: "TOOL_UNAVAILABLE" }); return; }
@@ -172,15 +233,11 @@ export function createStardustServer(options: AppOptions = {}): Server {
         }
         const match = /^\/api\/v1\/conversations\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(\/messages)?$/i.exec(pathname);
         if (pathname !== "/api/v1/conversations" && !match) { sendJson(response, 404, { error: "NOT_FOUND" }); return; }
-        if (!conversations) {
-          conversationOpening ??= import("./conversation.js").then(({ ConversationService }) => new ConversationService(model));
-          try { conversations = await conversationOpening; }
-          catch (error) { conversationOpening = undefined; throw error; }
-        }
-        const store = conversations;
+        const store = await openConversations();
         const id = match?.[1];
+        if (id) store.getWeb(id);
         if (request.method === "GET") {
-          if (!id) { sendJson(response, 200, { conversations: store.list() }); return; }
+          if (!id) { sendJson(response, 200, { conversations: store.listWeb() }); return; }
           if (!match?.[2]) { sendJson(response, 200, { conversation: store.get(id) }); return; }
           const url = new URL(request.url ?? "/", "http://localhost");
           const after = url.searchParams.get("after") ?? "0", limit = url.searchParams.get("limit") ?? "100";
@@ -202,11 +259,12 @@ export function createStardustServer(options: AppOptions = {}): Server {
           sendJson(response, 200, { conversation: store.rename(id, fields.title) }); return;
         }
         if (id && match?.[2] && request.method === "POST" && Object.keys(fields).every((key) => ["content", "requestId", "retry"].includes(key)) && typeof fields.content === "string" && typeof fields.requestId === "string" && (fields.retry === undefined || typeof fields.retry === "boolean")) {
+          if (!webChannelAvailable()) { sendJson(response, 403, { error: "CHANNEL_DISABLED" }); return; }
           const requestId = fields.requestId;
           const content = fields.content;
-          const execute = extensions.availableTools().length ? async (context: import("./conversation-context.js").ConversationContextMessage[]) => {
+          const execute = async (context: import("./conversation-context.js").ConversationContextMessage[], activity: (event: Omit<import("./history-agent.js").ModelActivity, "requestId">) => void, evidence: (item: import("./history-search.js").HistoryEvidence) => void) => {
             const key = `${id}/${requestId}`;
-            const runId = toolRuns.start(localConversationOwner, content, context);
+            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => webChannelAvailable() && store.agent.toolAllowed(name) });
             conversationRuns.set(key, runId);
             try {
               while (!serverClosing) {
@@ -217,8 +275,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
               }
               throw new ModelError("REQUEST_CANCELLED", 499);
             } finally { conversationRuns.delete(key); }
-          } : undefined;
-          const messages = await store.submit(id, requestId, content, fields.retry === true, execute);
+          };
+          const messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined);
           if (!response.destroyed) sendJson(response, 200, { messages });
           return;
         }
@@ -522,7 +580,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
       sendJson(response, 500, { error: "STATIC_FILE_UNAVAILABLE" });
     }
   });
-  server.on("listening", () => { try { if (setup.getInitializationState().initialized) void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
+  server.on("listening", () => { try { if (setup.getInitializationState().initialized) { void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); if (options.startConversations || options.conversationService) void openConversations().catch(() => logs.write("ERROR", "global-context", "无法打开会话数据库。")); } } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
   server.on("close", () => { serverClosing = true; toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;

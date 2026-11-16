@@ -12,7 +12,7 @@ import { createSecretStore } from "../apps/server/dist/model-secret.js";
 import { ModelService } from "../apps/server/dist/model.js";
 
 async function serverFixture(t, logs) {
-  const server = createStardustServer({ logService: logs });
+  const server = createStardustServer({ logService: logs, extensionManager: { restore: async () => {}, shutdown: async () => {} } });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   return { server, origin: `http://127.0.0.1:${server.address().port}` };
@@ -43,18 +43,20 @@ test("history and SSE replay use cursors, reconnect without duplicates and close
   const logs = new LogService(10, () => {}); const { server, origin } = await serverFixture(t, logs);
   logs.write("INFO", "test", "first");
   let response = await fetch(`${origin}/api/v1/logs`); const history = await response.json();
-  assert.equal(history.entries[0].message, "first"); assert.equal(history.latest, 1);
+  assert.equal(history.entries.at(-1).message, "first");
   assert.equal((await fetch(`${origin}/api/v1/logs`, { headers: { Origin: "https://other.example" } })).status, 403);
   assert.equal((await fetch(`${origin}/api/v1/logs?after=-1`)).status, 400);
-  response = await fetch(`${origin}/api/v1/logs/stream?after=1&instance=${history.instanceId}`);
+  response = await fetch(`${origin}/api/v1/logs/stream?after=${history.latest}&instance=${history.instanceId}`);
   const reader = response.body.getReader();
   logs.write("WARN", "test", "second");
-  const first = await readUntil(reader, '"message":"second"'); assert.match(first, /id: 2/); assert.doesNotMatch(first, /"message":"first"/);
+  const secondId = logs.read().latest;
+  const first = await readUntil(reader, '"message":"second"'); assert.ok(first.includes(`id: ${secondId}`)); assert.doesNotMatch(first, /"message":"first"/);
   await reader.cancel();
   logs.write("ERROR", "test", "third");
-  response = await fetch(`${origin}/api/v1/logs/stream?after=0&instance=${history.instanceId}`, { headers: { "Last-Event-ID": "2" } });
+  const thirdId = logs.read().latest;
+  response = await fetch(`${origin}/api/v1/logs/stream?after=0&instance=${history.instanceId}`, { headers: { "Last-Event-ID": String(secondId) } });
   const nextReader = response.body.getReader(); const replay = await readUntil(nextReader, '"message":"third"');
-  assert.match(replay, /id: 3/); assert.doesNotMatch(replay, /"message":"second"/);
+  assert.ok(replay.includes(`id: ${thirdId}`)); assert.doesNotMatch(replay, /"message":"second"/);
   const closed = new Promise((resolve) => server.close(resolve));
   for (;;) { const rest = await nextReader.read(); if (rest.done) break; }
   await closed;
@@ -79,10 +81,11 @@ test("slow SSE readers are disconnected and unsubscribed", async (t) => {
 test("a large replay drains to a fast client and reports evicted or restarted history", async (t) => {
   const logs = new LogService(1000, () => {}); const { origin } = await serverFixture(t, logs);
   for (let i = 0; i < 1050; i++) logs.write("DEBUG", "test", "x".repeat(500));
+  const { oldest, latest } = logs.read();
   let response = await fetch(`${origin}/api/v1/logs/stream?after=1`);
   const reader = response.body.getReader();
-  const text = await readUntil(reader, "id: 1050\n");
-  assert.match(text, /event: gap/); assert.match(text, /id: 51\n/); assert.match(text, /id: 1050\n/);
+  const text = await readUntil(reader, `id: ${latest}\n`);
+  assert.match(text, /event: gap/); assert.ok(text.includes(`id: ${oldest}\n`)); assert.ok(text.includes(`id: ${latest}\n`));
   await reader.cancel();
   response = await fetch(`${origin}/api/v1/logs/stream?after=10&instance=old-process`);
   assert.match(await response.text(), /event: reset/);

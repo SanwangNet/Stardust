@@ -1,6 +1,7 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
 import { classifyModelName, isCompactModel } from "./model-classification.js";
 import { initializeConversationUI } from "./conversation-ui.js";
+import { initializeGlobalContextUI } from "./global-context-ui.js";
 
 interface HealthResponse {
   status: "ok";
@@ -43,16 +44,19 @@ const menu: MenuCategory[] = [
         { label: "连接测试", path: "/model/service/test" },
       ] },
       { label: "模型对话", path: "/model/chat" },
+      { label: "全局上下文", path: "/model/context" },
       { label: "日志", path: "/model/logs" },
     ],
   },
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
-  { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }] },
+  { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }, { label: "星尘提示词", path: "/settings/agent" }] },
 ];
 const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
   "/model/service": "配置、测试和使用你的模型服务。",
   "/model/chat": "与当前模型对话，记录你的想法。",
+  "/settings/agent": "设置星尘在各渠道共享的主体提示词。",
+  "/model/context": "查看从交流中综合的经历和状态。",
   "/model/service/config": "连接模型，调整请求方式与访问凭证。",
   "/model/service/test": "确认当前模型配置可以正常响应。",
   "/model/logs": "观察服务、模型与扩展的实时运行记录。",
@@ -169,7 +173,7 @@ function animateRootPage(snapshot: HTMLElement, direction: number): void {
 function spaceLevels(path: string): string[] {
   const modelServicePath = "/model/service";
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
-  if (path === modelServicePath || path === "/model/chat" || path === "/model/logs") return [path];
+  if (path === modelServicePath || path === "/model/chat" || path === "/model/context" || path === "/model/logs") return [path];
   if (path === "/model/service/config" || path === "/model/service/test") {
     return [modelServicePath, path];
   }
@@ -1353,11 +1357,12 @@ modelTest.addEventListener("click", () => {
     .finally(() => setModelBusy(false));
 });
 initializeConversationUI();
+initializeGlobalContextUI();
 
 type ExtensionFieldView = { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string };
 type ExtensionToolView = { name: string; description: string; parameters: Record<string, unknown>; enabled: boolean; available: boolean };
 type ExtensionPageView = { pageId: string; title: string; description: string; pageKind: string };
-type ExtensionView = { id: string; name: string; version: string; description: string; type: string; installed: boolean; enabled: boolean; state: string; error?: string; fields: ExtensionFieldView[]; managementPages: ExtensionPageView[]; skills: { name: string; description: string }[]; tools: ExtensionToolView[] };
+type ExtensionView = { id: string; name: string; version: string; description: string; type: string; builtin?: boolean; installed: boolean; enabled: boolean; state: string; error?: string; fields: ExtensionFieldView[]; managementPages: ExtensionPageView[]; skills: { name: string; description: string }[]; tools: ExtensionToolView[] };
 const extensionList = getElement<HTMLElement>("extension-list");
 const extensionFeedback = getElement<HTMLElement>("extension-feedback");
 type ExtensionUI = { sections: HTMLElement[]; statuses: HTMLElement[]; errors: HTMLElement[]; fields: Map<string, { input: HTMLInputElement; clear?: HTMLInputElement; note?: HTMLElement }>; enable?: HTMLButtonElement; disable?: HTMLButtonElement; tools: Map<string, { status: HTMLElement; toggle: HTMLButtonElement }> };
@@ -1665,7 +1670,8 @@ function extensionIcon(kind: string): SVGSVGElement {
   };
   const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("aria-hidden", "true"); icon.classList.add("extension-icon");
-  for (const d of paths[kind] ?? paths.extension!) {
+  const iconKind = kind === "web-tools" ? "tools" : kind === "web-prompt" ? "config" : kind;
+  for (const d of paths[iconKind] ?? paths.extension!) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", d); icon.append(path);
   }
   return icon;
@@ -1699,7 +1705,8 @@ function configPage(item: ExtensionView, ui: ExtensionUI): HTMLElement {
   ui.enable = enable; ui.disable = disable;
   const deleteLabel = document.createElement("label"); deleteLabel.className = "model-check";
   const deleteConfig = document.createElement("input"); deleteConfig.type = "checkbox"; deleteLabel.append(deleteConfig, document.createTextNode("卸载时删除配置"));
-  actions.append(save, enable, disable, uninstall); form.append(actions, deleteLabel);
+  if (item.builtin) { actions.append(enable, disable); const note = document.createElement("p"); note.textContent = "内置星核，不可卸载。"; form.append(actions, note); }
+  else { actions.append(save, enable, disable, uninstall); form.append(actions, deleteLabel); }
   form.addEventListener("submit", (event) => {
     event.preventDefault(); const values: Record<string, string | null> = {};
     for (const field of item.fields) { const entry = ui.fields.get(field.key)!; if (entry.clear?.checked) values[field.key] = null; else if (!field.sensitive || entry.input.value) values[field.key] = entry.input.value; }
@@ -1730,8 +1737,51 @@ function toolsPage(item: ExtensionView, ui: ExtensionUI): HTMLElement {
 }
 function skillsPage(item: ExtensionView): HTMLElement {
   const container = document.createElement("div");
-  if (!item.skills.length) { const empty = document.createElement("p"); empty.textContent = "此扩展尚未提供 Skill"; container.append(empty); }
+  if (!item.skills.length) { const empty = document.createElement("p"); empty.textContent = item.id === "web-chat" ? "暂无可用 Skill。" : "此扩展尚未提供 Skill"; container.append(empty); }
   else for (const skill of item.skills) { const row = document.createElement("p"); row.textContent = `${skill.name} · ${skill.description}`; container.append(row); }
+  return container;
+}
+type AgentSettings = { agentPrompt: string; webPrompt: string; tools: { name: string; description: string; enabled: boolean }[] };
+async function agentSettings(body?: unknown): Promise<AgentSettings> {
+  const response = await fetch("/api/v1/agent/settings", body === undefined ? { cache: "no-store" } : { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) throw new Error("设置未保存，请检查连接或输入。");
+  return await response.json() as AgentSettings;
+}
+function promptSettings(key: "agentPrompt" | "webPrompt"): HTMLElement {
+  const form = document.createElement("form"); form.className = "extension-form";
+  const label = document.createElement("label"); label.textContent = key === "agentPrompt" ? "星尘主体提示词" : "Web 渠道提示词";
+  const input = document.createElement("textarea"); input.rows = 8; input.maxLength = 4000; label.append(input);
+  const feedback = document.createElement("p"); feedback.setAttribute("role", "status");
+  const save = extensionButton("保存提示词"); save.type = "submit";
+  const reset = extensionButton("恢复默认");
+  const load = async () => { try { input.value = (await agentSettings())[key]; } catch { feedback.textContent = "无法读取提示词。"; } };
+  form.addEventListener("submit", (event) => { event.preventDefault(); void agentSettings({ [key]: input.value }).then(() => { feedback.textContent = "已保存。"; }).catch(() => { feedback.textContent = "保存失败。"; }); });
+  reset.addEventListener("click", () => { void agentSettings({ [key]: null }).then(async () => { await load(); feedback.textContent = "已恢复默认。"; }).catch(() => { feedback.textContent = "恢复失败。"; }); });
+  form.append(label, save, reset, feedback); queueMicrotask(() => { void load(); });
+  window.addEventListener("stardust-conversations-ready", () => { void load(); });
+  return form;
+}
+getElement<HTMLElement>("agent-prompt-settings").append(promptSettings("agentPrompt"));
+function webToolsPage(): HTMLElement {
+  const container = document.createElement("div");
+  const list = document.createElement("div"); const feedback = document.createElement("p"); feedback.setAttribute("role", "status");
+  const load = async () => {
+    try {
+      const settings = await agentSettings(); list.replaceChildren();
+      for (const tool of settings.tools) {
+        const row = document.createElement("article"); row.className = "extension-item";
+        const label = document.createElement("strong"); label.textContent = tool.name === "search_history" ? "跨会话记忆 Tool" : tool.name;
+        const description = document.createElement("p"); description.textContent = tool.description;
+        const status = document.createElement("p"); status.textContent = tool.enabled ? "已启用" : "已停用";
+        const toggle = extensionButton(tool.enabled ? "停用" : "启用");
+        toggle.setAttribute("aria-label", `${tool.enabled ? "停用" : "启用"} ${label.textContent}`);
+        toggle.addEventListener("click", () => { toggle.disabled = true; void agentSettings({ tool: { name: tool.name, enabled: !tool.enabled } }).then(load).catch(() => { feedback.textContent = "保存失败。"; toggle.disabled = false; }); });
+        row.append(label, description, status, toggle); list.append(row);
+      }
+    } catch { feedback.textContent = "无法读取 Tool 状态。"; }
+  };
+  container.append(list, feedback); queueMicrotask(() => { void load(); });
+  window.addEventListener("stardust-channel-tools-changed", () => { void load(); });
   return container;
 }
 const extensionPageFactories: Record<string, (item: ExtensionView, ui: ExtensionUI) => HTMLElement> = {
@@ -1739,6 +1789,8 @@ const extensionPageFactories: Record<string, (item: ExtensionView, ui: Extension
   "qq-capabilities": (item) => buildQQCapabilityTests(item.id),
   tools: toolsPage,
   skills: (item) => skillsPage(item),
+  "web-prompt": () => promptSettings("webPrompt"),
+  "web-tools": () => webToolsPage(),
 };
 function registerExtensionPages(item: ExtensionView): void {
   const ui: ExtensionUI = { sections: [], statuses: [], errors: [], fields: new Map(), tools: new Map() };
@@ -1873,6 +1925,7 @@ async function refreshExtensions(): Promise<void> {
       for (const field of item.fields) { const entry = ui.fields.get(field.key); if (entry?.note) entry.note.textContent = field.configured ? `${field.label} 已配置。` : `${field.label} 未配置。`; }
       for (const tool of item.tools) { const entry = ui.tools.get(tool.name); if (!entry) continue; entry.status.textContent = `${tool.enabled ? "已启用" : "已停用"} · ${tool.available ? "可用" : "不可用"}`; entry.toggle.textContent = tool.enabled ? "停用" : "启用"; entry.toggle.dataset.enabled = String(tool.enabled); }
     }
+    window.dispatchEvent(new Event("stardust-channel-tools-changed"));
   } catch (error) {
     getElement<HTMLElement>("overview-extensions").textContent = "扩展状态读取失败";
     extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。";

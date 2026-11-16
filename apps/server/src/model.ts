@@ -134,10 +134,33 @@ export class ModelService {
       throw error;
     }
   }
-  async chatContext(messages: ConversationContextMessage[], cancellation?: AbortSignal): Promise<string> {
+  async chatContext(messages: ConversationContextMessage[], cancellation?: AbortSignal, context?: { eventId?: string }): Promise<string> {
     if (!Array.isArray(messages) || !messages.length || messages.some((entry) => !entry || !["system", "user", "assistant"].includes(entry.role) || typeof entry.content !== "string" || !entry.content.trim()) || messages.at(-1)?.role !== "user") throw new ModelError("INVALID_INPUT", 400);
     const last = messages.at(-1)!;
-    return this.performChat(last.content, cancellation, undefined, messages);
+    const requestId = randomUUID(), started = Date.now();
+    this.logs.write("DEBUG", "model", "模型请求开始。", { requestId, eventId: context?.eventId });
+    try {
+      const reply = await this.performChat(last.content, cancellation, undefined, messages);
+      this.logs.write("INFO", "model", "模型请求完成。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started });
+      return reply;
+    } catch (error) {
+      const diagnostic = error instanceof ModelError ? error.diagnostic : undefined;
+      let secrets = messages.map((entry) => entry.content);
+      try { const keys = this.secrets.getKey(); secrets = [...secrets, keys.key, keys.fileKey]; } catch {}
+      this.logs.write("ERROR", "model", "模型请求失败。", { requestId, eventId: context?.eventId, durationMs: Date.now() - started, status: diagnostic?.status, code: diagnostic?.code, category: diagnostic?.category, message: diagnostic?.message }, secrets);
+      throw error;
+    }
+  }
+  async synthesizeGlobalContext(system: string, input: string, cancellation?: AbortSignal): Promise<string> {
+    const started = Date.now();
+    try {
+      const result = await this.performChat(input, cancellation, undefined, [{ role: "system", content: system }, { role: "user", content: input }], 2000);
+      this.logs.write("INFO", "global-context", "全局上下文综合完成。", { durationMs: Date.now() - started });
+      return result;
+    } catch (error) {
+      this.logs.write("WARN", "global-context", "全局上下文综合失败。", { durationMs: Date.now() - started, code: error instanceof ModelError ? error.code : "SYNTHESIS_FAILED" });
+      throw error;
+    }
   }
   async chatWithTools(messages: ModelTurnMessage[], tools: { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }[], cancellation?: AbortSignal): Promise<{ content: string; toolCalls: ToolCall[] }> {
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
@@ -189,7 +212,7 @@ export class ModelService {
       throw normalized;
     }
   }
-  private async performChat(message: unknown, cancellation?: AbortSignal, onContent?: (chunk: string) => void, messages?: ConversationContextMessage[]): Promise<string> {
+  private async performChat(message: unknown, cancellation?: AbortSignal, onContent?: (chunk: string) => void, messages?: ConversationContextMessage[], maxTokens?: number): Promise<string> {
     if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > maxMessage) throw new ModelError("INVALID_INPUT", 400);
     const privateText = messages?.map((entry) => entry.content).join("\n") ?? message;
     const { baseUrl, modelId, timeoutMs, stream } = this.store.loadConfig().model;
@@ -201,7 +224,7 @@ export class ModelService {
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
     try {
-      const response = await this.request(endpoint, { method: "POST", headers, body: JSON.stringify({ model: modelId, messages: messages ?? [{ role: "user", content: message }], stream }), redirect: "error", signal });
+      const response = await this.request(endpoint, { method: "POST", headers, body: JSON.stringify({ model: modelId, messages: messages ?? [{ role: "user", content: message }], stream, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }) }), redirect: "error", signal });
       if (!response.ok) {
         const diagnostic = await upstreamDiagnostic(response, endpoint, [key, fileKey], privateText);
         throw new ModelError(diagnostic.category, 502, diagnostic);

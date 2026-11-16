@@ -14,7 +14,7 @@ catch { logger.write("ERROR", "server", "配置读取失败，服务无法启动
 if (listenConfig) {
   const { host, port } = listenConfig;
   const extensions = new ExtensionManager(undefined, undefined, bundledExtensions);
-  const server = createStardustServer({ extensionManager: extensions });
+  const server = createStardustServer({ extensionManager: extensions, startConversations: true });
 
   server.on("error", () => {
     logger.write("ERROR", "server", "服务启动或运行失败，请检查监听配置。");

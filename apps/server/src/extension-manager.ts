@@ -6,6 +6,7 @@ import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import type { CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
+import { WEB_STARCORE_ID } from "./agent-core.js";
 
 type InstalledEntry = { enabled: boolean; installed?: boolean; tools?: Record<string, boolean>; [key: string]: unknown };
 type Installed = Record<string, InstalledEntry>;
@@ -21,6 +22,7 @@ export class ExtensionManager {
   private readonly toolControllers = new Map<string, AbortController>();
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
+  private channelChat?: (message: ChannelMessage, signal: AbortSignal) => Promise<string>;
   constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
     this.packages = new Map(packages.map((item) => [item.manifest.id, item]));
@@ -72,8 +74,12 @@ export class ExtensionManager {
     }
   }
   private readInstalled(): Installed {
+    const defaults = (state: Installed): Installed => {
+      for (const item of this.packages.values()) if (item.manifest.builtin || item.manifest.id === WEB_STARCORE_ID) state[item.manifest.id] = { ...state[item.manifest.id], installed: true, enabled: state[item.manifest.id]?.enabled ?? true };
+      return state;
+    };
     const data = this.directory(this.root, "data", false);
-    if (!data) return Object.create(null) as Installed;
+    if (!data) return defaults(Object.create(null) as Installed);
     const path = join(data, "extensions.json");
     try {
       this.safeFile(path);
@@ -99,8 +105,8 @@ export class ExtensionManager {
         delete result[legacyId]; migrated = true;
       }
       if (migrated) this.writeInstalled(result);
-      return result;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.create(null) as Installed; throw new ExtensionError("STATE_UNAVAILABLE", 500); }
+      return defaults(result);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaults(Object.create(null) as Installed); throw new ExtensionError("STATE_UNAVAILABLE", 500); }
   }
   private writeInstalled(state: Installed): void {
     try { this.writeAtomic(this.directory(this.root, "data", true)!, "extensions.json", `${JSON.stringify(state, null, 2)}\n`); }
@@ -134,7 +140,7 @@ export class ExtensionManager {
       const runtime = this.runtimes.get(manifest.id);
       const item = this.packages.get(manifest.id)!;
       const tools = this.packageTools(item).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, enabled: entry?.tools?.[tool.name] === true, available: Boolean(entry?.tools?.[tool.name] && entry?.enabled && runtime?.state === "connected") }));
-      return { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description, type: manifest.type, installed: Boolean(entry), enabled: entry?.enabled ?? false, state: runtime?.state ?? "disconnected", ...(runtime?.error ? { error: runtime.error } : {}), fields, managementPages: manifest.managementPages ?? [], skills: manifest.skills ?? [], tools };
+      return { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description, type: manifest.type, builtin: manifest.builtin === true || manifest.id === WEB_STARCORE_ID, installed: Boolean(entry), enabled: entry?.enabled ?? false, state: runtime?.state ?? "disconnected", ...(runtime?.error ? { error: runtime.error } : {}), fields, managementPages: manifest.managementPages ?? [], skills: manifest.skills ?? [], tools };
     });
   }
   capabilityTargets(id: string) {
@@ -146,6 +152,8 @@ export class ExtensionManager {
     const state = this.readInstalled();
     return [...this.packages.values()].flatMap((item) => this.runtimes.get(item.manifest.id)?.state === "connected" ? this.packageTools(item).filter((tool) => this.toolEnabled(item, tool, state)) : []);
   }
+  channelEnabled(id: string): boolean { const item = this.item(id); const entry = this.readInstalled()[id]; return item.manifest.type === "channel" && isInstalled(entry) && Boolean(entry?.enabled); }
+  setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal) => Promise<string>): void { this.channelChat = handler; }
   toolSignal(name: string): AbortSignal | undefined {
     const item = this.ownerOfTool(name);
     const tool = item && this.packageTools(item).find((candidate) => candidate.name === name);
@@ -242,7 +250,8 @@ export class ExtensionManager {
   }); }
   disable(id: string): Promise<void> { return this.operation(id, "停用", async () => { this.item(id); const state = this.readInstalled(); if (!isInstalled(state[id])) throw new ExtensionError("NOT_INSTALLED", 404); state[id]!.enabled = false; this.writeInstalled(state); await this.stop(id); }); }
   uninstall(id: string, deleteConfig: boolean): Promise<void> { return this.operation(id, "卸载", async () => {
-    this.item(id); const state = this.readInstalled(); if (!isInstalled(state[id])) throw new ExtensionError("NOT_INSTALLED", 404);
+    const item = this.item(id); if (item.manifest.builtin || id === WEB_STARCORE_ID) throw new ExtensionError("BUILTIN_UNINSTALL_FORBIDDEN", 403);
+    const state = this.readInstalled(); if (!isInstalled(state[id])) throw new ExtensionError("NOT_INSTALLED", 404);
     if (deleteConfig) {
       try { const env = this.directory(this.root, "env", false); const dir = env && this.directory(env, id, false); if (dir) { const path = join(dir, ".env"); this.safeFile(path); try { fs.unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } try { fs.rmdirSync(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error; } } }
       catch { throw new ExtensionError("DELETE_CONFIG_FAILED", 500); }
@@ -269,7 +278,7 @@ export class ExtensionManager {
         message: async (message: ChannelMessage, signal: AbortSignal) => {
           if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
           runtime.error = undefined;
-          try { return await this.model.chat(message.content, AbortSignal.any([controller.signal, signal]), { eventId: message.eventId }); }
+          try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat(message, cancellation) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
           catch (error) {
             if (!controller.signal.aborted && !signal.aborted) {
               const categories: Record<string, string> = { NOT_CONFIGURED: "模型未配置。", AUTH_FAILED: "模型认证失败。", MODEL_NOT_FOUND: "模型不存在。", RATE_LIMITED: "模型请求受到限流。", TIMEOUT: "模型请求超时。" };

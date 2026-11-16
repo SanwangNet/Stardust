@@ -14,7 +14,7 @@ export interface ChannelMessage {
 export type ExtensionStatus = "disconnected" | "connecting" | "connected" | "error";
 export interface ExtensionField { key: string; env: string; label: string; sensitive: boolean; required: boolean }
 export interface ManagementPage { pageId: string; title: string; description: string; pageKind: string }
-export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; managementPages?: ManagementPage[]; skills?: { name: string; description: string }[] }
+export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: { name: string; description: string }[] }
 export interface ChannelHost {
   message(message: ChannelMessage, signal: AbortSignal): Promise<string>;
   status(state: ExtensionStatus, error?: string): void;

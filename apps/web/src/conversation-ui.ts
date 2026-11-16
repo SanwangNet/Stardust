@@ -1,6 +1,14 @@
 type Conversation = { id: string; title: string };
 type Message = { id: string; requestId: string; sequence: number; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "failed" | "unknown" };
 type ToolRun = { status: string; calls: { id: string; name: string; status: string; input?: Record<string, unknown>; approval?: { operation: string; targetDescription: string; channel?: string; content?: string; risk: string }; result?: unknown }[] };
+type ModelActivity = { requestId: string; kind: "tool_call" | "thinking" | "generating"; displayText?: string; state: "started" | "completed" | "failed" };
+
+export function activityDisplayText(activity: ModelActivity): string {
+  const text = activity.displayText;
+  // Only accept short, plain server-provided activity labels; never render payloads or markup.
+  if (typeof text === "string" && text.length <= 60 && /^[\p{L}\s…。！？，、·]+$/u.test(text) && !/(密码|口令|密钥|令牌|推理过程|关键词|参数|数据库|token|secret|password|sql)/i.test(text) && text.trim()) return text;
+  return activity.kind === "tool_call" && activity.state === "started" ? "正在调用 Tool" : "正在生成回复…";
+}
 
 export function initializeConversationUI(): void {
   const element = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -23,6 +31,7 @@ export function initializeConversationUI(): void {
   const sending = new Set<string>();
   const pending = new Map<string, { requestId: string; content: string; uncertain: boolean }>();
   let renderRevision = 0;
+  const activityPolls = new Set<string>();
 
   async function request<T>(url: string, method = "GET", body?: unknown): Promise<T> {
     const response = await fetch(url, { method, cache: "no-store", ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
@@ -77,6 +86,21 @@ export function initializeConversationUI(): void {
     row.classList.add("conversation-reply-placeholder");
     row.setAttribute("role", "status");
   }
+  function watchActivity(id: string, requestId: string, token: number): void {
+    const key = `${id}/${requestId}/${token}`;
+    if (activityPolls.has(key)) return;
+    activityPolls.add(key);
+    const poll = async (): Promise<void> => {
+      const placeholder = selected === id && generation === token ? Array.from(messages.querySelectorAll<HTMLElement>(".conversation-reply-placeholder")).find((row) => row.dataset.requestId === requestId) : undefined;
+      if (!placeholder) { activityPolls.delete(key); return; }
+      try {
+        const data = await request<{ activity: ModelActivity | null }>(`${base(id)}/messages/${encodeURIComponent(requestId)}/activity`);
+        if (data.activity?.requestId === requestId && selected === id && generation === token && placeholder.isConnected) placeholder.querySelector("p")!.textContent = activityDisplayText(data.activity);
+      } catch { /* Status is optional; the actual request remains authoritative. */ }
+      window.setTimeout(() => { void poll(); }, 100);
+    };
+    void poll();
+  }
   async function renderToolRun(id: string, requestId: string, token: number, revision: number): Promise<void> {
     const data = await request<{ run: ToolRun | null }>(`${base(id)}/messages/${encodeURIComponent(requestId)}/tool`);
     if (!data.run || selected !== id || token !== generation || revision !== renderRevision) return;
@@ -84,14 +108,11 @@ export function initializeConversationUI(): void {
     if (!placeholder) return;
     for (const call of data.run.calls) {
       const card = document.createElement("div"); card.className = "tool-call";
-      const heading = document.createElement("strong"); heading.textContent = `Tool：${call.name}`; card.append(heading);
+      const heading = document.createElement("strong"); heading.textContent = "Tool 操作"; card.append(heading);
       if (call.approval) {
         const details = document.createElement("p");
         details.textContent = `${call.approval.operation} · ${call.approval.targetDescription}${call.approval.content ? `\n${call.approval.content}` : ""}${call.approval.risk ? `\n${call.approval.risk}` : ""}`;
         card.append(details);
-      }
-      if (call.input) {
-        const parameters = document.createElement("pre"); parameters.textContent = JSON.stringify(call.input, null, 2); card.append(parameters);
       }
       if (call.status === "waiting") {
         const controls = document.createElement("div"); controls.className = "extension-actions";
@@ -145,7 +166,10 @@ export function initializeConversationUI(): void {
     }
     messages.scrollTop = messages.scrollHeight;
     for (const message of history) {
-      if (message.role === "user" && message.status === "pending") void renderToolRun(id, message.requestId, token, revision).catch(() => {});
+      if (message.role === "user" && message.status === "pending") {
+        void renderToolRun(id, message.requestId, token, revision).catch(() => {});
+        watchActivity(id, message.requestId, token);
+      }
     }
     if (history.some((message) => message.status === "pending") || (local && !local.uncertain)) {
       window.setTimeout(() => {
@@ -183,6 +207,7 @@ export function initializeConversationUI(): void {
         existing?.querySelector(".conversation-message-state")?.remove();
       } else appendMessage("user", content, requestId);
       appendPendingReply(requestId);
+      watchActivity(id, requestId, generation);
       messages.scrollTop = messages.scrollHeight;
     }
     let failed = false;
@@ -220,7 +245,7 @@ export function initializeConversationUI(): void {
   }
   create.addEventListener("click", () => { void (async () => { try { const data = await request<{ conversation: Conversation }>("/api/v1/conversations", "POST", {}); await refreshList(); await select(data.conversation.id); input.focus(); } catch { listStatus.textContent = "无法新建会话。"; } })(); });
   rename.addEventListener("click", () => { const id = selected; const value = window.prompt("会话标题", title.textContent ?? ""); if (value === null) return; void (async () => { try { await request(base(id), "PATCH", { title: value }); await refreshList(); if (selected === id) title.textContent = entries.find((entry) => entry.id === id)?.title ?? value; } catch { status.textContent = "重命名失败，请检查标题。"; } })(); });
-  remove.addEventListener("click", () => { const id = selected; if (!window.confirm("删除该会话及其原始消息？此操作无法撤销。")) return; void (async () => { try { await request(base(id), "DELETE"); if (selected === id) { selected = ""; ++generation; } await refreshList(); if (!selected) { if (entries[0]) await select(entries[0].id); else { messages.replaceChildren(); title.textContent = "选择或新建会话"; updateControls(); } } } catch { status.textContent = "删除失败。"; } })(); });
+  remove.addEventListener("click", () => { const id = selected; if (!window.confirm("删除该会话及其原始消息？已生成的全局上下文会保留，未完成的综合任务会取消。此操作无法撤销。")) return; void (async () => { try { await request(base(id), "DELETE"); if (selected === id) { selected = ""; ++generation; } await refreshList(); if (!selected) { if (entries[0]) await select(entries[0].id); else { messages.replaceChildren(); title.textContent = "选择或新建会话"; updateControls(); } } } catch { status.textContent = "删除失败。"; } })(); });
   input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) { event.preventDefault(); if (!event.repeat && !send.disabled && input.value.trim()) form.requestSubmit(); } });
   form.addEventListener("submit", (event) => { event.preventDefault(); if (!selected || send.disabled || !input.value.trim()) return; const content = input.value; input.value = ""; void submit(selected, content, crypto.randomUUID()); });
   window.addEventListener("stardust-conversations-ready", () => { void load(); });

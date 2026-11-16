@@ -105,10 +105,11 @@ test("model receives ordered context with existing stream configuration", async 
 
 test("conversation API is available locally and protects against cross-origin writes", async () => {
   const token = "a-secure-test-token-at-least-32-characters";
-  const store = new ConversationService({ chatContext: async () => "answer" }, ":memory:");
+  const model = { chatContext: async () => "answer" };
+  const store = new ConversationService(model, ":memory:");
   const setup = { getInitializationState: () => ({ initialized: true }) };
   const extensions = { restore: async () => {}, shutdown: async () => {}, availableTools: () => [] };
-  const server = createStardustServer({ setupService: setup, extensionManager: extensions, adminAuth: new AdminAuth(token), conversationService: store });
+  const server = createStardustServer({ setupService: setup, extensionManager: extensions, modelService: model, adminAuth: new AdminAuth(token), conversationService: store });
   try {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
