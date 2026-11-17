@@ -1,4 +1,4 @@
-import { flowGraphs, flowViews, type FlowGraph, type FlowKind, type FlowNode, type FlowPort, type FlowViewId } from "./flow-data.js";
+import { flowGraphs, flowViews, visibleFlowGraph, type FlowGraph, type FlowKind, type FlowNode, type FlowPort, type FlowViewId } from "./flow-data.js";
 
 const nodeWidth = 234, nodeHeight = 126;
 const minScale = .12, maxScale = 2;
@@ -20,7 +20,7 @@ export function initializeFlowBoard(): void {
   const liveStatus = new Map<string, string>();
   let registeredChannels: { id: string; name: string; type: string; installed: boolean; enabled: boolean }[] = [];
   let activeView: FlowViewId = "web", selected: string | undefined;
-  let graphId = "input";
+  let graphId = "overview";
   let graph: FlowGraph = flowGraphs[0]!;
   let positions = new Map<string, { x: number; y: number }>();
   let scale = 1, panX = 0, panY = 0, initialized = false;
@@ -88,7 +88,8 @@ export function initializeFlowBoard(): void {
   function fit(): void {
     const width = canvas.clientWidth, height = canvas.clientHeight;
     if (!width || !height) return;
-    const all = [...positions.values()];
+    const all = visibleFlowGraph(graph, activeView).nodes.map((node) => positions.get(node.id)!);
+    if (!all.length) return;
     const left = Math.min(...all.map((item) => item.x)), top = Math.min(...all.map((item) => item.y));
     const right = Math.max(...all.map((item) => item.x + nodeWidth)), bottom = Math.max(...all.map((item) => item.y + nodeHeight));
     scale = clamp(Math.min((width - 60) / (right - left), (height - 60) / (bottom - top)), minScale, 1);
@@ -118,7 +119,7 @@ export function initializeFlowBoard(): void {
     }
     const heading = document.createElement("h3"); heading.textContent = "连接关系";
     const list = document.createElement("ul"); list.className = "flow-relations";
-    for (const edge of graph.edges.filter((item) => (item.source === node.id || item.target === node.id) && item.views.includes(activeView))) {
+    for (const edge of visibleFlowGraph(graph, activeView).edges.filter((item) => item.source === node.id || item.target === node.id)) {
       const other = graph.nodes.find((item) => item.id === (edge.source === node.id ? edge.target : edge.source));
       const row = document.createElement("li");
       row.textContent = `${edge.source === node.id ? "→" : "←"} ${other?.title ?? ""} · ${edge.relation}${edge.style === "planned" ? "（规划）" : ""}`;
@@ -144,15 +145,23 @@ export function initializeFlowBoard(): void {
   }
   function setView(view: FlowViewId): void {
     activeView = view;
-    if (graph.availableViews && !graph.availableViews.includes(view)) navigateGraph("input");
+    if (graph.availableViews && !graph.availableViews.includes(view)) navigateGraph("overview");
     renderBreadcrumb();
     picker.querySelectorAll<HTMLButtonElement>("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === view)));
+    const visible = visibleFlowGraph(graph, view);
+    const nodeIds = new Set(visible.nodes.map((node) => node.id));
+    const edgeIds = new Set(visible.edges.map((edge) => edge.id));
     for (const node of graph.nodes) {
-      const element = nodeElements.get(node.id); element?.classList.toggle("is-muted", !node.views.includes(view));
+      const element = nodeElements.get(node.id);
+      if (element) element.hidden = !nodeIds.has(node.id);
       const state = element?.querySelector(".flow-node-state");
       if (state) state.textContent = (node.registryId && liveStatus.get(node.registryId)) || node.stateByView?.[view] || node.state;
     }
-    for (const edge of graph.edges) edgeElements.get(edge.id)?.classList.toggle("is-muted", !edge.views.includes(view));
+    for (const edge of graph.edges) {
+      const element = edgeElements.get(edge.id);
+      if (element) element.style.display = edgeIds.has(edge.id) ? "" : "none";
+    }
+    if (selected && !nodeIds.has(selected)) select(undefined);
     note.textContent = flowViews.find((entry) => entry.id === view)?.note ?? "";
     refreshInspector();
   }
