@@ -4,6 +4,7 @@ export type FlowPort = "left" | "right" | "top" | "bottom";
 export type FlowNode = {
   id: string; kind: FlowKind; title: string; subtitle: string; description: string; owner: string; state: string;
   position: { x: number; y: number }; views: FlowViewId[]; childGraphId?: string; planned?: boolean; registryId?: string;
+  positionByView?: Partial<Record<FlowViewId, { x: number; y: number }>>;
   descriptionByView?: Partial<Record<FlowViewId, string>>; stateByView?: Partial<Record<FlowViewId, string>>;
 };
 export type FlowEdge = { id: string; source: string; target: string; relation: string; views: FlowViewId[]; style?: "dependency" | "planned"; sourcePort?: FlowPort; targetPort?: FlowPort };
@@ -43,8 +44,8 @@ export const flowGraphs: FlowGraph[] = [
     {id:"overview-tool-model",source:"tool",target:"model",relation:"结果返回模型",views:web,style:"dependency",sourcePort:"right",targetPort:"right"},
   ]},
   { id:"input", parentId:"overview", title:"输入", summary:"消息由各渠道接收并交给共同的 Agent 入口；各渠道的访问范围保持独立。", nodes:[
-    {id:"web-input",kind:"input",title:"Web 对话",subtitle:"WEB CHAT",description:"Web 对话消息提交给 Core 的会话处理。",owner:"Web 对话星核 · web-chat",state:"渠道注册信息",registryId:"web-chat",position:{x:40,y:100},views:web},
-    {id:"qq-input",kind:"input",title:"QQ 机器人",subtitle:"QQ BOT",description:"QQ 接收符合条件的消息，转交共同主 Agent；当前为单轮回复。",owner:"QQ 星核 · qq-bot",state:"渠道注册信息",registryId:"qq-bot",position:{x:40,y:330},views:qq},
+    {id:"web-input",kind:"input",title:"Web 对话",subtitle:"WEB CHAT",description:"Web 对话消息提交给 Core 的会话处理。",owner:"Web 对话星核 · web-chat",state:"渠道注册信息",registryId:"web-chat",position:{x:40,y:220},views:web},
+    {id:"qq-input",kind:"input",title:"QQ 机器人",subtitle:"QQ BOT",description:"QQ 接收符合条件的消息，转交共同主 Agent；当前为单轮回复。",owner:"QQ 星核 · qq-bot",state:"渠道注册信息",registryId:"qq-bot",position:{x:40,y:220},views:qq},
     {id:"channel-entry",kind:"agent",title:"共同 Agent 入口",subtitle:"STARDUST",description:"不同渠道共用同一主体身份，渠道来源和访问范围独立。",owner:"Stardust Core",state:"共同主体",position:{x:420,y:220},views:both},
   ],edges:[
     {id:"web-to-agent",source:"web-input",target:"channel-entry",relation:"Web 消息",views:web},
@@ -55,7 +56,7 @@ export const flowGraphs: FlowGraph[] = [
     {id:"recent",kind:"context",title:"近期上下文",subtitle:"RECENT CONTEXT",description:"Web 默认选取最近 50 条已完成消息，并按完整用户 / 助手轮次裁剪；与当前消息一起受请求字节预算约束。",owner:"Conversation Core",state:"自动选取 · Web",position:{x:350,y:60},views:web},
     {id:"global",kind:"context",title:"全局上下文",subtitle:"GLOBAL CONTEXT",description:"Web 默认按相关性选择摘要作为不可信背景，排除与近期消息重叠的来源；摘要注入受预算约束。",owner:"Stardust Core",state:"相关摘要 · Web",position:{x:350,y:325},views:web},
     {id:"assembler",kind:"context",title:"上下文组装器",subtitle:"ASSEMBLER",description:"Web 组合近期完整轮次和相关摘要，优先保留当前消息；默认整体 36,000 UTF-8 字节、摘要最多 6,000 字节，不是精确 Token。",owner:"Stardust Core",state:"组装与预算 · Web",position:{x:690,y:200},views:web},
-    {id:"context-output",kind:"output",title:"上下文输出",subtitle:"MODEL INPUT",description:"Web 输出受预算控制的模型消息；QQ 输出当前消息及共同提示词，不含历史摘要。",owner:"Stardust Core",state:"提交模型",position:{x:1030,y:200},views:both},
+    {id:"context-output",kind:"output",title:"上下文输出",subtitle:"MODEL INPUT",description:"Web 输出受预算控制的模型消息；QQ 输出当前消息及共同提示词，不含历史摘要。",owner:"Stardust Core",state:"提交模型",position:{x:1030,y:200},positionByView:{qq:{x:420,y:200}},views:both},
     {id:"completed-turn",kind:"context",title:"成功对话",subtitle:"COMPLETED TURN",description:"Web 轮次成功且回复持久化后，登记后台综合任务。",owner:"Conversation Core",state:"Web 完成轮次",position:{x:40,y:610},views:web},
     {id:"synthesis",kind:"context",title:"后台综合",subtitle:"SYNTHESIS WORKER",description:"异步调用模型增量综合已完成的 Web 交流，不阻塞当轮回复；失败不覆盖有效摘要。",owner:"Global Context",state:"后台任务 · Web",position:{x:350,y:610},views:web},
   ],edges:[
@@ -69,10 +70,10 @@ export const flowGraphs: FlowGraph[] = [
     {id:"synthesis-global",source:"synthesis",target:"global",relation:"增量更新摘要",views:web,style:"dependency",sourcePort:"top",targetPort:"bottom"},
   ]},
   { id:"model", parentId:"overview", title:"模型", summary:"共同主体提示词与适用的渠道说明共同组成模型提示词，再由模型服务生成回复。Skill 目前尚未接入。", nodes:[
-    {id:"agent-prompt",kind:"prompt",title:"主 Agent 提示词",subtitle:"AGENT PROMPT",description:"由 Core 管理、可编辑并持久化的共同主体提示词，Web 与 QQ 共用。",owner:"Agent Core",state:"可配置",position:{x:40,y:60},views:both},
+    {id:"agent-prompt",kind:"prompt",title:"主 Agent 提示词",subtitle:"AGENT PROMPT",description:"由 Core 管理、可编辑并持久化的共同主体提示词，Web 与 QQ 共用。",owner:"Agent Core",state:"可配置",position:{x:40,y:60},positionByView:{qq:{x:40,y:190}},views:both},
     {id:"channel-prompt",kind:"prompt",title:"Web 渠道提示词",subtitle:"CHANNEL PROMPT",description:"Web 星核提供的可编辑补充说明，QQ 当前不使用它。",owner:"Web 对话星核",state:"可配置 · Web",position:{x:40,y:270},views:web},
     {id:"skill",kind:"prompt",title:"Skill",subtitle:"SKILL",description:"星核可声明 Skill 描述；目前没有 Skill Runtime 或注入机制，也不能授予工具权限。",owner:"星核 · 未来接入",state:"尚未接入",position:{x:40,y:480},views:planned,planned:true},
-    {id:"prompt",kind:"prompt",title:"Prompt Assembly",subtitle:"PROMPT ASSEMBLY",description:"组合固定安全约束与共同主体提示词；Web 另含渠道补充和相关上下文。",owner:"Agent Core",state:"已实现",position:{x:390,y:190},views:both},
+    {id:"prompt",kind:"prompt",title:"提示词组装",subtitle:"PROMPT ASSEMBLY",description:"组合固定安全约束与共同主体提示词；Web 另含渠道补充和相关上下文。",owner:"Agent Core",state:"已实现",position:{x:390,y:190},views:both},
     {id:"model-service",kind:"model",title:"模型推理",subtitle:"MODEL SERVICE",description:"使用配置的模型调用 Chat Completions。Web 支持可选工具调用；QQ 当前直接生成回复。",owner:"Stardust Core",state:"模型服务配置",position:{x:750,y:190},views:both},
   ],edges:[
     {id:"agent-prompt-assembly",source:"agent-prompt",target:"prompt",relation:"共同主体提示词",views:both,style:"dependency"},
@@ -100,8 +101,8 @@ export const flowGraphs: FlowGraph[] = [
   ]},
   { id:"output", parentId:"overview", title:"输出", summary:"模型生成最终回复后，系统根据消息来源将回复返回对应的 Web 会话或 QQ 目标。", nodes:[
     {id:"final",kind:"model",title:"最终回复",subtitle:"FINAL RESPONSE",description:"模型生成最终回复；按消息来源选择对应渠道。",owner:"Stardust Core",state:"选择来源渠道",position:{x:40,y:210},views:both},
-    {id:"web-output",kind:"output",title:"Web 回复",subtitle:"WEB OUTPUT",description:"最终回复持久化并返回当前 Web 会话。",owner:"Web 对话星核",state:"Web",position:{x:430,y:80},views:web},
-    {id:"qq-output",kind:"output",title:"QQ 回复",subtitle:"QQ OUTPUT",description:"QQ 星核向原消息目标发送被动回复。",owner:"QQ 星核",state:"QQ",position:{x:430,y:340},views:qq},
+    {id:"web-output",kind:"output",title:"Web 回复",subtitle:"WEB OUTPUT",description:"最终回复持久化并返回当前 Web 会话。",owner:"Web 对话星核",state:"Web",position:{x:430,y:210},views:web},
+    {id:"qq-output",kind:"output",title:"QQ 回复",subtitle:"QQ OUTPUT",description:"QQ 星核向原消息目标发送被动回复。",owner:"QQ 星核",state:"QQ",position:{x:430,y:210},views:qq},
   ],edges:[
     {id:"final-web",source:"final",target:"web-output",relation:"来源为 Web",views:web},
     {id:"final-qq",source:"final",target:"qq-output",relation:"来源为 QQ",views:qq},

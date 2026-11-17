@@ -452,19 +452,21 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .space-shell.is-space > .page-stage:has(> .flow-page:not([hidden])) { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 0; }
 .flow-page:not([hidden]) { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 360px; padding: 0; }
 .flow-board { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); }
-.flow-toolbar { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
-.flow-breadcrumb { flex-wrap: wrap; min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 8px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
-.flow-breadcrumb-label { font-family: monospace; letter-spacing: .06em; white-space: nowrap; }
-.flow-breadcrumb button { padding: 4px 6px; border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; white-space: nowrap; }
-.flow-breadcrumb button[aria-pressed="true"] { color: var(--text); background: var(--accent-soft); font-weight: 700; }
+.flow-toolbar { display: flex; align-items: center; gap: 18px; padding: 20px 24px 16px; }
+.flow-heading { flex: 1 1 auto; min-width: 0; }
+.flow-heading h2 { margin: 0; color: var(--text); font-size: 18px; line-height: 1.4; font-weight: 700; }
+.flow-view-note { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.flow-breadcrumb { display: flex; min-width: 0; padding: 0 24px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+.flow-breadcrumb button { flex: 1 0 0; min-width: max-content; min-height: 42px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; white-space: nowrap; }
+.flow-breadcrumb button:hover:not(:disabled) { color: var(--text); background: var(--background); }
+.flow-breadcrumb button[aria-pressed="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
 .flow-breadcrumb button:disabled { color: var(--muted); opacity: .45; cursor: not-allowed; }
-.flow-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.6; }
-.flow-summary strong { color: var(--text); white-space: nowrap; }
-.flow-view-picker { display: flex; flex-wrap: wrap; gap: 3px; }
+.flow-view-picker { display: flex; flex: none; padding: 3px; border: 1px solid var(--line); background: var(--background); }
 .flow-view-picker button, .flow-controls button, .flow-hud button, .flow-inspector-top button { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
-.flow-view-picker button { min-height: 38px; padding: 8px 14px; border-bottom: 2px solid transparent; font-size: 12px; font-weight: 600; }
-.flow-view-picker button[aria-pressed="true"] { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-soft); }
-.flow-controls { display: flex; gap: 8px; }
+.flow-view-picker button { min-height: 34px; padding: 7px 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.flow-view-picker button:hover { color: var(--text); }
+.flow-view-picker button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.flow-controls { display: flex; flex: none; gap: 8px; }
 .flow-controls button { padding: 8px 10px; border: 1px solid var(--line); color: var(--text); font-size: 11px; white-space: nowrap; }
 .flow-controls button:hover, .flow-hud button:hover { color: var(--accent); border-color: var(--accent); }
 .flow-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 180px; }
@@ -518,24 +520,28 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .flow-detail-meta dt { color: var(--muted); font-size: 10px; }
 .flow-detail-meta dd { margin: 5px 0 0; font-size: 12px; overflow-wrap: anywhere; }
 .flow-relations { display: grid; gap: 9px; padding: 0; margin: 0; list-style: none; color: var(--muted); font-size: 11px; line-height: 1.6; }
-.flow-footer { min-height: 48px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+.flow-footer { min-height: 40px; display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
 .flow-legend { display: flex; flex-wrap: wrap; gap: 14px; }
 .flow-legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .flow-legend i { width: 20px; border-top: 2px solid var(--accent); }
 .flow-legend i.is-dashed { border-top: 2px dashed var(--muted); }
 .flow-legend i.is-planned { border-top: 2px dotted var(--muted); }
 @media (max-width: 700px) {
-  .flow-toolbar { align-items: stretch; flex-direction: column; gap: 8px; }
-  .flow-view-picker { justify-content: space-between; }
-  .flow-view-picker button { flex: 1; }
-  .flow-controls { justify-content: flex-end; }
+  .flow-toolbar { flex-wrap: wrap; gap: 10px; padding: 16px 16px 12px; }
+  .flow-heading { flex-basis: 100%; }
+  .flow-view-picker { margin-right: auto; }
+  .flow-breadcrumb { padding: 0 16px; }
+  .flow-breadcrumb button { padding: 0 12px; }
   .flow-content { position: relative; display: block; }
   .flow-canvas-wrap { height: 100%; }
   .flow-hint { display: none; }
   .flow-inspector { top: auto; left: 0; width: auto; border: 1px solid var(--line); }
   .flow-inspector.is-open { display: block; }
   .flow-inspector-body { max-height: 220px; }
-  .flow-footer { align-items: flex-start; flex-direction: column; }
+  .flow-footer { justify-content: flex-start; }
+}
+@media (max-width: 380px) {
+  .flow-controls { width: 100%; justify-content: flex-end; }
 }
 .chat-messages { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; overflow-y: auto; }
 .chat-message { padding: 24px 30px; border-bottom: 1px solid var(--line); font-size: 13px; }

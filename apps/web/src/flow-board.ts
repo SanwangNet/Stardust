@@ -13,7 +13,8 @@ export function initializeFlowBoard(): void {
   const root: HTMLElement = host;
   const abort = new AbortController(), signal = abort.signal;
   type Camera = { scale: number; panX: number; panY: number };
-  type Layout = { positions: Map<string, { x: number; y: number }>; camera?: Camera };
+  type Point = { x: number; y: number };
+  type Layout = { positions: Map<string, Point>; overrides: Map<string, Point>; camera?: Camera };
   const layouts = new Map<string, Layout>();
   const nodeElements = new Map<string, HTMLButtonElement>();
   const edgeElements = new Map<string, SVGPathElement>();
@@ -26,14 +27,13 @@ export function initializeFlowBoard(): void {
   let scale = 1, panX = 0, panY = 0, initialized = false;
 
   root.className = "flow-board";
-  root.innerHTML = `<div class="flow-toolbar"><div class="flow-view-picker" role="group" aria-label="流程视图"></div><div class="flow-controls"><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button></div></div><nav class="flow-breadcrumb" aria-label="功能流程"></nav><div class="flow-summary"><strong>流程总览</strong><span></span></div>
+  root.innerHTML = `<header class="flow-toolbar"><div class="flow-heading"><h2>可视化流程</h2><p class="flow-view-note" aria-live="polite"></p></div><div class="flow-view-picker" role="group" aria-label="选择渠道"></div><div class="flow-controls"><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button></div></header><nav class="flow-breadcrumb" aria-label="子流程"></nav>
     <div class="flow-content"><div class="flow-canvas-wrap"><div class="flow-canvas" tabindex="0" aria-label="架构画板。拖动空白处平移，滚轮或双指缩放；可用加减号缩放。"><div class="flow-world"><svg class="flow-wires" aria-hidden="true"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs></svg><div class="flow-nodes"></div></div></div><div class="flow-hud"><span class="flow-hint">拖动空白处平移 · 滚轮缩放</span><span class="flow-zoom" aria-live="polite"></span><button type="button" data-action="zoom-out" aria-label="缩小">−</button><button type="button" data-action="zoom-in" aria-label="放大">＋</button></div></div>
     <aside class="flow-inspector" aria-label="节点详情"><div class="flow-inspector-top"><span>NODE / 节点详情</span><button type="button" data-action="close" aria-label="关闭节点详情">×</button></div><div class="flow-inspector-body"></div></aside></div>
-    <div class="flow-footer"><span class="flow-view-note"></span><div class="flow-legend"><span><i></i>实际路径</span><span><i class="is-dashed"></i>依赖 / 后台</span><span><i class="is-planned"></i>未接入</span></div></div>`;
+    <div class="flow-footer"><span class="flow-layout-status" role="status"></span><div class="flow-legend"><span><i></i>实际路径</span><span><i class="is-dashed"></i>依赖 / 后台</span><span><i class="is-planned"></i>未接入</span></div></div>`;
   const element = <T extends Element>(selector: string): T => root.querySelector<T>(selector)!;
   const picker = element<HTMLElement>(".flow-view-picker");
   const breadcrumb = element<HTMLElement>(".flow-breadcrumb");
-  const summary = element<HTMLElement>(".flow-summary span");
   const canvas = element<HTMLElement>(".flow-canvas");
   const world = element<HTMLElement>(".flow-world");
   const wires = element<SVGSVGElement>(".flow-wires");
@@ -42,6 +42,7 @@ export function initializeFlowBoard(): void {
   const inspectorBody = element<HTMLElement>(".flow-inspector-body");
   const zoomLabel = element<HTMLElement>(".flow-zoom");
   const note = element<HTMLElement>(".flow-view-note");
+  const layoutStatus = element<HTMLElement>(".flow-layout-status");
 
   function graphFor(id: string): FlowGraph {
     const base = flowGraphs.find((item) => item.id === id)!;
@@ -51,12 +52,46 @@ export function initializeFlowBoard(): void {
     }));
     return { ...base, nodes: [...base.nodes, ...extra] };
   }
-  function layoutFor(current: FlowGraph): Layout {
-    let layout = layouts.get(current.id);
-    if (!layout) { layout = { positions: new Map() }; layouts.set(current.id, layout); }
-    for (const node of current.nodes) if (!layout.positions.has(node.id)) layout.positions.set(node.id, { ...node.position });
+  function layoutKey(current: FlowGraph, view: FlowViewId): string {
+    return `stardust.flow-layout.v1.${current.id}.${view}`;
+  }
+  function layoutFor(current: FlowGraph, view: FlowViewId = activeView): Layout {
+    const key = layoutKey(current, view);
+    let layout = layouts.get(key);
+    if (!layout) {
+      layout = { positions: new Map(), overrides: new Map() };
+      try {
+        const saved: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+        if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+          for (const [id, value] of Object.entries(saved)) {
+            if (!value || typeof value !== "object") continue;
+            const point = value as Partial<Point>;
+            if (typeof point.x === "number" && Number.isFinite(point.x) && Math.abs(point.x) <= 1000000 &&
+                typeof point.y === "number" && Number.isFinite(point.y) && Math.abs(point.y) <= 1000000) {
+              layout.overrides.set(id, { x: point.x, y: point.y });
+            }
+          }
+        }
+      } catch { /* Use the default layout if browser storage is unavailable or invalid. */ }
+      layouts.set(key, layout);
+    }
+    for (const node of current.nodes) if (!layout.positions.has(node.id)) {
+      layout.positions.set(node.id, { ...(layout.overrides.get(node.id) ?? node.positionByView?.[view] ?? node.position) });
+    }
     for (const id of layout.positions.keys()) if (!current.nodes.some((node) => node.id === id)) layout.positions.delete(id);
     return layout;
+  }
+  function saveNodePosition(id: string): void {
+    const layout = layoutFor(graph);
+    const point = positions.get(id);
+    if (!point) return;
+    layout.overrides.set(id, { ...point });
+    try {
+      localStorage.setItem(layoutKey(graph, activeView), JSON.stringify(Object.fromEntries(layout.overrides)));
+      layoutStatus.textContent = "";
+    } catch {
+      layoutStatus.textContent = "布局暂时无法保存，刷新后可能丢失。";
+    }
   }
   function port(position: { x: number; y: number }, name: FlowPort): { x: number; y: number; dx: number; dy: number } {
     if (name === "top") return { x: position.x + nodeWidth / 2, y: position.y, dx: 0, dy: -1 };
@@ -144,8 +179,22 @@ export function initializeFlowBoard(): void {
     });
   }
   function setView(view: FlowViewId): void {
+    const changed = view !== activeView;
+    if (changed && initialized) layoutFor(graph).camera = { scale, panX, panY };
     activeView = view;
-    if (graph.availableViews && !graph.availableViews.includes(view)) navigateGraph("overview");
+    if (graph.availableViews && !graph.availableViews.includes(view)) {
+      navigateGraph("overview", false);
+    } else if (changed) {
+      const layout = layoutFor(graph);
+      positions = layout.positions;
+      for (const node of graph.nodes) positionNode(node.id);
+      if (layout.camera) {
+        ({ scale, panX, panY } = layout.camera);
+        draw();
+      } else if (initialized) {
+        fit();
+      }
+    }
     renderBreadcrumb();
     picker.querySelectorAll<HTMLButtonElement>("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === view)));
     const visible = visibleFlowGraph(graph, view);
@@ -162,7 +211,9 @@ export function initializeFlowBoard(): void {
       if (element) element.style.display = edgeIds.has(edge.id) ? "" : "none";
     }
     if (selected && !nodeIds.has(selected)) select(undefined);
-    note.textContent = flowViews.find((entry) => entry.id === view)?.note ?? "";
+    note.textContent = view === "web"
+      ? "当前展示 Web 对话的处理流程，模型可按需调用 Tool。"
+      : "当前展示 QQ 机器人的处理流程，部分上下文能力尚未接入。";
     refreshInspector();
   }
   for (const view of flowViews) {
@@ -170,19 +221,24 @@ export function initializeFlowBoard(): void {
     button.addEventListener("click", () => setView(view.id), { signal }); picker.append(button);
   }
   function renderBreadcrumb(): void {
-    breadcrumb.replaceChildren();
-    const label = document.createElement("span"); label.className = "flow-breadcrumb-label"; label.textContent = "STARDUST / 流程"; breadcrumb.append(label);
-    for (const item of flowGraphs) {
-      const button = document.createElement("button"); button.type = "button"; button.dataset.graph = item.id; button.textContent = item.title;
+    if (!breadcrumb.childElementCount) {
+      for (const item of flowGraphs) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.graph = item.id;
+        button.textContent = item.title;
+        breadcrumb.append(button);
+      }
+    }
+    breadcrumb.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+      const item = flowGraphs.find((entry) => entry.id === button.dataset.graph)!;
       button.setAttribute("aria-pressed", String(item.id === graph.id));
       button.disabled = Boolean(item.availableViews && !item.availableViews.includes(activeView));
-      breadcrumb.append(button);
-    }
+    });
   }
   function renderGraph(): void {
     nodes.replaceChildren(); wires.querySelectorAll(".flow-wire").forEach((item) => item.remove()); nodeElements.clear(); edgeElements.clear();
     root.dataset.graph = graph.id;
-    summary.textContent = graph.summary;
     for (const edge of graph.edges) {
       const path = document.createElementNS(svgNamespace, "path"); path.classList.add("flow-wire");
       if (edge.style) path.classList.add(`is-${edge.style}`);
@@ -214,10 +270,10 @@ export function initializeFlowBoard(): void {
     for (const node of graph.nodes) positionNode(node.id);
     renderBreadcrumb(); setView(activeView); draw();
   }
-  function navigateGraph(id: string): void {
+  function navigateGraph(id: string, saveCurrent = true): void {
     const next = flowGraphs.find((item) => item.id === id);
     if (!next || (next.availableViews && !next.availableViews.includes(activeView))) return;
-    if (initialized) layoutFor(graph).camera = { scale, panX, panY };
+    if (saveCurrent && initialized) layoutFor(graph).camera = { scale, panX, panY };
     graphId = id; graph = graphFor(id); const layout = layoutFor(graph); positions = layout.positions;
     select(undefined); renderGraph();
     if (layout.camera) { ({ scale, panX, panY } = layout.camera); draw(); }
@@ -241,6 +297,7 @@ export function initializeFlowBoard(): void {
       drag = { pointer: event.pointerId, x: point.x, y: point.y, panX, panY, node: nodeId, nodeX: original?.x, nodeY: original?.y, moved: false };
       canvas.classList.add(nodeId ? "is-dragging-node" : "is-panning");
     } else if (pointers.size === 2) {
+      if (drag?.node && drag.moved) saveNodePosition(drag.node);
       const [a, b] = pair() as [Pointer, Pointer]; const x = (a.x + b.x) / 2, y = (a.y + b.y) / 2;
       pinch = { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), scale, worldX: (x - panX) / scale, worldY: (y - panY) / scale }; drag = undefined;
       canvas.classList.remove("is-dragging-node"); canvas.classList.add("is-panning");
@@ -256,10 +313,13 @@ export function initializeFlowBoard(): void {
     }
     if (!drag || drag.pointer !== event.pointerId) return;
     const dx = point.x - drag.x, dy = point.y - drag.y; if (Math.hypot(dx, dy) > 4) drag.moved = true;
-    if (drag.node && drag.nodeX !== undefined && drag.nodeY !== undefined) { positions.set(drag.node, { x: drag.nodeX + dx / scale, y: drag.nodeY + dy / scale }); positionNode(drag.node); }
+    if (drag.node && drag.nodeX !== undefined && drag.nodeY !== undefined) {
+      if (drag.moved) { positions.set(drag.node, { x: drag.nodeX + dx / scale, y: drag.nodeY + dy / scale }); positionNode(drag.node); }
+    }
     else { panX = drag.panX + dx; panY = drag.panY + dy; draw(); }
   }, { signal });
   const endPointer = (event: PointerEvent) => {
+    if (drag && drag.pointer === event.pointerId && drag.moved && drag.node) saveNodePosition(drag.node);
     if (drag && drag.pointer === event.pointerId && !drag.moved && drag.node && event.type === "pointerup") {
       const node = graph.nodes.find((item) => item.id === drag?.node);
       if (event.pointerType === "mouse" && lastClick?.id === drag.node && Date.now() - lastClick.time < 400 && node?.childGraphId) {
@@ -292,7 +352,21 @@ export function initializeFlowBoard(): void {
     if (button?.dataset.graph && !button.disabled) { navigateGraph(button.dataset.graph); return; }
     const action = button?.dataset.action;
     if (action === "fit") fit();
-    else if (action === "reset") { for (const node of graph.nodes) { positions.set(node.id, { ...node.position }); positionNode(node.id); } fit(); }
+    else if (action === "reset") {
+      const layout = layoutFor(graph);
+      layout.overrides.clear();
+      try {
+        localStorage.removeItem(layoutKey(graph, activeView));
+        layoutStatus.textContent = "";
+      } catch {
+        layoutStatus.textContent = "无法清除保存的布局，刷新后可能恢复旧位置。";
+      }
+      for (const node of graph.nodes) {
+        positions.set(node.id, { ...(node.positionByView?.[activeView] ?? node.position) });
+        positionNode(node.id);
+      }
+      fit();
+    }
     else if (action === "close") select(undefined);
     else if (action === "zoom-in") zoomAt(scale * 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
     else if (action === "zoom-out") zoomAt(scale / 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
