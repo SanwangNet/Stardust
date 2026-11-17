@@ -7,6 +7,7 @@ import { ModelError, modelService, type ModelService } from "./model.js";
 import type { CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
 import { WEB_STARCORE_ID } from "./agent-core.js";
+import { resolveStarcoreInterfaces, StarcoreFlowRegistry, validateStarcoreFlow } from "./starcore-flow.js";
 
 type InstalledEntry = { enabled: boolean; installed?: boolean; tools?: Record<string, boolean>; [key: string]: unknown };
 type Installed = Record<string, InstalledEntry>;
@@ -25,6 +26,7 @@ export class ExtensionManager {
   private channelChat?: (message: ChannelMessage, signal: AbortSignal) => Promise<string>;
   constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
+    if (new Set(packages.map(item => item.manifest.id)).size !== packages.length) throw new Error("DUPLICATE_EXTENSION");
     this.packages = new Map(packages.map((item) => [item.manifest.id, item]));
     for (const id of this.packages.keys()) this.validateId(id);
     const names = new Set<string>();
@@ -143,6 +145,21 @@ export class ExtensionManager {
       return { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description, type: manifest.type, builtin: manifest.builtin === true || manifest.id === WEB_STARCORE_ID, installed: Boolean(entry), enabled: entry?.enabled ?? false, state: runtime?.state ?? "disconnected", ...(runtime?.error ? { error: runtime.error } : {}), fields, managementPages: manifest.managementPages ?? [], skills: manifest.skills ?? [], tools };
     });
   }
+  /** Retains disabled/uninstalled metadata for existing references; never returns an executable adapter. */
+  flowCatalog() {
+    const state = this.readInstalled();
+    const registry = new StarcoreFlowRegistry();
+    return [...this.packages.values()].filter(item => item.flow).map(item => {
+      const entry = state[item.manifest.id];
+      try {
+        const checked = validateStarcoreFlow(item.manifest, item.flow!, this.packageTools(item).map(tool => tool.name));
+        const compatible = entry?.flowFingerprint === undefined || entry.flowFingerprint === checked.fingerprint;
+        const status = !isInstalled(entry) ? "uninstalled" : !entry?.enabled ? "disabled" : !compatible ? "incompatible" : "enabled";
+        if (status === "enabled") registry.register(item.manifest, item.flow!, this.packageTools(item).map(tool => tool.name));
+        return { owner: item.manifest.id, name: item.manifest.name, status, runtime: this.runtimes.get(item.manifest.id)?.state ?? "disconnected", warnings: checked.warnings, interfaces: resolveStarcoreInterfaces(item.flow!), contract: status === "enabled" ? registry.get(item.manifest.id)! : structuredClone(item.flow!) };
+      } catch { return { owner: item.manifest.id, name: item.manifest.name, status: "incompatible", runtime: this.runtimes.get(item.manifest.id)?.state ?? "disconnected", warnings: ["FLOW_CONTRACT_INVALID"], interfaces: [], contract: null }; }
+    });
+  }
   capabilityTargets(id: string) {
     this.item(id);
     if (!isInstalled(this.readInstalled()[id])) throw new ExtensionError("NOT_INSTALLED", 404);
@@ -244,8 +261,15 @@ export class ExtensionManager {
   }); }
   enable(id: string): Promise<void> { return this.operation(id, "启用", () => {
     const item = this.item(id); const state = this.readInstalled(); if (!isInstalled(state[id])) throw new ExtensionError("NOT_INSTALLED", 404);
+    if (item.flow) {
+      let fingerprint: string;
+      try { fingerprint = validateStarcoreFlow(item.manifest, item.flow, this.packageTools(item).map(tool => tool.name)).fingerprint; }
+      catch { throw new ExtensionError("FLOW_CONTRACT_INVALID", 409); }
+      if (state[id]!.flowFingerprint !== undefined && state[id]!.flowFingerprint !== fingerprint) throw new ExtensionError("FLOW_CONTRACT_INCOMPATIBLE", 409);
+      state[id]!.flowFingerprint = fingerprint;
+    }
     const values = this.values(id); if (item.manifest.fields.some((field) => field.required && !values[field.env])) throw new ExtensionError("NOT_CONFIGURED");
-    if (!state[id]!.enabled) { state[id]!.enabled = true; this.writeInstalled(state); }
+    if (!state[id]!.enabled || item.flow) { state[id]!.enabled = true; this.writeInstalled(state); }
     if (!this.runtimes.get(id)?.instance) this.launch(item);
   }); }
   disable(id: string): Promise<void> { return this.operation(id, "停用", async () => { this.item(id); const state = this.readInstalled(); if (!isInstalled(state[id])) throw new ExtensionError("NOT_INSTALLED", 404); state[id]!.enabled = false; this.writeInstalled(state); await this.stop(id); }); }

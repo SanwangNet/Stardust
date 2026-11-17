@@ -1,7 +1,9 @@
 import type { ExtensionPackage } from "../channel.js";
+import { webContextDeclaration } from "../starcore-flow.js";
 
 /** The Web transport is hosted by the HTTP server; the core owns its conversations. */
 export const webChatExtension: ExtensionPackage = {
+  flow: webContextDeclaration("1.0.0"),
   manifest: {
     id: "web-chat", name: "Web 对话", version: "1.0.0", type: "channel", builtin: true,
     description: "通过 Web 与星尘对话。内置星核，不可卸载。", fields: [],

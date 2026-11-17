@@ -1,4 +1,5 @@
 import type { LogDetails, LogLevel } from "./logger.js";
+import type { StarcoreFlowContract } from "./starcore-flow.js";
 
 export interface ChannelMessage {
   channelId: string;
@@ -64,6 +65,7 @@ export interface ToolDefinition {
 }
 export interface ExtensionPackage {
   manifest: ExtensionManifest;
+  flow?: StarcoreFlowContract;
   create(config: Record<string, string>, host: ChannelHost): ChannelInstance;
   tool?: ToolDefinition;
   tools?: ToolDefinition[];

@@ -1,5 +1,6 @@
 import { flowViews, visibleFlowGraph, type FlowGraph, type FlowKind, type FlowNode, type FlowPort, type FlowViewId } from "./flow-data.js";
 import { addCustomNode, connectNodes, defaultFlowDocument, moveNodeIntoGroup, parseFlowDocument, removeEdge, removeNode, type FlowDocument, type EditableGraph } from "./flow-document.js";
+import { initializeRealFlowBoard } from "./flow-real-board.js";
 
 const nodeWidth = 234, nodeHeight = 126;
 const minScale = .12, maxScale = 2;
@@ -9,6 +10,12 @@ const svgNamespace = "http://www.w3.org/2000/svg";
 
 /** A read-only architecture diagram. Positions and camera exist only in this page. */
 export function initializeFlowBoard(): void {
+  const host = document.getElementById("flow-board");
+  if (!host) return;
+  void initializeRealFlowBoard(host).then(handled => { if (!handled) initializeLegacyFlowBoard(); }).catch(() => { host.textContent = "无法读取服务端流程。"; });
+}
+
+function initializeLegacyFlowBoard(): void {
   const host = document.getElementById("flow-board");
   if (!host) return;
   const root: HTMLElement = host;

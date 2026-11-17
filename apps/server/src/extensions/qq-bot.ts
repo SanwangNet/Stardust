@@ -5,6 +5,7 @@ import type { CapabilityTestInput, CapabilityTestResult, ExtensionPackage } from
 import { ExtensionError } from "../extension-manager.js";
 import { isPublicHttpsImageUrl, performQQCapabilityTest, performQQStreamCapabilityTest, type DiagnosticFetch, type QQTestTarget } from "./qq-capability.js";
 import { qqSendMessageTool } from "./qq-send-message.js";
+import { qqInputDeclaration } from "../starcore-flow.js";
 
 type BotFactory = (appId: string, appSecret: string) => Promise<QQBot>;
 const defaultFactory: BotFactory = async (appId, appSecret) => {
@@ -21,6 +22,7 @@ function platformError(error: unknown): { code?: string; status?: number } {
   return { code, status };
 }
 export function createQQBotExtension(factory: BotFactory = defaultFactory, diagnosticFetch: DiagnosticFetch = fetch): ExtensionPackage { return {
+  flow: qqInputDeclaration("1.0.0"),
   manifest: {
     id: "qq-bot", name: "QQ 官方机器人", version: "1.0.0", description: "通过 QQ 开放平台接收私聊和群聊 @消息。", type: "channel",
     fields: [

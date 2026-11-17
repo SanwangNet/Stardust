@@ -477,13 +477,17 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .flow-canvas.is-dragging-node { cursor: grabbing; }
 .flow-world { position: absolute; top: 0; left: 0; width: 0; height: 0; transform-origin: 0 0; }
 .flow-wires { position: absolute; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.flow-board.is-real .flow-wires { left: -10000px; top: -10000px; width: 20000px; height: 20000px; }
 .flow-wire { fill: none; stroke: color-mix(in srgb, var(--accent) 76%, var(--text)); stroke-width: 2.5; opacity: .85; transition: opacity 180ms; }
 .flow-wire[data-edge] { pointer-events: stroke; cursor: pointer; }
 .flow-wire[data-edge]:hover { stroke-width: 6; }
+.flow-wire[data-editable] { pointer-events: stroke; cursor: pointer; stroke-width: 7; stroke-dasharray: none; }
+.flow-wire[data-editable]:hover { stroke-width: 10; }
 .flow-wire.is-preview { stroke-dasharray: 5 5; pointer-events: none; }
 .flow-wire.is-dependency { stroke-dasharray: 8 7; stroke: color-mix(in srgb, var(--muted) 60%, var(--accent)); }
 .flow-wire.is-planned { stroke-dasharray: 3 8; stroke: var(--muted); }
 .flow-wire.is-draft { stroke-dasharray: 2 5; stroke: var(--accent); }
+.flow-wire.is-draft[data-editable] { stroke-dasharray: none; }
 .flow-wires marker path { fill: var(--accent); }
 .flow-nodes { position: absolute; width: 0; height: 0; }
 .flow-node { --flow-kind: var(--accent); position: absolute; left: 0; top: 0; width: 234px; height: 126px; padding: 0; overflow: visible; border: 1px solid color-mix(in srgb, var(--flow-kind) 45%, var(--line)); background: var(--panel); color: var(--text); text-align: left; cursor: grab; box-shadow: 0 6px 16px rgb(18 13 29 / 14%); transition: opacity 180ms, border-color 140ms, box-shadow 140ms; }
@@ -503,6 +507,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .flow-node-state { display: block; margin: 9px 13px 0; color: var(--muted); font-size: 10px; }
 .flow-port { position: absolute; top: 57px; width: 12px; height: 12px; border: 2px solid var(--flow-kind); background: var(--panel); pointer-events: none; }
 .flow-port[data-port] { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.flow-port[data-out], .flow-port[data-in] { pointer-events: auto; cursor: crosshair; touch-action: none; }
 .flow-port.is-input { left: -7px; }
 .flow-port.is-output { right: -7px; }
 .flow-port.is-top { top: -7px; left: calc(50% - 6px); }

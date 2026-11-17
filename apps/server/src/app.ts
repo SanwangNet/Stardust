@@ -12,6 +12,12 @@ import { ToolRuns } from "./tool-runs.js";
 import type { ConversationService } from "./conversation.js";
 import { WEB_CONTEXT_OWNER } from "./global-context.js";
 import { webChatExtension } from "./extensions/web-chat.js";
+import { WebContextFlowError } from "./web-context-flow.js";
+import { builtInWebToolFlow, runWebToolFlow, WebToolFlowError } from "./web-tool-flow.js";
+import type { ExecutableFlow } from "./executable-flow.js";
+import { builtInWebToolExecutionFlow } from "./web-tool-execution-flow.js";
+import { FlowPublication, resolvePublishedGraphs } from "./flow-publication.js";
+import { webContextDeclaration } from "./starcore-flow.js";
 
 export interface AppOptions {
   version?: string;
@@ -24,6 +30,9 @@ export interface AppOptions {
   adminAuth?: AdminAuth;
   conversationService?: ConversationService;
   startConversations?: boolean;
+  toolAvailabilityFlow?: { enabled: boolean; definition?: ExecutableFlow };
+  toolExecutionFlow?: { enabled: boolean; definition?: ExecutableFlow };
+  flowPublication?: FlowPublication;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -124,6 +133,7 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-board.js": { filename: "flow-board.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-real-board.js": { filename: "flow-real-board.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-data.js": { filename: "flow-data.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-document.js": { filename: "flow-document.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
@@ -140,6 +150,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [webChatExtension], logs);
   const admin = options.adminAuth ?? new AdminAuth();
   const toolRuns = new ToolRuns(model, extensions, logs);
+  const flowPublication = options.flowPublication ?? new FlowPublication();
   const streams = new Set<ServerResponse>();
   let conversations = options.conversationService;
   let conversationOpening: Promise<ConversationService> | undefined;
@@ -166,6 +177,40 @@ export function createStardustServer(options: AppOptions = {}): Server {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     } catch {
       sendJson(response, 400, { error: "INVALID_URL" });
+      return;
+    }
+    if (pathname === "/api/v1/flow-publication" || pathname.startsWith("/api/v1/flow-publication/")) {
+      if (process.env.STARDUST_FLOW_EDITOR !== "1") { sendJson(response, 403, { error: "FLOW_EDITOR_DISABLED" }); return; }
+      if (!admin.local(request) || !admin.session(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "AUTH_REQUIRED" }); return; }
+      try {
+        const state = flowPublication.read();
+        if (request.method === "GET" && pathname === "/api/v1/flow-publication") {
+          sendJson(response, 200, { ...state, graphs: resolvePublishedGraphs(state.draft), active: { context: process.env.STARDUST_WEB_CONTEXT_FLOW === "1", tools: process.env.STARDUST_WEB_TOOL_FLOW === "1" || process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1", execution: process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1" } }); return;
+        }
+        if (request.method !== "POST" || !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+        const body = await readSetupBody(request, 4096);
+        if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("INVALID_INPUT");
+        const fields = body as Record<string, unknown>;
+        if (typeof fields.revision !== "string") throw new Error("INVALID_INPUT");
+        if (pathname.endsWith("/save") && Object.keys(fields).sort().join(",") === "connections,revision") { sendJson(response, 200, flowPublication.save(fields.revision, fields.connections)); return; }
+        if (pathname.endsWith("/validate") && Object.keys(fields).join(",") === "revision") { if (fields.revision !== state.revision) throw new Error("FLOW_CONFLICT"); await flowPublication.validate(state.draft); sendJson(response, 200, { valid: true, revision: state.revision }); return; }
+        if (pathname.endsWith("/publish") && Object.keys(fields).join(",") === "revision") { sendJson(response, 200, await flowPublication.publish(fields.revision)); return; }
+        if (pathname.endsWith("/reset") && Object.keys(fields).join(",") === "revision") { sendJson(response, 200, flowPublication.reset(fields.revision)); return; }
+        throw new Error("INVALID_INPUT");
+      } catch (error) { const code = error instanceof Error ? error.message : "FLOW_FAILED"; sendJson(response, code === "FLOW_CONFLICT" ? 409 : code === "INVALID_INPUT" || code === "INVALID_CONNECTIONS" ? 400 : 500, { error: code }); return; }
+    }
+    if (pathname === "/api/v1/starcore-flows") {
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      if (!setup.getInitializationState().initialized || !admin.local(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try {
+        const entries = typeof extensions.flowCatalog === "function" ? extensions.flowCatalog() : [];
+        if (process.env.STARDUST_FLOW_EDITOR === "1" && process.env.STARDUST_WEB_CONTEXT_FLOW === "1") {
+          const web = entries.find(entry => entry.owner === "web-chat");
+          if (web?.contract && web.status !== "incompatible") web.contract = webContextDeclaration(web.contract.packageVersion, resolvePublishedGraphs(flowPublication.read().published.connections).context);
+        }
+        sendJson(response, 200, { entries });
+      }
+      catch { sendJson(response, 500, { error: "FLOW_CATALOG_UNAVAILABLE" }); }
       return;
     }
 
@@ -265,9 +310,15 @@ export function createStardustServer(options: AppOptions = {}): Server {
           if (!webChannelAvailable()) { sendJson(response, 403, { error: "CHANNEL_DISABLED" }); return; }
           const requestId = fields.requestId;
           const content = fields.content;
+          const publishedGraphs = process.env.STARDUST_FLOW_EDITOR === "1" ? resolvePublishedGraphs(flowPublication.read().published.connections) : undefined;
+          const controller = new AbortController();
           const execute = async (context: import("./conversation-context.js").ConversationContextMessage[], activity: (event: Omit<import("./history-agent.js").ModelActivity, "requestId">) => void, evidence: (item: import("./history-search.js").HistoryEvidence) => void) => {
             const key = `${id}/${requestId}`;
-            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => webChannelAvailable() && store.agent.toolAllowed(name) });
+            const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
+            const executionEnabled = options.toolExecutionFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1";
+            const enabled = executionEnabled || (options.toolAvailabilityFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_FLOW === "1");
+            const selected = enabled ? await runWebToolFlow(publishedGraphs?.tools ?? options.toolAvailabilityFlow?.definition ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
+            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => (!selected || selected.has(name)) && coreAllows(name), ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}) });
             conversationRuns.set(key, runId);
             try {
               while (!serverClosing) {
@@ -279,13 +330,19 @@ export function createStardustServer(options: AppOptions = {}): Server {
               throw new ModelError("REQUEST_CANCELLED", 499);
             } finally { conversationRuns.delete(key); }
           };
-          const messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined);
+          const onClose = () => { if (!response.writableEnded) controller.abort(); };
+          response.once("close", onClose);
+          let messages;
+          try { messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined, { signal: controller.signal, ...(publishedGraphs ? { flowDefinition: publishedGraphs.context } : {}) }); }
+          finally { response.off("close", onClose); }
           if (!response.destroyed) sendJson(response, 200, { messages });
           return;
         }
         sendJson(response, 400, { error: "INVALID_INPUT" });
       } catch (error) {
         if (response.destroyed) return;
+        if (error instanceof WebContextFlowError) { sendJson(response, error.code === "CONTEXT_FLOW_CANCELLED" ? 499 : error.reason === "CONTEXT_TOO_LARGE" ? 400 : 500, { error: error.code, reason: error.reason }); return; }
+        if (error instanceof WebToolFlowError) { sendJson(response, error.code === "TOOL_FLOW_CANCELLED" ? 499 : 500, { error: error.code }); return; }
         const code = error instanceof Error && ["NOT_FOUND", "INVALID_INPUT", "CONTEXT_TOO_LARGE", "CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "CONVERSATION_FAILED";
         sendJson(response, code === "NOT_FOUND" ? 404 : code === "INVALID_INPUT" || code === "CONTEXT_TOO_LARGE" ? 400 : ["CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(code) ? 409 : 500, { error: code });
       }

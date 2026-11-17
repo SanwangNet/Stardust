@@ -11,6 +11,8 @@ import { searchHistory, type HistoryEvidence } from "./history-search.js";
 import type { HistoryToolModel, ModelActivity } from "./history-agent.js";
 import { logger } from "./logger.js";
 import { AgentCore, migrateAgentCore, WEB_CHANNEL_ID, WEB_SCOPE_ID, WEB_STARCORE_ID } from "./agent-core.js";
+import { builtInWebContextFlow, runWebContextFlow } from "./web-context-flow.js";
+import type { ExecutableFlow } from "./executable-flow.js";
 
 export type Conversation = { id: string; title: string; source: string; starcoreId: string; channelId: string; scopeId: string; createdAt: string; updatedAt: string };
 export type ConversationMessage = { id: string; conversationId: string; role: "user" | "assistant"; content: string; createdAt: string; status: "pending" | "complete" | "failed" | "unknown"; requestId: string; sequence: number };
@@ -19,6 +21,7 @@ export interface ConversationModel {
   synthesizeGlobalContext?(system: string, input: string, signal?: AbortSignal): Promise<string>;
   chatWithTools?: HistoryToolModel["chatWithTools"];
 }
+export type ConversationOptions = { contextFlow?: { enabled: boolean; definition?: ExecutableFlow } };
 
 /** Single-server conversation store. Request IDs are unique within a conversation. */
 export class ConversationService {
@@ -28,7 +31,7 @@ export class ConversationService {
   readonly globalContext: GlobalContextService;
   readonly agent: AgentCore;
 
-  constructor(private readonly model: ConversationModel, path = join(projectConfigRoot, "data", "conversations.sqlite"), private readonly budgetBytes = 48_000, private readonly recentMessageLimit = 50) {
+  constructor(private readonly model: ConversationModel, path = join(projectConfigRoot, "data", "conversations.sqlite"), private readonly budgetBytes = 48_000, private readonly recentMessageLimit = 50, private readonly options: ConversationOptions = {}) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
@@ -66,6 +69,12 @@ export class ConversationService {
     this.get(id);
     return this.db.prepare("SELECT sequence, id, conversation_id AS conversationId, role, content, created_at AS createdAt, status, request_id AS requestId FROM messages WHERE conversation_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?").all(id, after, limit) as unknown as ConversationMessage[];
   }
+  private requestMessages(id: string, requestId: string): ConversationMessage[] {
+    return this.db.prepare("SELECT sequence, id, conversation_id AS conversationId, role, content, created_at AS createdAt, status, request_id AS requestId FROM messages WHERE conversation_id = ? AND request_id = ? ORDER BY sequence ASC").all(id, requestId) as unknown as ConversationMessage[];
+  }
+  private readRecentContext(id: string) {
+    return this.messages(id).filter((message) => message.status === "complete").map(({ role, content, sequence }) => ({ role, content, sequence }));
+  }
   rename(id: string, title: string): Conversation {
     if (typeof title !== "string" || !title.trim() || title.length > 120) throw new Error("INVALID_INPUT");
     const result = this.db.prepare("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?").run(title.trim(), new Date().toISOString(), id);
@@ -85,36 +94,47 @@ export class ConversationService {
   searchHistory(input: unknown, onResult?: (evidence: HistoryEvidence) => void) {
     return searchHistory(this.db, WEB_CONTEXT_OWNER, input, onResult);
   }
-  async submit(id: string, requestId: string, content: string, retry = false, execute?: (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>): Promise<ConversationMessage[]> {
+  async submit(id: string, requestId: string, content: string, retry = false, execute?: (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>, options: { signal?: AbortSignal; flowDefinition?: ExecutableFlow } = {}): Promise<ConversationMessage[]> {
     const conversation = this.get(id);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) || typeof content !== "string" || !content.trim() || Buffer.byteLength(content, "utf8") > 32_000) throw new Error("INVALID_INPUT");
-    const allMessages = this.messages(id);
-    const existing = allMessages.filter((message) => message.requestId === requestId);
+    const existing = this.requestMessages(id, requestId);
     if (existing.length) {
       if (existing[0]?.content !== content) throw new Error("REQUEST_ID_CONFLICT");
       if (!retry || existing[0]?.status === "pending" || existing[0]?.status === "complete") return existing;
-      if (allMessages.at(-1)?.id !== existing[0]?.id) throw new Error("RETRY_OUTDATED");
+      const last = this.db.prepare("SELECT id FROM messages WHERE conversation_id = ? ORDER BY sequence DESC LIMIT 1").get(id);
+      if (last?.id !== existing[0]?.id) throw new Error("RETRY_OUTDATED");
     } else if (retry) {
       throw new Error("NOT_FOUND");
     }
     if (this.running.has(id)) throw new Error("CONVERSATION_BUSY");
-    const history = allMessages.filter((message) => message.status === "complete").map(({ role, content: text, sequence }) => ({ role, content: text, sequence }));
-    const useHistoryTool = conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID && Boolean(this.model.chatWithTools);
-    const assembled = useHistoryTool ? assembleContext(history, content, id, this.globalContext.entries(WEB_CONTEXT_OWNER), Math.min(this.budgetBytes, 36_000), this.recentMessageLimit, this.agent.instructions()) : undefined;
-    const context = assembled?.messages ?? buildConversationContext(history.map(({ role, content: text }) => ({ role, content: text })), content, this.budgetBytes, [], this.recentMessageLimit);
-    for (const entryId of assembled?.selectedEntryIds ?? []) logger.write("DEBUG", "context", "已选取全局上下文条目。", { requestId, code: entryId });
-    const now = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (retry) this.db.prepare("UPDATE messages SET status = 'pending' WHERE conversation_id = ? AND request_id = ? AND role = 'user'").run(id, requestId);
-      else this.db.prepare("INSERT INTO messages (id, conversation_id, role, content, created_at, status, request_id) VALUES (?, ?, 'user', ?, ?, 'pending', ?)").run(randomUUID(), id, content, now, requestId);
-      this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, id);
-      this.db.exec("COMMIT");
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    // The graph can await nodes, so reserve the conversation before the first await.
     this.running.add(id);
-    const evidenceEpoch = this.globalContext.epoch(WEB_CONTEXT_OWNER);
-    const evidence = new Map<number, HistoryEvidence>();
     try {
+      const useHistoryTool = conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID && Boolean(this.model.chatWithTools);
+      const graphEnabled = (this.options.contextFlow?.enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1") && conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID;
+      let context: ConversationContextMessage[], selectedEntryIds: string[] = [];
+      if (graphEnabled) {
+        const assembled = await runWebContextFlow(options.flowDefinition ?? this.options.contextFlow?.definition ?? builtInWebContextFlow(), {
+          recent: () => this.readRecentContext(id), global: () => this.globalContext.entries(WEB_CONTEXT_OWNER),
+        }, { conversationId: id, current: content, instructions: useHistoryTool ? this.agent.instructions() : "", budgetBytes: this.budgetBytes, recentLimit: this.recentMessageLimit, useHistoryTool, signal: options.signal });
+        context = assembled.messages; selectedEntryIds = assembled.selectedEntryIds;
+      } else {
+        const history = this.readRecentContext(id);
+        const assembled = useHistoryTool ? assembleContext(history, content, id, this.globalContext.entries(WEB_CONTEXT_OWNER), Math.min(this.budgetBytes, 36_000), this.recentMessageLimit, this.agent.instructions()) : undefined;
+        context = assembled?.messages ?? buildConversationContext(history.map(({ role, content: text }) => ({ role, content: text })), content, this.budgetBytes, [], this.recentMessageLimit);
+        selectedEntryIds = assembled?.selectedEntryIds ?? [];
+      }
+      for (const entryId of selectedEntryIds) logger.write("DEBUG", "context", "已选取全局上下文条目。", { requestId, code: entryId });
+      const now = new Date().toISOString();
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        if (retry) this.db.prepare("UPDATE messages SET status = 'pending' WHERE conversation_id = ? AND request_id = ? AND role = 'user'").run(id, requestId);
+        else this.db.prepare("INSERT INTO messages (id, conversation_id, role, content, created_at, status, request_id) VALUES (?, ?, 'user', ?, ?, 'pending', ?)").run(randomUUID(), id, content, now, requestId);
+        this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, id);
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      const evidenceEpoch = this.globalContext.epoch(WEB_CONTEXT_OWNER);
+      const evidence = new Map<number, HistoryEvidence>();
       let reply: string;
       try {
         const key = `${id}/${requestId}`;
@@ -143,9 +163,9 @@ export class ConversationService {
         try { this.db.prepare("UPDATE messages SET status = 'unknown' WHERE conversation_id = ? AND request_id = ? AND role = 'user' AND status = 'pending'").run(id, requestId); } catch { /* Preserve the database error. */ }
         throw error;
       }
+      this.globalContext.wake();
+      return this.requestMessages(id, requestId);
     } finally { this.running.delete(id); }
-    this.globalContext.wake();
-    return this.messages(id).filter((message) => message.requestId === requestId);
   }
   close(): void {
     this.globalContext.stop();
