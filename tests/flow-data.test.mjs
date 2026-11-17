@@ -7,7 +7,7 @@ const edge = (item, id) => item.edges.find(value => value.id === id);
 
 test("feature graphs have stable unique nodes and valid local edges", () => {
   assert.equal(new Set(flowGraphs.map(item => item.id)).size, flowGraphs.length);
-  assert.deepEqual(flowViews.map(view => view.id), ["web", "qq"]);
+  assert.deepEqual(flowViews.map(view => view.id), ["all", "web", "qq"]);
   for (const item of flowGraphs) {
     const nodes = new Map(item.nodes.map(node => [node.id, node]));
     assert.equal(nodes.size, item.nodes.length);

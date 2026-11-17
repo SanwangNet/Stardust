@@ -125,6 +125,7 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-board.js": { filename: "flow-board.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-data.js": { filename: "flow-data.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-document.js": { filename: "flow-document.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };

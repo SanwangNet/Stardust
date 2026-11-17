@@ -1,4 +1,4 @@
-export type FlowViewId = "web" | "qq";
+export type FlowViewId = "all" | "web" | "qq" | (string & {});
 export type FlowKind = "input" | "context" | "prompt" | "agent" | "model" | "tool" | "output";
 export type FlowPort = "left" | "right" | "top" | "bottom";
 export type FlowNode = {
@@ -13,13 +13,14 @@ export type FlowView = { id: FlowViewId; label: string; note: string };
 
 /** Keep planned nodes visible in their own graph, but never show another channel's path. */
 export function visibleFlowGraph(graph: FlowGraph, view: FlowViewId): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const nodes = graph.nodes.filter((node) => node.planned || node.views.includes(view));
+  const nodes = graph.nodes.filter((node) => node.planned || view === "all" || node.views.includes(view));
   const ids = new Set(nodes.map((node) => node.id));
-  const edges = graph.edges.filter((edge) => (edge.style === "planned" || edge.views.includes(view)) && ids.has(edge.source) && ids.has(edge.target));
+  const edges = graph.edges.filter((edge) => (edge.style === "planned" || view === "all" || edge.views.includes(view)) && ids.has(edge.source) && ids.has(edge.target));
   return { nodes, edges };
 }
 
 export const flowViews: FlowView[] = [
+  { id: "all", label: "全部渠道", note: "展示各渠道和共享 Core 的流程。" },
   { id: "web", label: "Web 对话", note: "Web 使用会话上下文，Tool 由模型按需调用。" },
   { id: "qq", label: "QQ 机器人", note: "QQ 当前使用共同提示词和当前消息，尚未接入会话历史、全局上下文或 Tool 循环。" },
 ];
@@ -44,8 +45,8 @@ export const flowGraphs: FlowGraph[] = [
     {id:"overview-tool-model",source:"tool",target:"model",relation:"结果返回模型",views:web,style:"dependency",sourcePort:"right",targetPort:"right"},
   ]},
   { id:"input", parentId:"overview", title:"输入", summary:"消息由各渠道接收并交给共同的 Agent 入口；各渠道的访问范围保持独立。", nodes:[
-    {id:"web-input",kind:"input",title:"Web 对话",subtitle:"WEB CHAT",description:"Web 对话消息提交给 Core 的会话处理。",owner:"Web 对话星核 · web-chat",state:"渠道注册信息",registryId:"web-chat",position:{x:40,y:220},views:web},
-    {id:"qq-input",kind:"input",title:"QQ 机器人",subtitle:"QQ BOT",description:"QQ 接收符合条件的消息，转交共同主 Agent；当前为单轮回复。",owner:"QQ 星核 · qq-bot",state:"渠道注册信息",registryId:"qq-bot",position:{x:40,y:220},views:qq},
+    {id:"web-input",kind:"input",title:"Web 对话",subtitle:"WEB CHAT",description:"Web 对话消息提交给 Core 的会话处理。",owner:"Web 对话星核 · web-chat",state:"渠道注册信息",registryId:"web-chat",position:{x:40,y:220},positionByView:{all:{x:40,y:100}},views:web},
+    {id:"qq-input",kind:"input",title:"QQ 机器人",subtitle:"QQ BOT",description:"QQ 接收符合条件的消息，转交共同主 Agent；当前为单轮回复。",owner:"QQ 星核 · qq-bot",state:"渠道注册信息",registryId:"qq-bot",position:{x:40,y:220},positionByView:{all:{x:40,y:340}},views:qq},
     {id:"channel-entry",kind:"agent",title:"共同 Agent 入口",subtitle:"STARDUST",description:"不同渠道共用同一主体身份，渠道来源和访问范围独立。",owner:"Stardust Core",state:"共同主体",position:{x:420,y:220},views:both},
   ],edges:[
     {id:"web-to-agent",source:"web-input",target:"channel-entry",relation:"Web 消息",views:web},
@@ -101,8 +102,8 @@ export const flowGraphs: FlowGraph[] = [
   ]},
   { id:"output", parentId:"overview", title:"输出", summary:"模型生成最终回复后，系统根据消息来源将回复返回对应的 Web 会话或 QQ 目标。", nodes:[
     {id:"final",kind:"model",title:"最终回复",subtitle:"FINAL RESPONSE",description:"模型生成最终回复；按消息来源选择对应渠道。",owner:"Stardust Core",state:"选择来源渠道",position:{x:40,y:210},views:both},
-    {id:"web-output",kind:"output",title:"Web 回复",subtitle:"WEB OUTPUT",description:"最终回复持久化并返回当前 Web 会话。",owner:"Web 对话星核",state:"Web",position:{x:430,y:210},views:web},
-    {id:"qq-output",kind:"output",title:"QQ 回复",subtitle:"QQ OUTPUT",description:"QQ 星核向原消息目标发送被动回复。",owner:"QQ 星核",state:"QQ",position:{x:430,y:210},views:qq},
+    {id:"web-output",kind:"output",title:"Web 回复",subtitle:"WEB OUTPUT",description:"最终回复持久化并返回当前 Web 会话。",owner:"Web 对话星核",state:"Web",position:{x:430,y:210},positionByView:{all:{x:430,y:90}},views:web},
+    {id:"qq-output",kind:"output",title:"QQ 回复",subtitle:"QQ OUTPUT",description:"QQ 星核向原消息目标发送被动回复。",owner:"QQ 星核",state:"QQ",position:{x:430,y:210},positionByView:{all:{x:430,y:330}},views:qq},
   ],edges:[
     {id:"final-web",source:"final",target:"web-output",relation:"来源为 Web",views:web},
     {id:"final-qq",source:"final",target:"qq-output",relation:"来源为 QQ",views:qq},

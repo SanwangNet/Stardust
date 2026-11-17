@@ -1,4 +1,5 @@
-import { flowGraphs, flowViews, visibleFlowGraph, type FlowGraph, type FlowKind, type FlowNode, type FlowPort, type FlowViewId } from "./flow-data.js";
+import { flowViews, visibleFlowGraph, type FlowGraph, type FlowKind, type FlowNode, type FlowPort, type FlowViewId } from "./flow-data.js";
+import { addCustomNode, connectNodes, defaultFlowDocument, moveNodeIntoGroup, parseFlowDocument, removeEdge, removeNode, type FlowDocument, type EditableGraph } from "./flow-document.js";
 
 const nodeWidth = 234, nodeHeight = 126;
 const minScale = .12, maxScale = 2;
@@ -12,6 +13,15 @@ export function initializeFlowBoard(): void {
   if (!host) return;
   const root: HTMLElement = host;
   const abort = new AbortController(), signal = abort.signal;
+  const documentKey = "stardust.flow-document.v1";
+  let design: FlowDocument = defaultFlowDocument();
+  let loadError = "";
+  try {
+    const saved = localStorage.getItem(documentKey);
+    if (saved) design = parseFlowDocument(JSON.parse(saved));
+  } catch {
+    loadError = "保存的流程无效或无法读取，当前显示默认流程。";
+  }
   type Camera = { scale: number; panX: number; panY: number };
   type Point = { x: number; y: number };
   type Layout = { positions: Map<string, Point>; overrides: Map<string, Point>; camera?: Camera };
@@ -20,20 +30,23 @@ export function initializeFlowBoard(): void {
   const edgeElements = new Map<string, SVGPathElement>();
   const liveStatus = new Map<string, string>();
   let registeredChannels: { id: string; name: string; type: string; installed: boolean; enabled: boolean }[] = [];
-  let activeView: FlowViewId = "web", selected: string | undefined;
+  let registeredTools: { name: string; description: string; enabled: boolean; parameters?: Record<string, unknown> }[] = [];
+  let toolParameters = new Map<string, Record<string, unknown>>();
+  let activeView: FlowViewId = "all", selected: string | undefined;
   let graphId = "overview";
-  let graph: FlowGraph = flowGraphs[0]!;
+  let graph: FlowGraph = design.graphs[0]!;
   let positions = new Map<string, { x: number; y: number }>();
   let scale = 1, panX = 0, panY = 0, initialized = false;
 
   root.className = "flow-board";
-  root.innerHTML = `<header class="flow-toolbar"><div class="flow-heading"><h2>可视化流程</h2><p class="flow-view-note" aria-live="polite"></p></div><div class="flow-view-picker" role="group" aria-label="选择渠道"></div><div class="flow-controls"><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button></div></header><nav class="flow-breadcrumb" aria-label="子流程"></nav>
-    <div class="flow-content"><div class="flow-canvas-wrap"><div class="flow-canvas" tabindex="0" aria-label="架构画板。拖动空白处平移，滚轮或双指缩放；可用加减号缩放。"><div class="flow-world"><svg class="flow-wires" aria-hidden="true"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs></svg><div class="flow-nodes"></div></div></div><div class="flow-hud"><span class="flow-hint">拖动空白处平移 · 滚轮缩放</span><span class="flow-zoom" aria-live="polite"></span><button type="button" data-action="zoom-out" aria-label="缩小">−</button><button type="button" data-action="zoom-in" aria-label="放大">＋</button></div></div>
+  root.innerHTML = `<header class="flow-toolbar"><div class="flow-heading"><h2>可视化流程</h2><p class="flow-view-note" aria-live="polite"></p></div><div class="flow-view-picker" role="group" aria-label="选择渠道"></div><div class="flow-controls"><select class="flow-node-type" aria-label="添加的节点类型"><option value="input">渠道说明</option><option value="context" selected>上下文说明</option><option value="prompt">提示词说明</option><option value="model">模型说明</option><option value="tool">Tool 说明</option><option value="output">输出说明</option></select><button type="button" data-action="add-note">添加节点</button><button type="button" data-action="add-group">新建分组</button><button type="button" data-action="fit">适应视图</button><button type="button" data-action="reset">重置布局</button><button type="button" data-action="reset-document">恢复默认流程</button></div></header><nav class="flow-breadcrumb" aria-label="流程路径"></nav>
+    <nav class="flow-path" aria-label="节点组路径"></nav><div class="flow-content"><div class="flow-canvas-wrap"><div class="flow-canvas" tabindex="0" aria-label="架构画板。拖动空白处平移，滚轮或双指缩放；可用加减号缩放。"><div class="flow-world"><svg class="flow-wires"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs></svg><div class="flow-nodes"></div></div></div><div class="flow-hud"><span class="flow-hint">拖动空白处平移 · 滚轮缩放</span><span class="flow-zoom" aria-live="polite"></span><button type="button" data-action="zoom-out" aria-label="缩小">−</button><button type="button" data-action="zoom-in" aria-label="放大">＋</button></div></div>
     <aside class="flow-inspector" aria-label="节点详情"><div class="flow-inspector-top"><span>NODE / 节点详情</span><button type="button" data-action="close" aria-label="关闭节点详情">×</button></div><div class="flow-inspector-body"></div></aside></div>
-    <div class="flow-footer"><span class="flow-layout-status" role="status"></span><div class="flow-legend"><span><i></i>实际路径</span><span><i class="is-dashed"></i>依赖 / 后台</span><span><i class="is-planned"></i>未接入</span></div></div>`;
+    <div class="flow-footer"><span class="flow-layout-status" role="status"></span><div class="flow-legend"><span>设计草稿 · 修改不会改变实际运行</span><span><i></i>实际路径</span><span><i class="is-dashed"></i>依赖 / 后台</span><span><i class="is-draft"></i>草稿连线</span><span><i class="is-planned"></i>未接入</span></div></div>`;
   const element = <T extends Element>(selector: string): T => root.querySelector<T>(selector)!;
   const picker = element<HTMLElement>(".flow-view-picker");
   const breadcrumb = element<HTMLElement>(".flow-breadcrumb");
+  const path = element<HTMLElement>(".flow-path");
   const canvas = element<HTMLElement>(".flow-canvas");
   const world = element<HTMLElement>(".flow-world");
   const wires = element<SVGSVGElement>(".flow-wires");
@@ -43,12 +56,31 @@ export function initializeFlowBoard(): void {
   const zoomLabel = element<HTMLElement>(".flow-zoom");
   const note = element<HTMLElement>(".flow-view-note");
   const layoutStatus = element<HTMLElement>(".flow-layout-status");
+  layoutStatus.textContent = loadError;
+
+  function saveDesign(): void {
+    try {
+      parseFlowDocument(design);
+      localStorage.setItem(documentKey, JSON.stringify(design));
+      layoutStatus.textContent = "流程草稿已保存到当前浏览器";
+    } catch {
+      layoutStatus.textContent = "流程草稿未能保存，请检查浏览器存储。";
+    }
+  }
 
   function graphFor(id: string): FlowGraph {
-    const base = flowGraphs.find((item) => item.id === id)!;
+    const base = design.graphs.find((item) => item.id === id)!;
+    if (id === "tool") {
+      const extra: FlowNode[] = registeredTools.filter((item) => item.name !== "search_history").map((item, index) => ({
+        id: `registered-tool:${item.name}`, kind: "tool", title: item.name, subtitle: "REGISTERED TOOL",
+        description: item.description, owner: "已注册 Tool", state: item.enabled ? "Web 已启用" : "Web 已停用",
+        position: { x: 1600, y: 60 + index * 190 }, views: ["web"],
+      }));
+      return { ...base, nodes: [...base.nodes, ...extra] };
+    }
     if (id !== "input") return base;
     const extra: FlowNode[] = registeredChannels.filter((item) => item.type === "channel" && item.installed && item.id !== "web-chat" && item.id !== "qq-bot").map((item, index) => ({
-      id: `channel-${item.id}`, kind: "input", title: item.name, subtitle: "REGISTERED CHANNEL", description: "已安装的渠道；具体执行路径尚未在此图中定义。", owner: `星核 · ${item.id}`, state: "注册信息", registryId: item.id, position: { x: 40, y: 560 + index * 210 }, views: [],
+      id: `channel-${item.id}`, kind: "input", title: item.name, subtitle: "REGISTERED CHANNEL", description: "已安装的渠道；具体执行路径尚未在此图中定义。", owner: `星核 · ${item.id}`, state: "注册信息", registryId: item.id, position: { x: 40, y: 560 + index * 210 }, views: [item.id],
     }));
     return { ...base, nodes: [...base.nodes, ...extra] };
   }
@@ -86,12 +118,20 @@ export function initializeFlowBoard(): void {
     const point = positions.get(id);
     if (!point) return;
     layout.overrides.set(id, { ...point });
+    const savedNode = design.graphs.find((entry) => entry.id === graph.id)?.nodes.find((entry) => entry.id === id);
+    if (savedNode) {
+      savedNode.positionByView = { ...savedNode.positionByView, [activeView]: { ...point } };
+    }
+    let layoutSaved = true;
     try {
       localStorage.setItem(layoutKey(graph, activeView), JSON.stringify(Object.fromEntries(layout.overrides)));
       layoutStatus.textContent = "";
     } catch {
+      layoutSaved = false;
       layoutStatus.textContent = "布局暂时无法保存，刷新后可能丢失。";
     }
+    if (savedNode) saveDesign();
+    if (!layoutSaved) layoutStatus.textContent = "布局暂时无法保存，刷新后可能丢失。";
   }
   function port(position: { x: number; y: number }, name: FlowPort): { x: number; y: number; dx: number; dy: number } {
     if (name === "top") return { x: position.x + nodeWidth / 2, y: position.y, dx: 0, dy: -1 };
@@ -161,11 +201,64 @@ export function initializeFlowBoard(): void {
       list.append(row);
     }
     inspectorBody.append(eyebrow, title, description, meta);
+    if (node.id.startsWith("registered-tool:")) {
+      const parameters = toolParameters.get(node.id.slice("registered-tool:".length));
+      if (parameters) {
+        const label = document.createElement("h3"); label.textContent = "输入参数";
+        const details = document.createElement("pre"); details.className = "flow-tool-parameters";
+        details.textContent = JSON.stringify(parameters, null, 2);
+        inspectorBody.append(label, details);
+      }
+    }
+    const editable = design.graphs.find((entry) => entry.id === graph.id)?.nodes.find((entry) => entry.id === node.id);
+    if (editable?.origin === "custom") {
+      const form = document.createElement("form");
+      form.className = "flow-editor-form";
+      const nameLabel = document.createElement("label"); nameLabel.textContent = "名称";
+      const name = document.createElement("input"); name.name = "title"; name.value = editable.title; name.maxLength = 120; name.required = true;
+      const descriptionLabel = document.createElement("label"); descriptionLabel.textContent = "说明";
+      const details = document.createElement("textarea"); details.name = "description"; details.value = editable.description; details.maxLength = 4000;
+      const submit = document.createElement("button"); submit.type = "submit"; submit.textContent = "保存属性";
+      nameLabel.append(name); descriptionLabel.append(details); form.append(nameLabel, descriptionLabel, submit);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const title = name.value.trim();
+        if (!title) return;
+        editable.title = title; editable.description = details.value;
+        if (editable.childGraphId) {
+          const child = design.graphs.find((entry) => entry.id === editable.childGraphId);
+          if (child) { child.title = editable.title; child.summary = editable.description; }
+        }
+        saveDesign(); renderGraph(); select(editable.id);
+      }, { signal });
+      inspectorBody.append(form);
+      const groups = design.graphs.find((entry) => entry.id === graph.id)?.nodes.filter((entry) => entry.childGraphId && entry.id !== editable.id) ?? [];
+      if (groups.length) {
+        const selectGroup = document.createElement("select"); selectGroup.setAttribute("aria-label", "选择目标分组");
+        for (const group of groups) selectGroup.add(new Option(group.title, group.id));
+        const move = document.createElement("button"); move.type = "button"; move.textContent = "移入分组"; move.className = "flow-enter";
+        move.addEventListener("click", () => {
+          try {
+            moveNodeIntoGroup(design, graph.id, editable.id, selectGroup.value);
+            saveDesign(); select(undefined); graph = graphFor(graph.id); positions = layoutFor(graph).positions; renderGraph();
+          } catch (error) { layoutStatus.textContent = error instanceof Error ? error.message : "无法移动节点。"; }
+        }, { signal });
+        inspectorBody.append(selectGroup, move);
+      }
+      const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "删除节点"; remove.className = "flow-enter";
+      remove.addEventListener("click", () => {
+        try {
+          removeNode(design, graph.id, editable.id);
+          saveDesign(); select(undefined); graph = graphFor(graph.id); positions = layoutFor(graph).positions; renderGraph();
+        } catch (error) { layoutStatus.textContent = error instanceof Error ? error.message : "无法删除节点。"; }
+      }, { signal });
+      inspectorBody.append(remove);
+    }
     if (node.childGraphId) {
-      const child = flowGraphs.find((item) => item.id === node.childGraphId)!;
+      const child = design.graphs.find((item) => item.id === node.childGraphId)!;
       const enter = document.createElement("button"); enter.type = "button"; enter.className = "flow-enter"; enter.dataset.graph = child.id;
       enter.textContent = "进入子流程 ↗";
-      if (child.availableViews && !child.availableViews.includes(activeView)) { enter.disabled = true; enter.textContent = "当前渠道尚未接入"; }
+      if (activeView !== "all" && child.availableViews && !child.availableViews.includes(activeView)) { enter.disabled = true; enter.textContent = "当前渠道尚未接入"; }
       inspectorBody.append(enter);
     }
     inspectorBody.append(heading, list);
@@ -182,7 +275,10 @@ export function initializeFlowBoard(): void {
     const changed = view !== activeView;
     if (changed && initialized) layoutFor(graph).camera = { scale, panX, panY };
     activeView = view;
-    if (graph.availableViews && !graph.availableViews.includes(view)) {
+    const unknownChannel = !["all", "web", "qq"].includes(view);
+    if (unknownChannel && graph.id !== "input") {
+      navigateGraph("input", false);
+    } else if (view !== "all" && graph.availableViews && !graph.availableViews.includes(view)) {
       navigateGraph("overview", false);
     } else if (changed) {
       const layout = layoutFor(graph);
@@ -211,9 +307,10 @@ export function initializeFlowBoard(): void {
       if (element) element.style.display = edgeIds.has(edge.id) ? "" : "none";
     }
     if (selected && !nodeIds.has(selected)) select(undefined);
-    note.textContent = view === "web"
-      ? "当前展示 Web 对话的处理流程，模型可按需调用 Tool。"
-      : "当前展示 QQ 机器人的处理流程，部分上下文能力尚未接入。";
+    note.textContent = view === "all" ? "展示各渠道和共享 Core 的流程，编辑内容仅作为设计草稿。"
+      : view === "web" ? "当前展示 Web 对话的处理流程，模型可按需调用 Tool。"
+      : view === "qq" ? "当前展示 QQ 机器人的处理流程，部分上下文能力尚未接入。"
+      : "该渠道已安装，具体执行路径尚未定义。";
     refreshInspector();
   }
   for (const view of flowViews) {
@@ -222,7 +319,7 @@ export function initializeFlowBoard(): void {
   }
   function renderBreadcrumb(): void {
     if (!breadcrumb.childElementCount) {
-      for (const item of flowGraphs) {
+      for (const item of design.graphs.filter((entry) => !entry.parentId || entry.parentId === "overview")) {
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.graph = item.id;
@@ -231,10 +328,26 @@ export function initializeFlowBoard(): void {
       }
     }
     breadcrumb.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
-      const item = flowGraphs.find((entry) => entry.id === button.dataset.graph)!;
+      const item = design.graphs.find((entry) => entry.id === button.dataset.graph)!;
       button.setAttribute("aria-pressed", String(item.id === graph.id));
-      button.disabled = Boolean(item.availableViews && !item.availableViews.includes(activeView));
+      button.disabled = !["all", "web", "qq"].includes(activeView)
+        ? item.id !== "input"
+        : Boolean(activeView !== "all" && item.availableViews && !item.availableViews.includes(activeView));
     });
+    const ancestors: EditableGraph[] = [];
+    let current = design.graphs.find((entry) => entry.id === graph.id);
+    while (current) {
+      ancestors.unshift(current);
+      current = current.parentId ? design.graphs.find((entry) => entry.id === current!.parentId) : undefined;
+    }
+    path.replaceChildren();
+    for (const item of ancestors) {
+      if (path.childElementCount) path.append(document.createTextNode(" / "));
+      const button = document.createElement("button");
+      button.type = "button"; button.dataset.graph = item.id; button.textContent = item.title;
+      if (item.id === graph.id) button.setAttribute("aria-current", "page");
+      path.append(button);
+    }
   }
   function renderGraph(): void {
     nodes.replaceChildren(); wires.querySelectorAll(".flow-wire").forEach((item) => item.remove()); nodeElements.clear(); edgeElements.clear();
@@ -242,6 +355,7 @@ export function initializeFlowBoard(): void {
     for (const edge of graph.edges) {
       const path = document.createElementNS(svgNamespace, "path"); path.classList.add("flow-wire");
       if (edge.style) path.classList.add(`is-${edge.style}`);
+      if (edge.relation === "设计连接") path.classList.add("is-draft");
       path.setAttribute("marker-end", "url(#flow-arrow)"); path.dataset.edge = edge.id;
       const title = document.createElementNS(svgNamespace, "title"); title.textContent = edge.relation; path.append(title);
       wires.append(path); edgeElements.set(edge.id, path);
@@ -257,9 +371,14 @@ export function initializeFlowBoard(): void {
       const title = document.createElement("strong"); title.className = "flow-node-title"; title.textContent = data.title;
       const subtitle = document.createElement("span"); subtitle.className = "flow-node-subtitle"; subtitle.textContent = data.subtitle;
       const state = document.createElement("span"); state.className = "flow-node-state"; state.textContent = data.registryId ? "读取注册状态…" : data.state;
-      const input = document.createElement("span"); input.className = "flow-port is-input"; input.setAttribute("aria-hidden", "true");
-      const output = document.createElement("span"); output.className = "flow-port is-output"; output.setAttribute("aria-hidden", "true");
-      node.append(head, title, subtitle, state, input, output);
+      node.append(head, title, subtitle, state);
+      const portDefinitions = design.graphs.find((entry) => entry.id === graph.id)?.nodes.find((entry) => entry.id === data.id)?.ports;
+      for (const item of portDefinitions ?? []) {
+        const marker = document.createElement("span");
+        marker.className = `flow-port is-${item.direction}`; marker.dataset.port = item.id;
+        marker.title = item.direction === "input" ? "输入端口" : "从此端口拖动以连接";
+        node.append(marker);
+      }
       for (const direction of ["top", "bottom"] as const) {
         if (graph.edges.some((edge) => (edge.source === data.id && edge.sourcePort === direction) || (edge.target === data.id && edge.targetPort === direction))) {
           const marker = document.createElement("span"); marker.className = `flow-port is-${direction}`; marker.setAttribute("aria-hidden", "true"); node.append(marker);
@@ -271,8 +390,8 @@ export function initializeFlowBoard(): void {
     renderBreadcrumb(); setView(activeView); draw();
   }
   function navigateGraph(id: string, saveCurrent = true): void {
-    const next = flowGraphs.find((item) => item.id === id);
-    if (!next || (next.availableViews && !next.availableViews.includes(activeView))) return;
+    const next = design.graphs.find((item) => item.id === id);
+    if (!next || (!["all", "web", "qq"].includes(activeView) && id !== "input") || (activeView !== "all" && next.availableViews && !next.availableViews.includes(activeView))) return;
     if (saveCurrent && initialized) layoutFor(graph).camera = { scale, panX, panY };
     graphId = id; graph = graphFor(id); const layout = layoutFor(graph); positions = layout.positions;
     select(undefined); renderGraph();
@@ -283,6 +402,7 @@ export function initializeFlowBoard(): void {
 
   type Pointer = { x: number; y: number };
   const pointers = new Map<number, Pointer>();
+  let connecting: { node: string; pointer: number; preview: SVGPathElement } | undefined;
   let lastClick: { id: string; time: number } | undefined;
   let drag: { pointer: number; x: number; y: number; panX: number; panY: number; node?: string; nodeX?: number; nodeY?: number; moved: boolean } | undefined;
   let pinch: { distance: number; scale: number; worldX: number; worldY: number } | undefined;
@@ -290,6 +410,21 @@ export function initializeFlowBoard(): void {
   const pair = () => [...pointers.values()].slice(0, 2);
   canvas.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 1) return;
+    const target = event.target as Element;
+    if (target.closest(".flow-wire[data-edge]")) return;
+    const portElement = target.closest<HTMLElement>(".flow-port[data-port]");
+    const sourceNode = target.closest<HTMLButtonElement>(".flow-node");
+    if (portElement?.dataset.port === "out" && sourceNode?.dataset.node) {
+      event.preventDefault(); event.stopPropagation();
+      canvas.setPointerCapture(event.pointerId);
+      const preview = document.createElementNS(svgNamespace, "path");
+      preview.classList.add("flow-wire", "is-preview");
+      preview.setAttribute("marker-end", "url(#flow-arrow)");
+      wires.append(preview);
+      connecting = { node: sourceNode.dataset.node, pointer: event.pointerId, preview };
+      return;
+    }
+    if (portElement) return;
     event.preventDefault(); const point = coordinates(event); pointers.set(event.pointerId, point); canvas.setPointerCapture(event.pointerId);
     if (pointers.size === 1) {
       const node = (event.target as Element).closest<HTMLButtonElement>(".flow-node");
@@ -304,6 +439,13 @@ export function initializeFlowBoard(): void {
     }
   }, { signal });
   canvas.addEventListener("pointermove", (event) => {
+    if (connecting?.pointer === event.pointerId) {
+      const point = coordinates(event);
+      const from = port(positions.get(connecting.node)!, "right");
+      const x = (point.x - panX) / scale, y = (point.y - panY) / scale;
+      connecting.preview.setAttribute("d", `M ${from.x} ${from.y} C ${from.x + 100} ${from.y}, ${x - 100} ${y}, ${x} ${y}`);
+      return;
+    }
     if (!pointers.has(event.pointerId)) return;
     const point = coordinates(event); pointers.set(event.pointerId, point);
     if (pinch && pointers.size >= 2) {
@@ -319,6 +461,25 @@ export function initializeFlowBoard(): void {
     else { panX = drag.panX + dx; panY = drag.panY + dy; draw(); }
   }, { signal });
   const endPointer = (event: PointerEvent) => {
+    if (connecting?.pointer === event.pointerId) {
+      const source = connecting.node;
+      connecting.preview.remove(); connecting = undefined;
+      if (event.type === "pointerup") {
+        const target = document.elementFromPoint(event.clientX, event.clientY);
+        const targetPort = target?.closest<HTMLElement>(".flow-port[data-port]");
+        const targetNode = target?.closest<HTMLButtonElement>(".flow-node");
+        if (targetPort?.dataset.port === "in" && targetNode?.dataset.node) {
+          try {
+            connectNodes(design, graph.id, source, "out", targetNode.dataset.node, "in");
+            saveDesign(); graph = graphFor(graph.id); renderGraph();
+          } catch (error) { layoutStatus.textContent = error instanceof Error ? error.message : "无法连接端口。"; }
+        } else {
+          layoutStatus.textContent = "请将连线拖到节点的输入端口。";
+        }
+      }
+      return;
+    }
+    if (drag && drag.pointer === event.pointerId && !drag.moved && !drag.node && event.type === "pointerup") select(undefined);
     if (drag && drag.pointer === event.pointerId && drag.moved && drag.node) saveNodePosition(drag.node);
     if (drag && drag.pointer === event.pointerId && !drag.moved && drag.node && event.type === "pointerup") {
       const node = graph.nodes.find((item) => item.id === drag?.node);
@@ -332,9 +493,12 @@ export function initializeFlowBoard(): void {
     if (pointers.size === 1) { const [id, point] = [...pointers.entries()][0]!; drag = { pointer: id, x: point.x, y: point.y, panX, panY, moved: true }; canvas.classList.add("is-panning"); }
   };
   canvas.addEventListener("pointerup", endPointer, { signal }); canvas.addEventListener("pointercancel", endPointer, { signal });
-  canvas.addEventListener("lostpointercapture", (event) => { if (pointers.has(event.pointerId)) endPointer(event); }, { signal });
+  canvas.addEventListener("lostpointercapture", (event) => { if (pointers.has(event.pointerId) || connecting?.pointer === event.pointerId) endPointer(event); }, { signal });
   canvas.addEventListener("wheel", (event) => { event.preventDefault(); const rect = canvas.getBoundingClientRect(); zoomAt(scale * Math.exp(-event.deltaY * .0015), event.clientX - rect.left, event.clientY - rect.top); }, { passive: false, signal });
   canvas.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && connecting) {
+      connecting.preview.remove(); connecting = undefined; event.preventDefault(); return;
+    }
     if (event.target !== canvas) return;
     if (event.key === "+" || event.key === "=") zoomAt(scale * 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
     else if (event.key === "-") zoomAt(scale / 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
@@ -347,14 +511,65 @@ export function initializeFlowBoard(): void {
     const node = (event.target as Element).closest<HTMLButtonElement>(".flow-node");
     if (node?.dataset.node) select(node.dataset.node);
   }, { signal });
+  root.addEventListener("keydown", (event) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault(); saveDesign(); return;
+    }
+    if (event.key === "Escape") {
+      if (connecting) { connecting.preview.remove(); connecting = undefined; }
+      else select(undefined);
+      event.preventDefault(); return;
+    }
+    if (event.key === "Delete" && selected) {
+      try {
+        removeNode(design, graph.id, selected);
+        saveDesign(); select(undefined); graph = graphFor(graph.id); positions = layoutFor(graph).positions; renderGraph();
+      } catch (error) { layoutStatus.textContent = error instanceof Error ? error.message : "无法删除节点。"; }
+      event.preventDefault();
+    }
+  }, { signal });
+  wires.addEventListener("click", (event) => {
+    const edge = (event.target as Element).closest<SVGPathElement>(".flow-wire[data-edge]");
+    const id = edge?.dataset.edge;
+    if (!id || !window.confirm("删除这条流程连线？")) return;
+    try {
+      removeEdge(design, graph.id, id);
+      saveDesign(); graph = graphFor(graph.id); renderGraph();
+    } catch (error) { layoutStatus.textContent = error instanceof Error ? error.message : "无法删除连线。"; }
+  }, { signal });
   root.addEventListener("click", (event) => {
     const button = (event.target as Element).closest<HTMLButtonElement>("button");
     if (button?.dataset.graph && !button.disabled) { navigateGraph(button.dataset.graph); return; }
     const action = button?.dataset.action;
-    if (action === "fit") fit();
+    if (action === "add-note" || action === "add-group") {
+      const point = { x: Math.round((canvas.clientWidth / 2 - panX) / scale), y: Math.round((canvas.clientHeight / 2 - panY) / scale) };
+      const kind = element<HTMLSelectElement>(".flow-node-type").value as FlowKind;
+      const node = addCustomNode(design, graph.id, kind, point, action === "add-group");
+      saveDesign(); graph = graphFor(graph.id); positions = layoutFor(graph).positions; renderGraph(); select(node.id);
+    }
+    else if (action === "reset-document") {
+      if (!window.confirm("恢复默认流程将删除当前浏览器中的流程草稿，确定继续吗？")) return;
+      try {
+        localStorage.removeItem(documentKey);
+        for (const item of design.graphs) {
+          for (const view of flowViews) localStorage.removeItem(layoutKey(item, view.id));
+        }
+        design = defaultFlowDocument(); layouts.clear(); graphId = "overview"; graph = graphFor(graphId);
+        positions = layoutFor(graph).positions; select(undefined); renderGraph(); fit(); layoutStatus.textContent = "已恢复默认流程。";
+      } catch { layoutStatus.textContent = "无法清除已保存的流程草稿。"; }
+    }
+    else if (action === "fit") fit();
     else if (action === "reset") {
       const layout = layoutFor(graph);
       layout.overrides.clear();
+      const storedGraph = design.graphs.find((entry) => entry.id === graph.id);
+      const defaultGraph = defaultFlowDocument().graphs.find((entry) => entry.id === graph.id);
+      for (const node of storedGraph?.nodes ?? []) {
+        if (node.positionByView) delete node.positionByView[activeView];
+        const originalPosition = defaultGraph?.nodes.find((entry) => entry.id === node.id)?.positionByView?.[activeView];
+        if (originalPosition) node.positionByView = { ...node.positionByView, [activeView]: { ...originalPosition } };
+      }
       try {
         localStorage.removeItem(layoutKey(graph, activeView));
         layoutStatus.textContent = "";
@@ -365,6 +580,7 @@ export function initializeFlowBoard(): void {
         positions.set(node.id, { ...(node.positionByView?.[activeView] ?? node.position) });
         positionNode(node.id);
       }
+      saveDesign();
       fit();
     }
     else if (action === "close") select(undefined);
@@ -382,8 +598,21 @@ export function initializeFlowBoard(): void {
   async function loadRegistry(): Promise<void> {
     try {
       const response = await fetch("/api/v1/extensions", { cache: "no-store", signal }); if (!response.ok) throw new Error();
-      const data = await response.json() as { extensions?: { id: string; name: string; type: string; installed: boolean; enabled: boolean }[] };
+      const data = await response.json() as { extensions?: { id: string; name: string; type: string; installed: boolean; enabled: boolean; tools?: { name: string; parameters: Record<string, unknown> }[] }[] };
       registeredChannels = Array.isArray(data.extensions) ? data.extensions.filter((item) => typeof item.id === "string" && typeof item.name === "string" && typeof item.type === "string") : [];
+      picker.querySelectorAll(".flow-extra-channel").forEach((button) => button.remove());
+      for (const item of registeredChannels.filter((entry) => entry.type === "channel" && entry.installed && entry.id !== "web-chat" && entry.id !== "qq-bot")) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "flow-extra-channel"; button.dataset.view = item.id; button.textContent = item.name;
+        button.addEventListener("click", () => setView(item.id), { signal }); picker.append(button);
+      }
+      if (!["all", "web", "qq"].includes(activeView) && !registeredChannels.some((entry) => entry.id === activeView && entry.installed && entry.type === "channel")) setView("all");
+      toolParameters = new Map();
+      for (const extension of data.extensions ?? []) {
+        for (const tool of extension.tools ?? []) {
+          if (typeof tool.name === "string" && tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)) toolParameters.set(tool.name, tool.parameters);
+        }
+      }
       liveStatus.clear();
       for (const item of registeredChannels) liveStatus.set(item.id, !item.installed ? "已注册 · 未安装" : item.enabled ? "已安装 · 已启用" : "已安装 · 已停用");
       for (const id of ["web-chat", "qq-bot"]) if (!liveStatus.has(id)) liveStatus.set(id, "未找到注册信息");
@@ -394,8 +623,22 @@ export function initializeFlowBoard(): void {
       setView(activeView);
     }
   }
-  window.addEventListener("stardust-conversations-ready", () => { void loadRegistry(); }, { signal });
-  window.addEventListener("stardust-channel-tools-changed", () => { void loadRegistry(); }, { signal });
+  async function loadTools(): Promise<void> {
+    try {
+      const response = await fetch("/api/v1/agent/settings", { cache: "no-store", signal });
+      if (!response.ok) throw new Error();
+      const data = await response.json() as { tools?: { name: string; description: string; enabled: boolean }[] };
+      registeredTools = Array.isArray(data.tools)
+        ? data.tools.filter((item) => typeof item.name === "string" && typeof item.description === "string" && typeof item.enabled === "boolean")
+        : [];
+      if (graphId === "tool") { graph = graphFor(graphId); positions = layoutFor(graph).positions; renderGraph(); }
+    } catch {
+      registeredTools = [];
+    }
+  }
+  window.addEventListener("stardust-conversations-ready", () => { void loadRegistry(); void loadTools(); }, { signal });
+  window.addEventListener("stardust-channel-tools-changed", () => { void loadRegistry(); void loadTools(); }, { signal });
   window.addEventListener("pagehide", (event) => { if (!event.persisted) { abort.abort(); resize.disconnect(); } }, { signal });
   void loadRegistry();
+  void loadTools();
 }
