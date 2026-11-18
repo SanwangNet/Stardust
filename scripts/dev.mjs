@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const children = new Set();
+// A fresh private proof binds this launch's loopback Vite proxy to its backend; it is not user authentication.
+const devProxyProof = randomBytes(32).toString("base64url");
 let stopping = false;
 function start(script, args = [], nodeArgs = []) {
-  const child = spawn(process.execPath, [...nodeArgs, script, ...args], { cwd: root, stdio: "inherit" });
+  const child = spawn(process.execPath, [...nodeArgs, script, ...args], { cwd: root, stdio: "inherit", env: { ...process.env, STARDUST_DEV_PROXY_PROOF: devProxyProof } });
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);

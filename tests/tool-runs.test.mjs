@@ -10,7 +10,6 @@ import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { qqSendMessageTool } from "../apps/server/dist/extensions/qq-send-message.js";
 import { ToolRuns } from "../apps/server/dist/tool-runs.js";
 import { collectModelTurn } from "../apps/server/dist/model-stream.js";
-import { AdminAuth } from "../apps/server/dist/admin-auth.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
 import { createConfigStore } from "../apps/server/dist/config.js";
 import { SetupService } from "../apps/server/dist/setup.js";
@@ -173,22 +172,19 @@ test("streaming tool_calls reassemble arguments split across UTF-8 and SSE chunk
 
 test("tool HTTP endpoints work locally without login and reject cross-origin requests", async (t) => {
   const f = await fixture(t); const setup = new SetupService(createConfigStore(f.root)); await setup.completeInitialization({});
-  const token = "a-secure-test-token-at-least-32-characters";
-  const server = createStardustServer({ setupService: setup, extensionManager: f.extensions, modelService: f.model, adminAuth: new AdminAuth(token) });
+  const server = createStardustServer({ setupService: setup, extensionManager: f.extensions, modelService: f.model });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const origin = `http://127.0.0.1:${server.address().port}`;
   const post = (path, body, headers = {}) => fetch(origin + path, { method: "POST", headers: { "Content-Type": "application/json", Origin: origin, ...headers }, body: JSON.stringify(body) });
   assert.equal((await post("/api/v1/tool-runs", { message: "hello" }, { Origin: "https://evil.example" })).status, 403);
-  assert.equal((await post("/api/v1/admin/login", { token }, { Origin: "https://evil.example" })).status, 403);
-  assert.equal((await post("/api/v1/admin/login", { token: "incorrect" })).status, 401);
-  const login = await post("/api/v1/admin/login", { token }); assert.equal(login.status, 200);
-  assert.match(login.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
+  assert.equal((await post("/api/v1/admin/login", {}, { Origin: "https://evil.example" })).status, 403);
+  assert.equal((await post("/api/v1/admin/login", {})).status, 405);
   const response = await post("/api/v1/tool-runs", { message: "hello" }); assert.equal(response.status, 202);
   const { id } = await response.json();
   assert.equal((await fetch(`${origin}/api/v1/tool-runs/${id}`, { headers: { Origin: "https://evil.example" } })).status, 403);
   const state = await fetch(`${origin}/api/v1/tool-runs/${id}`); assert.equal(state.status, 200);
-  assert.doesNotMatch(await state.text(), new RegExp(token));
+  assert.doesNotMatch(await state.text(), /stardust_admin/);
 });
 
 test("model tool responses are validated in non-streaming and streaming modes", async (t) => {

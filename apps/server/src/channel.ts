@@ -1,5 +1,7 @@
 import type { LogDetails, LogLevel } from "./logger.js";
 import type { StarcoreFlowContract } from "./starcore-flow.js";
+import type { QQInputRequest } from "./qq-input-flow.js";
+import type { SkillDeclaration } from "./skill-flow.js";
 
 export interface ChannelMessage {
   channelId: string;
@@ -15,9 +17,10 @@ export interface ChannelMessage {
 export type ExtensionStatus = "disconnected" | "connecting" | "connected" | "error";
 export interface ExtensionField { key: string; env: string; label: string; sensitive: boolean; required: boolean }
 export interface ManagementPage { pageId: string; title: string; description: string; pageKind: string }
-export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: { name: string; description: string }[] }
+export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: SkillDeclaration[] }
 export interface ChannelHost {
   message(message: ChannelMessage, signal: AbortSignal): Promise<string>;
+  qqInputFlow?(request: QQInputRequest): Promise<"allow" | "skip">;
   status(state: ExtensionStatus, error?: string): void;
   reportError(code: "MODEL_FAILED" | "SEND_FAILED"): void;
   log(level: LogLevel, message: string, details?: LogDetails): void;

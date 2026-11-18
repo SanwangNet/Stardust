@@ -7,7 +7,7 @@ import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
-import { AdminAuth } from "./admin-auth.js";
+import { isLocalRead, isTrustedLocalAccess } from "./local-access.js";
 import { ToolRuns } from "./tool-runs.js";
 import type { ConversationService } from "./conversation.js";
 import { WEB_CONTEXT_OWNER } from "./global-context.js";
@@ -18,6 +18,8 @@ import type { ExecutableFlow } from "./executable-flow.js";
 import { builtInWebToolExecutionFlow } from "./web-tool-execution-flow.js";
 import { FlowPublication, resolvePublishedGraphs } from "./flow-publication.js";
 import { webContextDeclaration } from "./starcore-flow.js";
+import { builtInSkillFlow, runSkillFlow, SkillFlowError } from "./skill-flow.js";
+import { buildFlowOverview } from "./flow-overview.js";
 
 export interface AppOptions {
   version?: string;
@@ -27,11 +29,11 @@ export interface AppOptions {
   modelService?: ModelService;
   extensionManager?: ExtensionManager;
   logService?: LogService;
-  adminAuth?: AdminAuth;
   conversationService?: ConversationService;
   startConversations?: boolean;
   toolAvailabilityFlow?: { enabled: boolean; definition?: ExecutableFlow };
   toolExecutionFlow?: { enabled: boolean; definition?: ExecutableFlow };
+  skillFlow?: { enabled: boolean; definition?: ExecutableFlow };
   flowPublication?: FlowPublication;
 }
 
@@ -148,7 +150,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const model = options.modelService ?? modelService;
   const logs = options.logService ?? logger;
   const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [webChatExtension], logs);
-  const admin = options.adminAuth ?? new AdminAuth();
+  const devProxyProof = process.env.STARDUST_DEV_PROXY_PROOF;
   const toolRuns = new ToolRuns(model, extensions, logs);
   const flowPublication = options.flowPublication ?? new FlowPublication();
   const streams = new Set<ServerResponse>();
@@ -158,6 +160,41 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const localConversationOwner = "local-conversation";
   let serverClosing = false;
   const webChannelAvailable = (): boolean => typeof extensions.channelEnabled !== "function" || !extensions.list().some((item) => item.id === "web-chat" && item.builtin) || extensions.channelEnabled("web-chat");
+  function overviewData(canEdit: boolean) {
+    const state = flowPublication.read();
+    const skills = typeof extensions.skillSnapshot === "function" ? extensions.skillSnapshot() : [];
+    const catalog = typeof extensions.flowCatalog === "function" ? extensions.flowCatalog() : [];
+    const published = resolvePublishedGraphs(state.published.connections), contextConfig = conversations?.contextFlowConfiguration();
+    const contextSwitch = contextConfig?.enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1";
+    const executionSwitch = options.toolExecutionFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1";
+    const toolSwitch = options.toolAvailabilityFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_FLOW === "1";
+    const skillSwitch = options.skillFlow?.enabled ?? process.env.STARDUST_WEB_SKILL_FLOW === "1";
+    const graphs = { context: contextConfig?.definition ?? published.context, tools: options.toolAvailabilityFlow?.definition ?? published.tools, execution: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow(), skill: options.skillFlow?.definition ?? builtInSkillFlow(skills) };
+    const connected = (flow: ExecutableFlow, graphId: string, from: string, to: string, port: string) => flow.graphs.find(graph => graph.id === graphId)?.edges.some(edge => edge.from.node === from && edge.from.port === "value" && edge.to.node === to && edge.to.port === port) ?? false;
+    const childId = (flow: ExecutableFlow, nodeId: string) => flow.graphs.find(graph => graph.id === flow.rootId)?.nodes.find(node => node.id === nodeId && node.type === "group")?.graphId ?? "";
+    const contextChild = childId(graphs.context, "context"), toolsChild = childId(graphs.tools, "tools");
+    const currentConnections = { recent: connected(graphs.context, contextChild, "recent", "assembler", "recent"), global: connected(graphs.context, contextChild, "global", "assembler", "global"), search: connected(graphs.tools, toolsChild, "search", "filter", "search") };
+    if (contextSwitch) {
+      const web = catalog.find(entry => entry.owner === "web-chat");
+      if (web?.contract && web.status !== "incompatible") web.contract = webContextDeclaration(web.contract.packageVersion, graphs.context);
+    }
+    const toolNames = typeof extensions.availableTools === "function" ? extensions.availableTools().map(tool => tool.name) : [];
+    const webAvailable = webChannelAvailable(), toolSupported = typeof model.chatWithTools === "function", toolGraph = toolSwitch || executionSwitch;
+    let modelConfigured: boolean | null = null;
+    try { if (typeof model.getConfig === "function") { const config = model.getConfig(); modelConfigured = Boolean(config.baseUrl && config.modelId); } } catch { /* Do not expose configuration errors or secrets. */ }
+    const extensionConnected = !toolGraph || connected(graphs.tools, toolsChild, "extensions", "filter", "extensions");
+    const toolCandidates = ["search_history", ...toolNames.filter(name => name !== "search_history")].map(name => {
+      const connectedForName = name === "search_history" ? !toolGraph || currentConnections.search : extensionConnected;
+      let allowed: boolean | undefined;
+      try { allowed = conversations?.agent.toolAllowed(name); } catch { /* Report unknown until a request validates settings. */ }
+      const status = !webAvailable || !toolSupported ? "当前 Web 模型路径不可用" : !connectedForName ? "执行图连线已断开" : allowed === false ? "Core 已禁用" : allowed === undefined ? "权限将在请求时检查" : "当前配置可用 · 请求时复核";
+      return { name, status };
+    });
+    const overview = buildFlowOverview({ publishedId: state.published.id, webAvailable, toolSupported, historyToolSupported: contextConfig?.historyToolSupported ?? toolSupported, modelConfigured, contextSwitch, toolSwitch, executionSwitch, skillSwitch, contextPublished: !contextConfig?.definition, toolsPublished: !options.toolAvailabilityFlow?.definition, graphs, catalog, availableSkills: skills.filter(item => item.available).length, registeredSkills: skills.length, tools: toolNames });
+    return { canEdit, editableConnections: { context: !contextConfig?.definition, tools: !options.toolAvailabilityFlow?.definition }, revision: canEdit ? state.revision : undefined, draft: canEdit ? state.draft : currentConnections, currentConnections, published: state.published, graphs, catalog, overview, toolCandidates,
+      skills: skills.map(item => ({ id: item.declaration.id, owner: item.declaration.owner, name: item.declaration.name, description: item.declaration.description, enabled: item.enabled, available: item.available, trusted: !!item.load, status: item.status })),
+      active: { context: contextSwitch, tools: toolSwitch || executionSwitch, execution: executionSwitch, skill: skillSwitch } };
+  }
   async function openConversations(): Promise<ConversationService> {
     if (!conversations) {
       conversationOpening ??= import("./conversation.js").then(({ ConversationService }) => new ConversationService(model));
@@ -171,7 +208,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     extensions.setChannelChat(async (message, signal) => (await openConversations()).agent.chatChannel(model, message.channelId, message.content, signal, message.eventId));
   }
 
-  const server = createServer(async (request, response) => {
+  const server: Server = createServer(async (request, response) => {
     let pathname: string;
     try {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -179,13 +216,26 @@ export function createStardustServer(options: AppOptions = {}): Server {
       sendJson(response, 400, { error: "INVALID_URL" });
       return;
     }
+    const trusted = (requireOrigin: boolean) => isTrustedLocalAccess(request, server.address(), requireOrigin, devProxyProof);
+    if (pathname.startsWith("/api/v1/") && !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
+      if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN" }); return; }
+    }
+    if (pathname === "/api/v1/flow-overview") {
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try { sendJson(response, 200, overviewData(trusted(false))); }
+      catch { sendJson(response, 500, { error: "FLOW_OVERVIEW_UNAVAILABLE" }); }
+      return;
+    }
     if (pathname === "/api/v1/flow-publication" || pathname.startsWith("/api/v1/flow-publication/")) {
-      if (process.env.STARDUST_FLOW_EDITOR !== "1") { sendJson(response, 403, { error: "FLOW_EDITOR_DISABLED" }); return; }
-      if (!admin.local(request) || !admin.session(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "AUTH_REQUIRED" }); return; }
+      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET")) { sendJson(response, 403, { error: "LOCAL_ACCESS_REQUIRED" }); return; }
       try {
         const state = flowPublication.read();
         if (request.method === "GET" && pathname === "/api/v1/flow-publication") {
-          sendJson(response, 200, { ...state, graphs: resolvePublishedGraphs(state.draft), active: { context: process.env.STARDUST_WEB_CONTEXT_FLOW === "1", tools: process.env.STARDUST_WEB_TOOL_FLOW === "1" || process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1", execution: process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1" } }); return;
+          const skills = typeof extensions.skillSnapshot === "function" ? extensions.skillSnapshot() : [];
+          const execution = options.toolExecutionFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1";
+          const tools = execution || (options.toolAvailabilityFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_FLOW === "1");
+          sendJson(response, 200, { ...state, graphs: { ...resolvePublishedGraphs(state.draft), skill: options.skillFlow?.definition ?? builtInSkillFlow(skills) }, skills: skills.map(item => ({ ...item.declaration, enabled: item.enabled, available: item.available, trusted: !!item.load, status: item.status })), skillWarnings: typeof extensions.skillWarnings === "function" ? extensions.skillWarnings() : [], active: { context: conversations?.contextFlowConfiguration().enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1", tools, execution, skill: options.skillFlow?.enabled ?? process.env.STARDUST_WEB_SKILL_FLOW === "1" } }); return;
         }
         if (request.method !== "POST" || !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
         const body = await readSetupBody(request, 4096);
@@ -201,12 +251,13 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
     if (pathname === "/api/v1/starcore-flows") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
-      if (!setup.getInitializationState().initialized || !admin.local(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try {
         const entries = typeof extensions.flowCatalog === "function" ? extensions.flowCatalog() : [];
-        if (process.env.STARDUST_FLOW_EDITOR === "1" && process.env.STARDUST_WEB_CONTEXT_FLOW === "1") {
+        const contextEnabled = conversations?.contextFlowConfiguration().enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1";
+        if (contextEnabled) {
           const web = entries.find(entry => entry.owner === "web-chat");
-          if (web?.contract && web.status !== "incompatible") web.contract = webContextDeclaration(web.contract.packageVersion, resolvePublishedGraphs(flowPublication.read().published.connections).context);
+          if (web?.contract && web.status !== "incompatible") web.contract = webContextDeclaration(web.contract.packageVersion, conversations?.contextFlowConfiguration().definition ?? resolvePublishedGraphs(flowPublication.read().published.connections).context);
         }
         sendJson(response, 200, { entries });
       }
@@ -217,7 +268,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/global-context" || pathname.startsWith("/api/v1/global-context/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const store = (await openConversations()).globalContext;
         if (pathname === "/api/v1/global-context" && request.method === "GET") { sendJson(response, 200, { owner: WEB_CONTEXT_OWNER, entries: store.entries(WEB_CONTEXT_OWNER), counts: store.counts(WEB_CONTEXT_OWNER), lastCompletedAt: store.lastCompletedAt(WEB_CONTEXT_OWNER) }); return; }
@@ -240,7 +291,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/agent/settings") {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!admin.local(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        if (!isLocalRead(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const store = await openConversations();
         const tools = [{ name: "search_history", description: "跨会话记忆 Tool" }, ...extensions.availableTools().filter((tool) => tool.name !== "search_history").map(({ name, description }) => ({ name, description }))];
         if (request.method === "GET") { sendJson(response, 200, { ...store.agent.settings(), tools: tools.map((tool) => ({ ...tool, enabled: store.agent.toolAllowed(tool.name) })) }); return; }
@@ -254,7 +305,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/conversations" || pathname.startsWith("/api/v1/conversations/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const activityRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/activity$/i.exec(pathname);
         if (activityRoute && request.method === "GET") {
@@ -310,15 +361,24 @@ export function createStardustServer(options: AppOptions = {}): Server {
           if (!webChannelAvailable()) { sendJson(response, 403, { error: "CHANNEL_DISABLED" }); return; }
           const requestId = fields.requestId;
           const content = fields.content;
-          const publishedGraphs = process.env.STARDUST_FLOW_EDITOR === "1" ? resolvePublishedGraphs(flowPublication.read().published.connections) : undefined;
+          const contextConfig = store.contextFlowConfiguration(), contextEnabled = contextConfig.enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1";
+          const executionEnabled = options.toolExecutionFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1";
+          const toolEnabled = executionEnabled || (options.toolAvailabilityFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_FLOW === "1");
+          const needsPublished = (contextEnabled && !contextConfig.definition) || (toolEnabled && !options.toolAvailabilityFlow?.definition);
+          const publishedGraphs = needsPublished ? resolvePublishedGraphs(flowPublication.read().published.connections) : undefined;
+          const contextDefinition = contextConfig.definition ?? publishedGraphs?.context;
           const controller = new AbortController();
+          const skillEnabled = options.skillFlow?.enabled ?? process.env.STARDUST_WEB_SKILL_FLOW === "1";
+          const skills = skillEnabled && typeof extensions.skillSnapshot === "function" ? extensions.skillSnapshot() : [];
+          const skillGraph = skillEnabled ? structuredClone(options.skillFlow?.definition ?? builtInSkillFlow(skills)) : undefined;
+          let assertSkills = () => {};
+          let skillBudget: number | undefined;
           const execute = async (context: import("./conversation-context.js").ConversationContextMessage[], activity: (event: Omit<import("./history-agent.js").ModelActivity, "requestId">) => void, evidence: (item: import("./history-search.js").HistoryEvidence) => void) => {
             const key = `${id}/${requestId}`;
             const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
-            const executionEnabled = options.toolExecutionFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_EXECUTION_FLOW === "1";
-            const enabled = executionEnabled || (options.toolAvailabilityFlow?.enabled ?? process.env.STARDUST_WEB_TOOL_FLOW === "1");
-            const selected = enabled ? await runWebToolFlow(publishedGraphs?.tools ?? options.toolAvailabilityFlow?.definition ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
-            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => (!selected || selected.has(name)) && coreAllows(name), ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}) });
+            const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
+            assertSkills();
+            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => (!selected || selected.has(name)) && coreAllows(name), ...(skillBudget === undefined ? {} : { maxPromptBytes: skillBudget }), ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}) });
             conversationRuns.set(key, runId);
             try {
               while (!serverClosing) {
@@ -333,7 +393,12 @@ export function createStardustServer(options: AppOptions = {}): Server {
           const onClose = () => { if (!response.writableEnded) controller.abort(); };
           response.once("close", onClose);
           let messages;
-          try { messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined, { signal: controller.signal, ...(publishedGraphs ? { flowDefinition: publishedGraphs.context } : {}) }); }
+          try { messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined, { signal: controller.signal, ...(contextDefinition ? { flowDefinition: contextDefinition } : {}), ...(skillGraph ? { prepareSkills: async (context, budget) => {
+            const result = await runSkillFlow(skillGraph, skills, content, context, budget, controller.signal);
+            if (result.message) skillBudget = budget;
+            assertSkills = () => { if (controller.signal.aborted || result.loaded.some(id => { const skill = skills.find(item => item.declaration.id === id); return !skill || skill.signal?.aborted || !skill.isAvailable(); })) throw new SkillFlowError("SKILL_FLOW_CANCELLED"); };
+            return { message: result.message, assertAvailable: assertSkills };
+          } } : {}) }); }
           finally { response.off("close", onClose); }
           if (!response.destroyed) sendJson(response, 200, { messages });
           return;
@@ -343,31 +408,23 @@ export function createStardustServer(options: AppOptions = {}): Server {
         if (response.destroyed) return;
         if (error instanceof WebContextFlowError) { sendJson(response, error.code === "CONTEXT_FLOW_CANCELLED" ? 499 : error.reason === "CONTEXT_TOO_LARGE" ? 400 : 500, { error: error.code, reason: error.reason }); return; }
         if (error instanceof WebToolFlowError) { sendJson(response, error.code === "TOOL_FLOW_CANCELLED" ? 499 : 500, { error: error.code }); return; }
+        if (error instanceof SkillFlowError) { sendJson(response, error.code === "SKILL_FLOW_CANCELLED" ? 499 : 500, { error: error.code }); return; }
         const code = error instanceof Error && ["NOT_FOUND", "INVALID_INPUT", "CONTEXT_TOO_LARGE", "CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "CONVERSATION_FAILED";
         sendJson(response, code === "NOT_FOUND" ? 404 : code === "INVALID_INPUT" || code === "CONTEXT_TOO_LARGE" ? 400 : ["CONVERSATION_BUSY", "REQUEST_ID_CONFLICT", "RETRY_OUTDATED", "APPROVAL_UNAVAILABLE"].includes(code) ? 409 : 500, { error: code });
       }
       return;
     }
-    if (pathname.startsWith("/api/v1/admin/") || pathname === "/api/v1/tool-runs" || pathname.startsWith("/api/v1/tool-runs/")) {
+    if (pathname === "/api/v1/tool-runs" || pathname.startsWith("/api/v1/tool-runs/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!admin.local(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
-        if (pathname === "/api/v1/admin/state" && request.method === "GET") { sendJson(response, 200, { configured: admin.configuredSecurely(), authenticated: Boolean(admin.session(request)) }); return; }
+        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (request.method === "POST") {
           if (!request.headers.origin || !isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
           if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
           let body: unknown; try { body = await readSetupBody(request, 32768); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
           if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
           const fields = body as Record<string, unknown>;
-          if (pathname === "/api/v1/admin/login") {
-            if (Object.keys(fields).length !== 1 || typeof fields.token !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
-            const session = admin.login(fields.token);
-            if (!session) { sendJson(response, 401, { error: "AUTH_FAILED" }); return; }
-            response.setHeader("Set-Cookie", `stardust_admin=${session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`);
-            sendJson(response, 200, { authenticated: true }); return;
-          }
-          const owner = pathname.startsWith("/api/v1/tool-runs") ? localConversationOwner : admin.session(request);
-          if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
+          const owner = localConversationOwner;
           if (pathname === "/api/v1/tool-runs") {
             if (Object.keys(fields).length !== 1 || typeof fields.message !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
             const id = toolRuns.start(owner, fields.message); sendJson(response, 202, { id }); return;
@@ -379,8 +436,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
           }
         } else if (request.method === "GET") {
           if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
-          const owner = pathname.startsWith("/api/v1/tool-runs") ? localConversationOwner : admin.session(request);
-          if (!owner) { sendJson(response, 401, { error: "AUTH_REQUIRED" }); return; }
+          const owner = localConversationOwner;
           const match = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})$/.exec(pathname);
           if (match) { sendJson(response, 200, toolRuns.get(owner, match[1]!)); return; }
         }
@@ -507,7 +563,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         if (targetsMatch && request.method === "GET") { sendJson(response, 200, { targets: extensions.capabilityTargets(targetsMatch[1]!) }); return; }
         if (request.method !== "POST") throw new ExtensionError("METHOD_NOT_ALLOWED", 405);
         if (!isSameOrigin(request)) throw new ExtensionError("INVALID_ORIGIN", 403);
-        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test|tool)$/.exec(pathname);
+        const match = /^\/api\/v1\/extensions\/([a-z0-9-]+)\/(install|config|enable|disable|uninstall|capability-test|tool|skill)$/.exec(pathname);
         if (!match) throw new ExtensionError("EXTENSION_NOT_FOUND", 404);
         const multipartCapability = match[2] === "capability-test" && /^multipart\/form-data\s*;/i.test(request.headers["content-type"] ?? "");
         if (!multipartCapability && !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ExtensionError("INVALID_INPUT");
@@ -524,6 +580,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
           case "disable": if (Object.keys(fields).length) throw new ExtensionError("INVALID_INPUT"); await extensions.disable(id); break;
           case "uninstall": if (Object.keys(fields).length !== 1 || typeof fields.deleteConfig !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.uninstall(id, fields.deleteConfig); break;
           case "tool": if (Object.keys(fields).length !== 2 || typeof fields.name !== "string" || typeof fields.enabled !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.setToolEnabled(id, fields.name, fields.enabled); break;
+          case "skill": if (Object.keys(fields).length !== 2 || typeof fields.id !== "string" || typeof fields.enabled !== "boolean") throw new ExtensionError("INVALID_INPUT"); await extensions.setSkillEnabled(id, fields.id, fields.enabled); break;
           case "capability-test": {
             const allowed = new Set(["targetId", "kind", "requestId", "mode", "stream", "imageUrl1", "imageUrl2", "imageFiles"]);
             const localImageTest = fields.kind === "private-markdown-local-multi-image" || fields.kind === "group-markdown-local-multi-image";

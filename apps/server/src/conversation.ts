@@ -31,6 +31,11 @@ export class ConversationService {
   readonly globalContext: GlobalContextService;
   readonly agent: AgentCore;
 
+  /** Read-only runtime configuration for the flow overview; no request data is exposed. */
+  contextFlowConfiguration(): { enabled?: boolean; definition?: ExecutableFlow; historyToolSupported: boolean } {
+    return { enabled: this.options.contextFlow?.enabled, definition: this.options.contextFlow?.definition && structuredClone(this.options.contextFlow.definition), historyToolSupported: typeof this.model.chatWithTools === "function" };
+  }
+
   constructor(private readonly model: ConversationModel, path = join(projectConfigRoot, "data", "conversations.sqlite"), private readonly budgetBytes = 48_000, private readonly recentMessageLimit = 50, private readonly options: ConversationOptions = {}) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -94,7 +99,7 @@ export class ConversationService {
   searchHistory(input: unknown, onResult?: (evidence: HistoryEvidence) => void) {
     return searchHistory(this.db, WEB_CONTEXT_OWNER, input, onResult);
   }
-  async submit(id: string, requestId: string, content: string, retry = false, execute?: (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>, options: { signal?: AbortSignal; flowDefinition?: ExecutableFlow } = {}): Promise<ConversationMessage[]> {
+  async submit(id: string, requestId: string, content: string, retry = false, execute?: (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>, options: { signal?: AbortSignal; flowDefinition?: ExecutableFlow; prepareSkills?: (context: ConversationContextMessage[], budgetBytes: number) => Promise<{ message?: ConversationContextMessage; assertAvailable: () => void }> } = {}): Promise<ConversationMessage[]> {
     const conversation = this.get(id);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) || typeof content !== "string" || !content.trim() || Buffer.byteLength(content, "utf8") > 32_000) throw new Error("INVALID_INPUT");
     const existing = this.requestMessages(id, requestId);
@@ -124,6 +129,15 @@ export class ConversationService {
         context = assembled?.messages ?? buildConversationContext(history.map(({ role, content: text }) => ({ role, content: text })), content, this.budgetBytes, [], this.recentMessageLimit);
         selectedEntryIds = assembled?.selectedEntryIds ?? [];
       }
+      let assertSkills = () => {};
+      if (options.prepareSkills && conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID) {
+        const hasSystem = context.some(message => message.role === "system");
+        const withInstructions: ConversationContextMessage[] = hasSystem ? context : [{ role: "system", content: this.agent.instructions() }, ...context];
+        const skills = await options.prepareSkills(withInstructions, this.budgetBytes);
+        assertSkills = skills.assertAvailable;
+        if (skills.message) context = [...withInstructions.slice(0, -1), skills.message, ...withInstructions.slice(-1)];
+        assertSkills();
+      }
       for (const entryId of selectedEntryIds) logger.write("DEBUG", "context", "已选取全局上下文条目。", { requestId, code: entryId });
       const now = new Date().toISOString();
       this.db.exec("BEGIN IMMEDIATE");
@@ -139,7 +153,7 @@ export class ConversationService {
       try {
         const key = `${id}/${requestId}`;
         const setActivity = (activity: Omit<ModelActivity, "requestId">) => this.activities.set(key, { requestId, ...activity });
-        try { reply = execute ? await execute(context, setActivity, (item) => { if (evidence.size < 30 && !evidence.has(item.sequence)) evidence.set(item.sequence, item); }) : await this.model.chatContext(context); }
+        try { assertSkills(); reply = execute ? await execute(context, setActivity, (item) => { if (evidence.size < 30 && !evidence.has(item.sequence)) evidence.set(item.sequence, item); }) : await this.model.chatContext(context); }
         finally { this.activities.delete(key); }
         if (typeof reply !== "string" || !reply.trim()) throw new Error("INVALID_RESPONSE");
       } catch (error) {

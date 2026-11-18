@@ -8,7 +8,7 @@ import type { HistoryResult } from "./history-search.js";
 import { runToolExecutionFlow } from "./web-tool-execution-flow.js";
 import type { ExecutableFlow } from "./executable-flow.js";
 
-type InternalTools = { searchHistory: (input: unknown) => HistoryResult[]; activity: (event: Omit<ModelActivity, "requestId">) => void; allowTool?: (name: string) => boolean; executionFlow?: ExecutableFlow };
+type InternalTools = { searchHistory: (input: unknown) => HistoryResult[]; activity: (event: Omit<ModelActivity, "requestId">) => void; allowTool?: (name: string) => boolean; executionFlow?: ExecutableFlow; maxPromptBytes?: number };
 
 type CallView = { id: string; name: string; status: string; input?: ToolInput; approval?: ToolApproval; expiresAt?: string; result?: unknown };
 type Run = {
@@ -34,6 +34,7 @@ export class ToolRuns {
     const prompt = `以下是已知的可用消息渠道及目标引用。仅可使用这些引用；同类型多个目标无法明确区分时必须询问用户，不可猜测。\n${JSON.stringify(targets)}`;
     const messages: ModelTurnMessage[] = history ? structuredClone(history) : [{ role: "user", content: text }];
     const scopedInternal = internal?.executionFlow ? { ...internal, executionFlow: structuredClone(internal.executionFlow) } : internal;
+    if (scopedInternal?.maxPromptBytes !== undefined && [prompt, ...messages.map(message => typeof message.content === "string" ? message.content : "")].reduce((total, content) => total + Buffer.byteLength(content, "utf8") + 32, 0) > scopedInternal.maxPromptBytes) throw new Error("CONTEXT_TOO_LARGE");
     const run: Run = { id: randomUUID(), owner, status: "working", messages: [{ role: "system", content: prompt }, ...messages], calls: [], queue: [], count: 0, searches: 0, internal: scopedInternal, created: Date.now(), controller: new AbortController() };
     this.runs.set(run.id, run); void this.advance(run); return run.id;
   }

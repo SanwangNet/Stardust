@@ -58,60 +58,75 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
     async function receive(message: QQBotInboundMessage): Promise<void> {
       const eventId = randomUUID();
       const scope = message.kind === "group" ? "group" : message.kind === "c2c" ? "private" : "other";
-      const mentionsPresent = message.mentions !== undefined && message.mentions !== null;
-      const mentions = Array.isArray(message.mentions) ? message.mentions : undefined;
-      const hasGroupOpenid = typeof message.groupOpenid === "string" && Boolean(message.groupOpenid.trim());
-      let mentionBranch = "not_applicable";
-      if (message.kind === "group") {
-        if (message.rawEventType === "GROUP_AT_MESSAGE_CREATE") mentionBranch = "official_at_event";
-        else if (message.rawEventType !== "GROUP_MESSAGE_CREATE") mentionBranch = "unsupported_group_event";
-        else if (mentions?.some((mention) => mention?.is_you === true)) mentionBranch = "mentions_is_you";
-        else if (config.appId && typeof message.content === "string" && (message.content.includes(`<@${config.appId}>`) || message.content.includes(`<@!${config.appId}>`))) mentionBranch = "content_appid_marker";
-        else mentionBranch = "no_self_mention";
-      } else if (message.kind === "c2c") mentionBranch = "private_event";
-      const rawEventType = typeof message.rawEventType === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(message.rawEventType) ? message.rawEventType : "UNAVAILABLE";
-      const kind = ["c2c", "group", "guild", "dm"].includes(message.kind) ? message.kind : "unknown";
-      const msgType = typeof message.msgType === "number" && Number.isSafeInteger(message.msgType) && message.msgType >= 0 && message.msgType <= 2_147_483_647 ? message.msgType : null;
-      const diagnostic = { eventId, scope, rawEventType, kind, msgType, mentionsPresent, mentionCount: mentions?.length ?? 0, hasGroupOpenid, mentionBranch };
-      host.log("DEBUG", "收到 QQ 消息事件。", diagnostic);
-      const filtered = (reason: string): void => host.log("DEBUG", "QQ 消息已过滤。", { ...diagnostic, reason });
-      if (stopped || controller.signal.aborted) { filtered("extension_stopped"); return; }
-      if (message.senderIsBot === true) { filtered("bot_sender"); return; }
-      if (message.kind === "c2c") {
-        if (message.rawEventType !== "C2C_MESSAGE_CREATE") { filtered("private_unexpected_event_type"); return; }
-      } else if (message.kind === "group") {
-        if (mentionBranch === "unsupported_group_event") { filtered("group_unsupported_event_type"); return; }
-        if (mentionBranch === "no_self_mention") { filtered("group_no_self_mention"); return; }
-        if (!hasGroupOpenid) { filtered("missing_group_openid"); return; }
-        if (message.replyTarget?.targetId !== message.groupOpenid) { filtered("group_reply_target_mismatch"); return; }
-      } else { filtered("unsupported_message_kind"); return; }
-      if (typeof message.messageId !== "string" || !message.messageId || message.messageId.length > 1024) { filtered("invalid_message_id"); return; }
-      if (typeof message.senderId !== "string" || !message.senderId) { filtered("missing_sender"); return; }
-      if (typeof message.replyTarget?.targetId !== "string" || !message.replyTarget.targetId || message.replyTarget.scope !== message.kind || message.replyTarget.msgId !== message.messageId) { filtered("invalid_reply_target"); return; }
-      if (typeof message.content !== "string" || !message.content.trim() || Buffer.byteLength(message.content, "utf8") > 32 * 1024) { filtered("empty_or_oversized_content"); return; }
-      const now = Date.now();
-      for (const [id, time] of seen) if (now - time > 300_000) seen.delete(id);
-      for (const [id, time] of replies) if (now - time > 300_000) replies.delete(id);
-      for (const [id, times] of conversations) if (times.every((time) => now - time >= 60_000)) conversations.delete(id);
-      const id = `${message.kind}:${message.messageId}`;
-      if (seen.has(id)) { filtered("duplicate"); return; }
-      seen.set(id, now);
-      if (seen.size > 4096) seen.delete(seen.keys().next().value!);
-      const conversation = `${message.kind}:${message.replyTarget.targetId}`;
+      function makeDiagnostic() {
+        const mentionsPresent = message.mentions !== undefined && message.mentions !== null;
+        const mentions = Array.isArray(message.mentions) ? message.mentions : undefined;
+        const hasGroupOpenid = typeof message.groupOpenid === "string" && Boolean(message.groupOpenid.trim());
+        let mentionBranch = "not_applicable";
+        if (message.kind === "group") {
+          if (message.rawEventType === "GROUP_AT_MESSAGE_CREATE") mentionBranch = "official_at_event";
+          else if (message.rawEventType !== "GROUP_MESSAGE_CREATE") mentionBranch = "unsupported_group_event";
+          else if (mentions?.some((mention) => mention?.is_you === true)) mentionBranch = "mentions_is_you";
+          else if (config.appId && typeof message.content === "string" && (message.content.includes(`<@${config.appId}>`) || message.content.includes(`<@!${config.appId}>`))) mentionBranch = "content_appid_marker";
+          else mentionBranch = "no_self_mention";
+        } else if (message.kind === "c2c") mentionBranch = "private_event";
+        const rawEventType = typeof message.rawEventType === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(message.rawEventType) ? message.rawEventType : "UNAVAILABLE";
+        const kind = ["c2c", "group", "guild", "dm"].includes(message.kind) ? message.kind : "unknown";
+        const msgType = typeof message.msgType === "number" && Number.isSafeInteger(message.msgType) && message.msgType >= 0 && message.msgType <= 2_147_483_647 ? message.msgType : null;
+        return { eventId, scope, rawEventType, kind, msgType, mentionsPresent, mentionCount: mentions?.length ?? 0, hasGroupOpenid, mentionBranch };
+      }
+      let diagnostic: ReturnType<typeof makeDiagnostic> | undefined;
+      const getDiagnostic = () => diagnostic ??= makeDiagnostic();
+      const logDiagnostic = () => host.log("DEBUG", "收到 QQ 消息事件。", getDiagnostic());
+      const filtered = (reason: string): void => host.log("DEBUG", "QQ 消息已过滤。", { ...getDiagnostic(), reason });
+      let now = 0, conversation = "", reserved = false;
       const digest = (content: string) => createHash("sha256").update(content.trim()).digest("hex");
-      if (replies.has(`${conversation}:${digest(message.content)}`)) { filtered("reply_echo"); return; }
-      const recent = (conversations.get(conversation) ?? []).filter((time) => now - time < 60_000);
-      if (recent.length >= 5) { filtered("rate_limit"); return; }
-      recent.push(now); conversations.set(conversation, recent);
-      if (conversations.size > 4096) conversations.delete(conversations.keys().next().value!);
-      if (pending >= 20) { filtered("queue_full"); return; }
+      const filterMessage = (): boolean => {
+        const { mentionBranch, hasGroupOpenid } = getDiagnostic();
+        if (stopped || controller.signal.aborted) { filtered("extension_stopped"); return false; }
+        if (message.senderIsBot === true) { filtered("bot_sender"); return false; }
+        if (message.kind === "c2c") {
+          if (message.rawEventType !== "C2C_MESSAGE_CREATE") { filtered("private_unexpected_event_type"); return false; }
+        } else if (message.kind === "group") {
+          if (mentionBranch === "unsupported_group_event") { filtered("group_unsupported_event_type"); return false; }
+          if (mentionBranch === "no_self_mention") { filtered("group_no_self_mention"); return false; }
+          if (!hasGroupOpenid) { filtered("missing_group_openid"); return false; }
+          if (message.replyTarget?.targetId !== message.groupOpenid) { filtered("group_reply_target_mismatch"); return false; }
+        } else { filtered("unsupported_message_kind"); return false; }
+        if (typeof message.messageId !== "string" || !message.messageId || message.messageId.length > 1024) { filtered("invalid_message_id"); return false; }
+        if (typeof message.senderId !== "string" || !message.senderId) { filtered("missing_sender"); return false; }
+        if (typeof message.replyTarget?.targetId !== "string" || !message.replyTarget.targetId || message.replyTarget.scope !== message.kind || message.replyTarget.msgId !== message.messageId) { filtered("invalid_reply_target"); return false; }
+        if (typeof message.content !== "string" || !message.content.trim() || Buffer.byteLength(message.content, "utf8") > 32 * 1024) { filtered("empty_or_oversized_content"); return false; }
+        now = Date.now();
+        for (const [id, time] of seen) if (now - time > 300_000) seen.delete(id);
+        for (const [id, time] of replies) if (now - time > 300_000) replies.delete(id);
+        for (const [id, times] of conversations) if (times.every((time) => now - time >= 60_000)) conversations.delete(id);
+        const id = `${message.kind}:${message.messageId}`;
+        if (seen.has(id)) { filtered("duplicate"); return false; }
+        seen.set(id, now);
+        if (seen.size > 4096) seen.delete(seen.keys().next().value!);
+        conversation = `${message.kind}:${message.replyTarget.targetId}`;
+        if (replies.has(`${conversation}:${digest(message.content)}`)) { filtered("reply_echo"); return false; }
+        const recent = (conversations.get(conversation) ?? []).filter((time) => now - time < 60_000);
+        if (recent.length >= 5) { filtered("rate_limit"); return false; }
+        recent.push(now); conversations.set(conversation, recent);
+        if (conversations.size > 4096) conversations.delete(conversations.keys().next().value!);
+        if (pending >= 20) { filtered("queue_full"); return false; }
+        pending++; reserved = true;
+        return true;
+      };
+      let accepted: boolean;
+      if (host.qqInputFlow) {
+        try { accepted = await host.qqInputFlow({ eventId, messageId: typeof message.messageId === "string" ? message.messageId : undefined, conversationId: message.replyTarget?.targetId, signal: controller.signal, diagnostic: logDiagnostic, filter: filterMessage }) === "allow"; }
+        catch { if (reserved) pending--; if (!stopped) host.log("ERROR", "QQ 入站执行图失败，消息未处理。", { eventId, scope, code: "QQ_FLOW_FAILED" }); return; }
+      } else { logDiagnostic(); accepted = filterMessage(); }
+      if (!accepted || stopped || controller.signal.aborted) { if (reserved) pending--; return; }
       // The opaque ID alone is exposed; actual targets remain in bounded runtime memory.
       const messageTime = Date.parse(message.timestamp);
       const expiry = Number.isFinite(messageTime) ? Math.min(messageTime, now) + (message.kind === "c2c" ? 60 : 5) * 60_000 : null;
       capabilityTargets.push({ id: randomUUID(), targetOpenid: message.replyTarget.targetId, messageId: message.messageId, scope: message.kind === "c2c" ? "private" : "group", receivedAt: new Date(now).toISOString(), replyExpiresAt: expiry === null ? null : new Date(expiry).toISOString() });
       if (capabilityTargets.length > 50) capabilityTargets.shift();
-      host.log("INFO", "QQ 消息已接受。", diagnostic);
-      pending++;
+      host.log("INFO", "QQ 消息已接受。", getDiagnostic());
       const work = async (): Promise<void> => {
         try {
           const wait = Math.max(0, 1000 - (Date.now() - lastAccepted));

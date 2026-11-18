@@ -15,6 +15,7 @@ export type ResolvedGroupInterface = { groupId: string; graphId: string; inputs:
 
 const trustedBindings: Readonly<Record<string, { owner: string; capability: string }>> = Object.freeze({
   "core:web-context": { owner: "web-chat", capability: "channel" },
+  "core:qq-input": { owner: "qq-bot", capability: "channel" },
 });
 const webBindings: Readonly<Record<string, string>> = Object.freeze({ "web-chat:recent": "web-recent", "web-chat:global": "web-global", "web-chat:assembler": "web-assembler", "web-chat:json-output": "json-output" });
 const text = (x: unknown): x is string => typeof x === "string" && x.trim().length > 0 && x.length <= 300;
@@ -36,11 +37,14 @@ export function validateStarcoreFlow(manifest: ExtensionManifest, declaration: S
     ids.add(node.id);
     if (node.capability !== undefined && node.capability !== "channel" && !(node.capability.startsWith("tool:") && toolNames.includes(node.capability.slice(5)))) throw new Error("FLOW_CAPABILITY_UNAVAILABLE");
     if (node.capability === "channel" && manifest.type !== "channel") throw new Error("FLOW_CAPABILITY_UNAVAILABLE");
+    if (manifest.id === "qq-bot" && ["qq-bot:accept", "qq-bot:diagnostic"].includes(node.id) && (!node.executable || node.adapter !== "core:qq-input" || node.capability !== "channel")) throw new Error("FLOW_ADAPTER_UNTRUSTED");
     if (node.executable) {
       const binding = node.adapter && trustedBindings[node.adapter];
       if (!binding || binding.owner !== manifest.id || binding.capability !== node.capability) throw new Error("FLOW_ADAPTER_UNTRUSTED");
       const original = webBindings[node.id];
-      const actual = original && createWebContextRegistry({ recent: () => [], global: () => [] }, { conversationId: "catalog", current: "", instructions: "", budgetBytes: 48000, recentLimit: 50, useHistoryTool: true }).get(original);
+      const webActual = original && createWebContextRegistry({ recent: () => [], global: () => [] }, { conversationId: "catalog", current: "", instructions: "", budgetBytes: 48000, recentLimit: 50, useHistoryTool: true }).get(original);
+      const qqPort = { value: { type: "string" as const, required: true } };
+      const actual = node.adapter === "core:qq-input" && node.id === "qq-bot:accept" ? { role: "node", inputs: { ...qqPort, diagnostic: { type: "string" as const } }, outputs: { value: { type: "string" as const } } } : node.adapter === "core:qq-input" && node.id === "qq-bot:diagnostic" ? { role: "node", inputs: qqPort, outputs: { value: { type: "string" as const } } } : webActual;
       if (!actual || JSON.stringify(canonical({ role: node.role, inputs: node.inputs, outputs: node.outputs })) !== JSON.stringify(canonical({ role: actual.role, inputs: actual.inputs, outputs: actual.outputs }))) throw new Error("FLOW_ADAPTER_UNTRUSTED");
     } else if (node.adapter !== undefined) throw new Error("FLOW_ADAPTER_UNTRUSTED");
     try { registry.register(node.id, { role: node.role, inputs: node.inputs, outputs: node.outputs, execute: () => { throw new Error("FLOW_DECLARATION_NOT_EXECUTABLE"); } }); }
@@ -113,8 +117,15 @@ export function webContextDeclaration(version: string, definition: ExecutableFlo
   return { protocol: 1, owner: "web-chat", packageVersion: version, nodes, groups: [{ id: "web-chat:web", owner: "web-chat", name: "Web 上下文", description: "现有 Web 上下文图的只读注册视图；执行状态以 Core 开关为准。", editable: false, flow }] };
 }
 
-/** QQ's present channel path is explanatory; it is not a unified context runtime. */
+/** Core binds only these fixed QQ node IDs; no unified context is implied. */
 export function qqInputDeclaration(version: string): StarcoreFlowContract {
-  const id = "qq-bot:input", node = "qq-bot:accept", port = { value: { type: "string" as const, required: true } };
-  return { protocol: 1, owner: "qq-bot", packageVersion: version, nodes: [{ id: node, owner: "qq-bot", name: "QQ 入站消息过滤", description: "私聊和群聊 @消息经现有 QQ 星核过滤；此节点为说明，不是图执行器。", category: "channel", role: "node", inputs: port, outputs: { value: { type: "string" } }, executable: false, capability: "channel" }], groups: [{ id, owner: "qq-bot", name: "QQ 消息入口", description: "现有 QQ 消息入口的说明；尚未接入统一上下文图。", editable: false, flow: { version: 1, rootId: id, graphs: [{ id, nodes: [{ id: "input", type: "input" }, { id: "accept", type: node }, { id: "output", type: "output" }], edges: [{ from: { node: "input", port: "value" }, to: { node: "accept", port: "value" } }, { from: { node: "accept", port: "value" }, to: { node: "output", port: "value" } }], interface: { inputs: [{ id: "message", node: "input", required: true, label: "QQ 消息请求" }], outputs: [{ id: "result", node: "output", label: "现有渠道处理" }] } }] } }] };
+  const id = "qq-bot:input", child = "qq-bot:filter", port = { value: { type: "string" as const, required: true } }, out = { value: { type: "string" as const } };
+  const edge = (from: string, to: string, target = "value", source = "value") => ({ from: { node: from, port: source }, to: { node: to, port: target } });
+  return { protocol: 1, owner: "qq-bot", packageVersion: version, nodes: [
+    { id: "qq-bot:accept", owner: "qq-bot", name: "QQ 入站消息过滤", description: "执行现有 QQ 事件、@、去重、回声及限流规则。", category: "channel", role: "node", inputs: { ...port, diagnostic: { type: "string" } }, outputs: out, executable: true, capability: "channel", adapter: "core:qq-input" },
+    { id: "qq-bot:diagnostic", owner: "qq-bot", name: "接收事件诊断", description: "记录现有脱敏接收诊断；断开时不记录。", category: "channel", role: "node", inputs: port, outputs: out, executable: true, capability: "channel", adapter: "core:qq-input" },
+  ], groups: [{ id, owner: "qq-bot", name: "QQ 消息入口", description: "QQ 入站过滤；不包括统一上下文或模型调用。", editable: false, flow: { version: 1, rootId: id, graphs: [
+    { id, nodes: [{ id: "input", type: "input" }, { id: "filter", type: "group", graphId: child }, { id: "output", type: "output" }], edges: [edge("input", "filter", "message"), edge("filter", "output", "value", "result")], interface: { inputs: [{ id: "message", node: "input", required: true, label: "QQ 入站消息" }], outputs: [{ id: "result", node: "output", label: "交给现有 QQ 处理链" }] } },
+    { id: child, nodes: [{ id: "input", type: "input" }, { id: "diagnostic", type: "qq-bot:diagnostic" }, { id: "accept", type: "qq-bot:accept" }, { id: "output", type: "output" }], edges: [edge("input", "diagnostic"), edge("input", "accept"), edge("diagnostic", "accept", "diagnostic"), edge("accept", "output")], interface: { inputs: [{ id: "message", node: "input", required: true, label: "QQ 入站消息" }], outputs: [{ id: "result", node: "output", label: "交给现有 QQ 处理链" }] } },
+  ] } }] };
 }

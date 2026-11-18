@@ -30,8 +30,8 @@ test("Web, QQ and another starcore register against common graph contracts", () 
   const web = registry.get("web-chat"); assert.equal(web.groups[0].flow.graphs[1].interface.inputs[0].label, "Web 对话请求");
   const iface = resolveStarcoreInterfaces(web).find(item => item.graphId === "web-chat:context");
   assert.deepEqual([iface.inputs[0].id, iface.inputs[0].type, iface.inputs[0].required, iface.outputs[0].type], ["current", "string", true, "json"]);
-  const qq = registry.get("qq-bot"); assert.equal(qq.groups[0].flow.graphs[0].interface.inputs[0].label, "QQ 消息请求");
-  assert.ok(qq.nodes.every(n => !n.executable)); assert.throws(() => registry.execute(), /FLOW_ADAPTER_UNAVAILABLE/);
+  const qq = registry.get("qq-bot"); assert.equal(qq.groups[0].flow.graphs[0].interface.inputs[0].label, "QQ 入站消息");
+  assert.ok(qq.nodes.every(n => n.executable)); assert.throws(() => registry.execute(), /FLOW_ADAPTER_UNAVAILABLE/);
   assert.throws(() => registry.register(webChatExtension.manifest, webChatExtension.flow), /DUPLICATE_FLOW_OWNER/);
 });
 

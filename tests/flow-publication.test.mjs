@@ -8,7 +8,6 @@ import { isAbsolute, join, relative } from "node:path";
 import { FlowPublication } from "../apps/server/dist/flow-publication.js";
 import { ConversationService } from "../apps/server/dist/conversation.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
-import { AdminAuth } from "../apps/server/dist/admin-auth.js";
 
 test("draft CAS, validation, atomic publish and restart recovery", async () => {
   const dir = mkdtempSync(join(tmpdir(), "stardust-flow-")), path = join(dir, "flows.json"), store = new FlowPublication(path);
@@ -26,8 +25,8 @@ test("draft CAS, validation, atomic publish and restart recovery", async () => {
 });
 
 test("authorized Web publish changes next request but not draft or in-flight request", async t => {
-  const env = ["STARDUST_FLOW_EDITOR", "STARDUST_WEB_CONTEXT_FLOW", "STARDUST_WEB_TOOL_FLOW"], previous = env.map(k => process.env[k]);
-  env.forEach(k => { process.env[k] = "1"; });
+  const env = ["STARDUST_WEB_CONTEXT_FLOW", "STARDUST_WEB_TOOL_FLOW", "STARDUST_FLOW_EDITOR", "STARDUST_ADMIN_TOKEN"], previous = env.map(k => process.env[k]);
+  process.env.STARDUST_WEB_CONTEXT_FLOW = "1"; process.env.STARDUST_WEB_TOOL_FLOW = "1"; process.env.STARDUST_FLOW_EDITOR = "0"; delete process.env.STARDUST_ADMIN_TOKEN;
   const dir = mkdtempSync(join(tmpdir(), "stardust-flow-http-")), flow = new FlowPublication(join(dir, "flows.json"));
   const contexts = [], toolsSeen = [], searches = []; let globalReads = 0, recentReads = 0, hold, entered;
   const model = { chatContext: async () => "unused", chatWithTools: async (messages, tools) => {
@@ -40,14 +39,13 @@ test("authorized Web publish changes next request but not draft or in-flight req
   store.globalContext.entries = () => { globalReads++; return [{ id: "g", topic: "猫", content: "猫在窗台", sources: [] }]; };
   store.searchHistory = () => { searches.push(true); return []; };
   const extensions = { restore: async () => {}, shutdown: async () => {}, availableTools: () => [], availableTargets: () => [] };
-  const token = "a-secure-test-token-at-least-32-characters";
-  const server = createStardustServer({ setupService: { getInitializationState: () => ({ initialized: true }) }, extensionManager: extensions, modelService: model, conversationService: store, adminAuth: new AdminAuth(token), flowPublication: flow });
+  const server = createStardustServer({ setupService: { getInitializationState: () => ({ initialized: true }) }, extensionManager: extensions, modelService: model, conversationService: store, flowPublication: flow });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { server.closeAllConnections(); await new Promise(r => server.close(r)); env.forEach((k, i) => previous[i] === undefined ? delete process.env[k] : process.env[k] = previous[i]); const rel = relative(tmpdir(), dir); assert.ok(rel && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(rel)); rmSync(dir, { recursive: true, force: true }); });
   const origin = `http://127.0.0.1:${server.address().port}`;
   const post = (url, data, cookie = "") => fetch(origin + url, { method: "POST", headers: { origin, cookie, "content-type": "application/json" }, body: JSON.stringify(data) });
-  assert.equal((await fetch(origin + "/api/v1/flow-publication")).status, 403);
-  const login = await post("/api/v1/admin/login", { token }), cookie = login.headers.get("set-cookie").split(";")[0];
+  assert.equal((await fetch(origin + "/api/v1/flow-publication")).status, 200);
+  const cookie = "";
   const get = async () => (await (await fetch(origin + "/api/v1/flow-publication", { headers: { cookie } })).json());
   let state = await get(); assert.equal(state.graphs.context.graphs[1].id, "context"); assert.equal(state.graphs.tools.graphs[1].interface.inputs[0].label, "模型请求准备");
   assert.equal((await post("/api/v1/flow-publication/save", { revision: state.revision, connections: { recent: true, global: false, search: true, type: "tool" } }, cookie)).status, 400);

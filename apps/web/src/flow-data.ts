@@ -27,7 +27,6 @@ export const flowViews: FlowView[] = [
 const both: FlowViewId[] = ["web", "qq"];
 const web: FlowViewId[] = ["web"];
 const qq: FlowViewId[] = ["qq"];
-const planned: FlowViewId[] = [];
 
 /** A diagram of verified paths, never an executable workflow. */
 export const flowGraphs: FlowGraph[] = [
@@ -70,16 +69,16 @@ export const flowGraphs: FlowGraph[] = [
     {id:"turn-synthesis",source:"completed-turn",target:"synthesis",relation:"登记后台综合",views:web,style:"dependency"},
     {id:"synthesis-global",source:"synthesis",target:"global",relation:"增量更新摘要",views:web,style:"dependency",sourcePort:"top",targetPort:"bottom"},
   ]},
-  { id:"model", parentId:"overview", title:"模型", summary:"共同主体提示词与适用的渠道说明共同组成模型提示词，再由模型服务生成回复。Skill 目前尚未接入。", nodes:[
+  { id:"model", parentId:"overview", title:"模型", summary:"共同主体提示词与适用的渠道说明共同组成模型提示词；Web 可通过开发开关加载受信绑定的 Skill。", nodes:[
     {id:"agent-prompt",kind:"prompt",title:"主 Agent 提示词",subtitle:"AGENT PROMPT",description:"由 Core 管理、可编辑并持久化的共同主体提示词，Web 与 QQ 共用。",owner:"Agent Core",state:"可配置",position:{x:40,y:60},positionByView:{qq:{x:40,y:190}},views:both},
     {id:"channel-prompt",kind:"prompt",title:"Web 渠道提示词",subtitle:"CHANNEL PROMPT",description:"Web 星核提供的可编辑补充说明，QQ 当前不使用它。",owner:"Web 对话星核",state:"可配置 · Web",position:{x:40,y:270},views:web},
-    {id:"skill",kind:"prompt",title:"Skill",subtitle:"SKILL",description:"星核可声明 Skill 描述；目前没有 Skill Runtime 或注入机制，也不能授予工具权限。",owner:"星核 · 未来接入",state:"尚未接入",position:{x:40,y:480},views:planned,planned:true},
+    {id:"skill",kind:"prompt",title:"Skill",subtitle:"SKILL",description:"Web 可按请求选择并加载受信绑定的 Skill 文本；开关和可用状态见真实流程，Skill 不授予工具权限。",owner:"Stardust Core · Web",state:"开发开关 · Web",position:{x:40,y:480},views:web},
     {id:"prompt",kind:"prompt",title:"提示词组装",subtitle:"PROMPT ASSEMBLY",description:"组合固定安全约束与共同主体提示词；Web 另含渠道补充和相关上下文。",owner:"Agent Core",state:"已实现",position:{x:390,y:190},views:both},
     {id:"model-service",kind:"model",title:"模型推理",subtitle:"MODEL SERVICE",description:"使用配置的模型调用 Chat Completions。Web 支持可选工具调用；QQ 当前直接生成回复。",owner:"Stardust Core",state:"模型服务配置",position:{x:750,y:190},views:both},
   ],edges:[
     {id:"agent-prompt-assembly",source:"agent-prompt",target:"prompt",relation:"共同主体提示词",views:both,style:"dependency"},
     {id:"channel-prompt-assembly",source:"channel-prompt",target:"prompt",relation:"Web 渠道说明",views:web,style:"dependency"},
-    {id:"skill-planned",source:"skill",target:"prompt",relation:"尚未接入",views:planned,style:"planned"},
+    {id:"skill-web",source:"skill",target:"prompt",relation:"按需注入 · 开发开关",views:web,style:"dependency"},
     {id:"prompt-model",source:"prompt",target:"model-service",relation:"调用模型",views:both},
   ]},
   { id:"tool", parentId:"overview", title:"Tool", summary:"Web 模型按需发起工具调用，经过可用性与权限检查后执行或拒绝，并将结果返回模型。", availableViews:["web"], nodes:[

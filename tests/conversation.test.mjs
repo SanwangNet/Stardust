@@ -8,7 +8,6 @@ import { ConversationService } from "../apps/server/dist/conversation.js";
 import { buildConversationContext } from "../apps/server/dist/conversation-context.js";
 import { ModelService } from "../apps/server/dist/model.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
-import { AdminAuth } from "../apps/server/dist/admin-auth.js";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { ModelError } from "../apps/server/dist/model.js";
@@ -104,20 +103,19 @@ test("model receives ordered context with existing stream configuration", async 
 });
 
 test("conversation API is available locally and protects against cross-origin writes", async () => {
-  const token = "a-secure-test-token-at-least-32-characters";
   const model = { chatContext: async () => "answer" };
   const store = new ConversationService(model, ":memory:");
   const setup = { getInitializationState: () => ({ initialized: true }) };
   const extensions = { restore: async () => {}, shutdown: async () => {}, availableTools: () => [] };
-  const server = createStardustServer({ setupService: setup, extensionManager: extensions, modelService: model, adminAuth: new AdminAuth(token), conversationService: store });
+  const server = createStardustServer({ setupService: setup, extensionManager: extensions, modelService: model, conversationService: store });
   try {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const origin = `http://127.0.0.1:${server.address().port}`;
     const request = (path, options = {}) => fetch(origin + path, options);
     assert.equal((await request("/api/v1/conversations")).status, 200);
-    const login = await request("/api/v1/admin/login", { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ token }) });
-    const cookie = login.headers.get("set-cookie").split(";")[0];
+    assert.equal((await request("/api/v1/admin/login", { method: "POST", headers: { "content-type": "application/json", origin }, body: "{}" })).status, 405);
+    const cookie = "";
     const headers = { cookie, origin, "content-type": "application/json" };
     assert.equal((await request("/api/v1/conversations", { method: "POST", headers: { ...headers, origin: "https://evil.example" }, body: "{}" })).status, 403);
     const created = await request("/api/v1/conversations", { method: "POST", headers, body: JSON.stringify({ title: "A" }) });

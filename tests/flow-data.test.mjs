@@ -43,7 +43,7 @@ test("Web-only history and background synthesis are not shown as QQ execution pa
   assert.match(context.nodes.find(node => node.id === "assembler").description, /36,000/);
   assert.ok(!graph("tool").availableViews.includes("qq"));
   const model = graph("model");
-  assert.equal(model.nodes.find(node => node.id === "skill").planned,true);
+  assert.deepEqual(model.nodes.find(node => node.id === "skill").views,["web"]);
   assert.ok(!model.nodes.find(node => node.id === "channel-prompt").views.includes("qq"));
 });
 
@@ -75,11 +75,11 @@ test("channel views contain only their own cards and connected paths", () => {
   assert.equal(input.nodes.length, 3, "view selection does not mutate the source graph");
 });
 
-test("planned Skill remains visible as unimplemented in the model graph", () => {
+test("Skill is shown only for the optional Web request path", () => {
   for (const view of ["web", "qq"]) {
     const model = visibleFlowGraph(graph("model"), view);
-    assert.equal(model.nodes.find(node => node.id === "skill")?.planned, true);
-    assert.equal(model.edges.find(link => link.id === "skill-planned")?.style, "planned");
+    assert.equal(model.nodes.some(node => node.id === "skill"), view === "web");
+    assert.equal(model.edges.some(link => link.id === "skill-web"), view === "web");
     assert.equal(model.nodes.some(node => node.id === "channel-prompt"), view === "web");
   }
 });

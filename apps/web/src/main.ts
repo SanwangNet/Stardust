@@ -1366,7 +1366,7 @@ initializeFlowBoard();
 type ExtensionFieldView = { key: string; label: string; sensitive: boolean; required: boolean; configured: boolean; value?: string };
 type ExtensionToolView = { name: string; description: string; parameters: Record<string, unknown>; enabled: boolean; available: boolean };
 type ExtensionPageView = { pageId: string; title: string; description: string; pageKind: string };
-type ExtensionView = { id: string; name: string; version: string; description: string; type: string; builtin?: boolean; installed: boolean; enabled: boolean; state: string; error?: string; fields: ExtensionFieldView[]; managementPages: ExtensionPageView[]; skills: { name: string; description: string }[]; tools: ExtensionToolView[] };
+type ExtensionView = { id: string; name: string; version: string; description: string; type: string; builtin?: boolean; installed: boolean; enabled: boolean; state: string; error?: string; fields: ExtensionFieldView[]; managementPages: ExtensionPageView[]; skills: { id: string; name: string; description: string; enabled: boolean; available: boolean; trusted: boolean; status: string }[]; skillWarnings?: string[]; tools: ExtensionToolView[] };
 const extensionList = getElement<HTMLElement>("extension-list");
 const extensionFeedback = getElement<HTMLElement>("extension-feedback");
 type ExtensionUI = { sections: HTMLElement[]; statuses: HTMLElement[]; errors: HTMLElement[]; fields: Map<string, { input: HTMLInputElement; clear?: HTMLInputElement; note?: HTMLElement }>; enable?: HTMLButtonElement; disable?: HTMLButtonElement; tools: Map<string, { status: HTMLElement; toggle: HTMLButtonElement }> };
@@ -1741,8 +1741,18 @@ function toolsPage(item: ExtensionView, ui: ExtensionUI): HTMLElement {
 }
 function skillsPage(item: ExtensionView): HTMLElement {
   const container = document.createElement("div");
+  if (item.skillWarnings?.length) { const warning = document.createElement("p"); warning.textContent = "Skill 声明无效或 ID 重复，无法加载；请检查星核契约。"; container.append(warning); }
   if (!item.skills.length) { const empty = document.createElement("p"); empty.textContent = item.id === "web-chat" ? "暂无可用 Skill。" : "此扩展尚未提供 Skill"; container.append(empty); }
-  else for (const skill of item.skills) { const row = document.createElement("p"); row.textContent = `${skill.name} · ${skill.description}`; container.append(row); }
+  else for (const skill of item.skills) {
+    const row = document.createElement("article"); row.className = "extension-item";
+    const title = document.createElement("h2"); title.textContent = skill.name;
+    const description = document.createElement("p"); description.textContent = `${skill.description} · ${skill.id}`;
+    const status = document.createElement("p"); status.textContent = skill.status === "incompatible" ? "契约不兼容，不能加载" : !skill.trusted ? "已声明，未绑定可信加载器" : skill.available ? "已启用，可用于 Web 选择" : skill.enabled ? "已启用，当前不可用" : "已停用";
+    const feedback = document.createElement("p"); feedback.setAttribute("role", "status");
+    const toggle = extensionButton(skill.enabled ? "停用" : "启用"); toggle.disabled = !item.installed;
+    toggle.addEventListener("click", () => { void extensionAction(item.id, "skill", { id: skill.id, enabled: !skill.enabled }, feedback).then(ok => { if (ok) { skill.enabled = !skill.enabled; toggle.textContent = skill.enabled ? "停用" : "启用"; status.textContent = skill.enabled ? "已启用；可用性以星核状态和可信绑定为准" : "已停用"; } }); });
+    row.append(title, description, status, toggle, feedback); container.append(row);
+  }
   return container;
 }
 type AgentSettings = { agentPrompt: string; webPrompt: string; tools: { name: string; description: string; enabled: boolean }[] };

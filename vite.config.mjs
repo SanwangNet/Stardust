@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import { loadConfig, resolveConfig } from "./apps/server/dist/config.js";
 import { loadCoreEnv } from "./apps/server/dist/env.js";
+import { isTrustedDevProxyClient } from "./apps/server/dist/local-access.js";
 
 const server = resolveConfig(loadConfig(), loadCoreEnv()).server;
 const host = server.host === "0.0.0.0" ? "127.0.0.1" : server.host === "::" ? "[::1]" : server.host.includes(":") ? `[${server.host}]` : server.host;
@@ -17,6 +18,11 @@ export default defineConfig({
   }],
   server: {
     host: "127.0.0.1", port: 5173, strictPort: true,
-    proxy: { "/api": { target: `http://${host}:${server.port}`, changeOrigin: false } },
+    proxy: { "/api": { target: `http://${host}:${server.port}`, changeOrigin: false, configure(proxy) {
+      proxy.on("proxyReq", (upstream, request) => {
+        upstream.removeHeader("x-stardust-dev-proxy");
+        if (process.env.STARDUST_DEV_PROXY_PROOF && isTrustedDevProxyClient(request)) upstream.setHeader("x-stardust-dev-proxy", process.env.STARDUST_DEV_PROXY_PROOF);
+      });
+    } } },
   },
 });
