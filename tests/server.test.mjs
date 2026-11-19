@@ -48,7 +48,7 @@ test("WebUI 首页与静态脚本由同一进程提供", async () => {
   assert.equal(js.status, 200);
   assert.match(await js.text(), /api\/health/);
   assert.match(page, /data-page="\/model\/flow"/);
-  for (const module of ["flow-board.js", "flow-data.js"]) {
+  for (const module of ["flow-board.js", "flow-real-board.js", "flow-design-board.js", "flow-project-board.js", "flow-project.js", "flow-project-geometry.js", "flow-data.js"]) {
     const response = await fetch(`${origin}/${module}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /javascript/);

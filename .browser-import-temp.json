@@ -1,0 +1,390 @@
+{
+  "schemaVersion": 1,
+  "projectId": "bf7c56cb-24bc-4f97-b0ed-aef3021ff11c",
+  "projectName": "Stardust 设计工程",
+  "rootBoardId": "e4c1777a-be38-4406-868c-f9b665760459",
+  "boards": [
+    {
+      "id": "e4c1777a-be38-4406-868c-f9b665760459",
+      "name": "主流程",
+      "nodes": [
+        {
+          "id": "ae40f2e9-70af-4380-b296-6ca4e1cfd6e5",
+          "title": "QQ 消息",
+          "subtitle": "",
+          "position": {
+            "x": 20,
+            "y": 20
+          },
+          "visualStyle": "input",
+          "inputPorts": [
+            {
+              "id": "b0cf12f5-dcd9-49ac-af94-6570f26cb13c",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "444d2d0a-cb24-443b-8070-f36a768f4935",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "de50e638-eed1-4074-ae5b-16223c331415",
+          "title": "Web 对话",
+          "subtitle": "",
+          "position": {
+            "x": 20,
+            "y": 200
+          },
+          "visualStyle": "input",
+          "inputPorts": [
+            {
+              "id": "04a91b46-7569-43db-b482-ab4f1d3c571d",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "79ff4e3d-595c-43c4-beb6-e0685815730a",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "6d4d3942-a30e-4420-9a4c-bf2e2ae0694b",
+          "title": "上下文",
+          "subtitle": "",
+          "position": {
+            "x": 320,
+            "y": 110
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "fa0fcf88-0b53-4640-b948-8b4774e886a4",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "26eafd0c-1cb8-4eaa-8126-b44f1b25152e",
+              "name": "输出"
+            }
+          ],
+          "childBoardId": "ef1c3168-df37-456b-93bc-47639907e564"
+        },
+        {
+          "id": "56cc3ea3-1f4e-456d-ace1-249312ff4916",
+          "title": "Skill",
+          "subtitle": "",
+          "position": {
+            "x": 620,
+            "y": 110
+          },
+          "visualStyle": "prompt",
+          "inputPorts": [
+            {
+              "id": "6ae2ddfc-958b-4eff-9498-2d291a65b5a6",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "000f344f-66e2-4c3d-b704-4063c2854115",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "03a142fd-3b1d-4655-8300-42dbf66ec666",
+          "title": "Tool 可用性",
+          "subtitle": "",
+          "position": {
+            "x": 920,
+            "y": 110
+          },
+          "visualStyle": "tool",
+          "inputPorts": [
+            {
+              "id": "31a7c99d-da83-4dd7-aacf-910e8d279ed3",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "01e11caa-082a-429a-b3de-bfdecffbab45",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "16511aa0-89de-4c16-afe3-e81be9e1b4e4",
+          "title": "Tool 调用与审批",
+          "subtitle": "",
+          "position": {
+            "x": 1220,
+            "y": 110
+          },
+          "visualStyle": "tool",
+          "inputPorts": [
+            {
+              "id": "f3f5369c-77c8-485d-9d24-fbc2c89cd2a9",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "25674fc8-aad1-46a8-9d3d-40ccd88423b9",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "79751ae3-59a5-484e-9c93-c1700890e301",
+          "title": "Web 回复",
+          "subtitle": "",
+          "position": {
+            "x": 1520,
+            "y": 20
+          },
+          "visualStyle": "output",
+          "inputPorts": [
+            {
+              "id": "fe038294-e1dd-427e-aba8-7f6d0f310290",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "a274ed67-e6cc-4e06-b378-b9fc974c7670",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "e02246fa-56cb-4347-bbd2-a05436c4f969",
+          "title": "QQ 回复",
+          "subtitle": "",
+          "position": {
+            "x": 1520,
+            "y": 200
+          },
+          "visualStyle": "output",
+          "inputPorts": [
+            {
+              "id": "ecf87c21-856c-4bf9-97de-512e46b4724b",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "e739ee25-1202-4460-9968-e97caf6ae4d0",
+              "name": "输出"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "fd383c21-46e3-4bdc-b6f0-c90fcc3db0c5",
+          "fromNodeId": "ae40f2e9-70af-4380-b296-6ca4e1cfd6e5",
+          "fromPortId": "444d2d0a-cb24-443b-8070-f36a768f4935",
+          "toNodeId": "6d4d3942-a30e-4420-9a4c-bf2e2ae0694b",
+          "toPortId": "fa0fcf88-0b53-4640-b948-8b4774e886a4"
+        },
+        {
+          "id": "28f46cbe-fad0-4611-ba75-b1368be1dd05",
+          "fromNodeId": "de50e638-eed1-4074-ae5b-16223c331415",
+          "fromPortId": "79ff4e3d-595c-43c4-beb6-e0685815730a",
+          "toNodeId": "6d4d3942-a30e-4420-9a4c-bf2e2ae0694b",
+          "toPortId": "fa0fcf88-0b53-4640-b948-8b4774e886a4"
+        },
+        {
+          "id": "eb4d3bac-cfcc-47ea-b1e2-6124f540543c",
+          "fromNodeId": "6d4d3942-a30e-4420-9a4c-bf2e2ae0694b",
+          "fromPortId": "26eafd0c-1cb8-4eaa-8126-b44f1b25152e",
+          "toNodeId": "56cc3ea3-1f4e-456d-ace1-249312ff4916",
+          "toPortId": "6ae2ddfc-958b-4eff-9498-2d291a65b5a6"
+        },
+        {
+          "id": "9abd7cbf-d2dd-429c-b87f-7051193a0bbf",
+          "fromNodeId": "56cc3ea3-1f4e-456d-ace1-249312ff4916",
+          "fromPortId": "000f344f-66e2-4c3d-b704-4063c2854115",
+          "toNodeId": "03a142fd-3b1d-4655-8300-42dbf66ec666",
+          "toPortId": "31a7c99d-da83-4dd7-aacf-910e8d279ed3"
+        },
+        {
+          "id": "801924fe-bdf4-4dd5-a1fe-ed2bea3c935a",
+          "fromNodeId": "03a142fd-3b1d-4655-8300-42dbf66ec666",
+          "fromPortId": "01e11caa-082a-429a-b3de-bfdecffbab45",
+          "toNodeId": "16511aa0-89de-4c16-afe3-e81be9e1b4e4",
+          "toPortId": "f3f5369c-77c8-485d-9d24-fbc2c89cd2a9"
+        },
+        {
+          "id": "a8a204d1-6d96-4654-bc61-2692930cc291",
+          "fromNodeId": "16511aa0-89de-4c16-afe3-e81be9e1b4e4",
+          "fromPortId": "25674fc8-aad1-46a8-9d3d-40ccd88423b9",
+          "toNodeId": "79751ae3-59a5-484e-9c93-c1700890e301",
+          "toPortId": "fe038294-e1dd-427e-aba8-7f6d0f310290"
+        },
+        {
+          "id": "12cc9737-79e1-45bb-bc76-35e1eebc5302",
+          "fromNodeId": "16511aa0-89de-4c16-afe3-e81be9e1b4e4",
+          "fromPortId": "25674fc8-aad1-46a8-9d3d-40ccd88423b9",
+          "toNodeId": "e02246fa-56cb-4347-bbd2-a05436c4f969",
+          "toPortId": "ecf87c21-856c-4bf9-97de-512e46b4724b"
+        }
+      ],
+      "viewport": null
+    },
+    {
+      "id": "ef1c3168-df37-456b-93bc-47639907e564",
+      "name": "上下文",
+      "nodes": [
+        {
+          "id": "0a612e42-dae3-45d8-867b-2fd1d59c76c4",
+          "title": "输入：QQ 上下文",
+          "subtitle": "",
+          "position": {
+            "x": 0,
+            "y": 0
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "c51e26fb-9621-4a8c-ab36-7c35fc0bc07b",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "1ff67346-b545-447d-b869-01129ec3db5f",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "9fb0c767-9c84-40e3-97af-bc9490e876af",
+          "title": "输入：Web 上下文",
+          "subtitle": "",
+          "position": {
+            "x": 0,
+            "y": 180
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "0b4014c0-d9d8-408a-8213-b3fb03a9a874",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "d8f73858-2a6b-4937-9511-270066293aea",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "32549c54-3855-4476-af06-b15f4258eb3c",
+          "title": "上下文总结",
+          "subtitle": "",
+          "position": {
+            "x": 300,
+            "y": 90
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "b3570845-1aa4-40cf-a854-76562d937dc7",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "2a2d6e21-8043-45ea-8902-4c9e02b5df5d",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "edd12733-7750-47b6-8449-f54409399d1e",
+          "title": "全局上下文池",
+          "subtitle": "",
+          "position": {
+            "x": 600,
+            "y": 90
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "b86abb1e-48f7-4f52-9f76-860b05bda572",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "9a907c90-eba4-4a0c-b6cc-7436117801e4",
+              "name": "输出"
+            }
+          ]
+        },
+        {
+          "id": "40757cba-8f10-492c-a428-ec6b8bdeedfd",
+          "title": "输出：模型",
+          "subtitle": "",
+          "position": {
+            "x": 900,
+            "y": 90
+          },
+          "visualStyle": "context",
+          "inputPorts": [
+            {
+              "id": "e9203a8a-9267-4e58-b843-60d18e2d8bf4",
+              "name": "输入"
+            }
+          ],
+          "outputPorts": [
+            {
+              "id": "283bf331-064d-4538-95e2-b0e84774dee7",
+              "name": "输出"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "4c7be457-8c8a-4036-aece-b179599ba03a",
+          "fromNodeId": "0a612e42-dae3-45d8-867b-2fd1d59c76c4",
+          "fromPortId": "1ff67346-b545-447d-b869-01129ec3db5f",
+          "toNodeId": "32549c54-3855-4476-af06-b15f4258eb3c",
+          "toPortId": "b3570845-1aa4-40cf-a854-76562d937dc7"
+        },
+        {
+          "id": "92f2dbc6-04d2-4d5c-b7d6-52f55a93cda4",
+          "fromNodeId": "9fb0c767-9c84-40e3-97af-bc9490e876af",
+          "fromPortId": "d8f73858-2a6b-4937-9511-270066293aea",
+          "toNodeId": "32549c54-3855-4476-af06-b15f4258eb3c",
+          "toPortId": "b3570845-1aa4-40cf-a854-76562d937dc7"
+        },
+        {
+          "id": "5d549bcf-d979-4bee-9d30-e17272ea83f8",
+          "fromNodeId": "32549c54-3855-4476-af06-b15f4258eb3c",
+          "fromPortId": "2a2d6e21-8043-45ea-8902-4c9e02b5df5d",
+          "toNodeId": "edd12733-7750-47b6-8449-f54409399d1e",
+          "toPortId": "b86abb1e-48f7-4f52-9f76-860b05bda572"
+        },
+        {
+          "id": "5bad3bc6-d9a4-4caa-8c6b-dc4e32e7c168",
+          "fromNodeId": "edd12733-7750-47b6-8449-f54409399d1e",
+          "fromPortId": "9a907c90-eba4-4a0c-b6cc-7436117801e4",
+          "toNodeId": "40757cba-8f10-492c-a428-ec6b8bdeedfd",
+          "toPortId": "e9203a8a-9267-4e58-b843-60d18e2d8bf4"
+        }
+      ],
+      "viewport": null
+    }
+  ]
+}

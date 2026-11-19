@@ -1,0 +1,15 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createStardustServer } from './apps/server/dist/app.js';
+import { FlowPublication } from './apps/server/dist/flow-publication.js';
+import { ExtensionManager } from './apps/server/dist/extension-manager.js';
+import { ConversationService } from './apps/server/dist/conversation.js';
+import { webChatExtension } from './apps/server/dist/extensions/web-chat.js';
+import { LogService } from './apps/server/dist/logger.js';
+const dir=mkdtempSync(join(tmpdir(),'stardust-browser-'));
+const model={chatContext:async()=> 'mock',chatWithTools:async()=>({content:'mock',toolCalls:[]})};
+const extensions=new ExtensionManager(dir,{chat:async()=> 'mock'},[webChatExtension],new LogService(100,()=>{}));
+await extensions.restore();
+const server=createStardustServer({setupService:{getInitializationState:()=>({initialized:true})},modelService:model,extensionManager:extensions,conversationService:new ConversationService(model,':memory:'),flowPublication:new FlowPublication(join(dir,'flow.json'))});
+server.listen(18439,'127.0.0.1',()=>console.log('Browser test server on 18439'));

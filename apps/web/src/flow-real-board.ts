@@ -1,3 +1,5 @@
+import { openDesignBoard } from "./flow-design-board.js";
+
 type Connections = { recent: boolean; global: boolean; search: boolean };
 type Edge = { from: { node: string; port: string }; to: { node: string; port: string } };
 type Graph = { id: string; nodes: { id: string; type: string; graphId?: string }[]; edges: Edge[]; interface: { inputs: { id: string; label?: string }[]; outputs: { id: string; label?: string }[] } };
@@ -30,6 +32,19 @@ export async function initializeRealFlowBoard(root: HTMLElement): Promise<boolea
   const canvas = el<HTMLElement>(".flow-canvas"), world = el<HTMLElement>(".flow-world"), nodesEl = el<HTMLElement>(".flow-nodes"), wires = el<SVGSVGElement>(".flow-wires"), path = el<HTMLElement>(".flow-path"), status = el<HTMLElement>(".flow-real-status"), detail = el<HTMLElement>(".flow-real-detail");
   wires.setAttribute("viewBox", "-10000 -10000 20000 20000");
   const message = (text: string) => { detail.textContent = text; };
+  const designButton = document.createElement("button");
+  designButton.type = "button"; designButton.textContent = "设计草稿";
+  el<HTMLElement>(".flow-controls").prepend(designButton);
+  designButton.addEventListener("click", () => {
+    const original = Array.from(root.children) as HTMLElement[];
+    original.forEach(child => { child.hidden = true; });
+    const designRoot = document.createElement("div"); designRoot.className = "flow-design"; root.append(designRoot);
+    const overviewPositions = positions.get("overview");
+    openDesignBoard(designRoot, () => ({
+      nodes: data.overview.nodes.map(node => ({ id: node.id, title: node.title, subtitle: node.subtitle, kind: node.kind ?? "context", x: overviewPositions?.get(node.id)?.x ?? node.x, y: overviewPositions?.get(node.id)?.y ?? node.y })),
+      edges: data.overview.edges.map(edge => ({ from: edge.from, to: edge.to })),
+    }), () => { designRoot.remove(); original.forEach(child => { child.hidden = false; }); });
+  });
   function updateStatus(): void {
     const changed = JSON.stringify(draft) !== JSON.stringify(data.published.connections);
     const short = (value: string) => value.length > 16 ? `${value.slice(0, 8)}…` : value;
