@@ -10,7 +10,10 @@ import { createStardustServer } from "../apps/server/dist/app.js";
 import { ConversationService } from "../apps/server/dist/conversation.js";
 import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { FlowPublication } from "../apps/server/dist/flow-publication.js";
-import { MAX_FILE_SIZE, connect, exampleProject, newBoard, newNode } from "../apps/web/dist/flow-project.js";
+import { MAX_FILE_SIZE, connect, exampleProject as defaultProject, newBoard, newNode, parseProject } from "../apps/web/dist/flow-project.js";
+import { BACKUP_KEY, MIGRATION_KEY, PROJECT_KEY, REPAIR_BACKUP_KEY, REPAIR_MARKER_KEY, SIMPLIFY_BACKUP_KEY, SIMPLIFY_MARKER_KEY } from "../apps/web/dist/flow-project-migration.js";
+import { oldRelationsProject } from "./flow-project-repair-fixture.mjs";
+import { exampleProject } from "./flow-project-fixture.mjs";
 
 const project = exampleProject();
 const root = project.boards[0];
@@ -372,9 +375,116 @@ try {
   }
 
   await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
+  await send("Page.enable");
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await send("Page.navigate", { url: `${origin}/#/model/flow` });
   await waitFor("#flow-board .flow-canvas");
+
+  const sourceBytes = process.env.STARDUST_M5C0_SOURCE
+    ? readFileSync(process.env.STARDUST_M5C0_SOURCE, "utf8")
+    : JSON.stringify(project, null, 2);
+  if (process.env.STARDUST_M5C0_SOURCE) {
+    const source = parseProject(JSON.parse(sourceBytes));
+    const rebuilt = defaultProject();
+    assert.deepEqual(rebuilt.boards.map(item => item.id), source.boards.map(item => item.id));
+    for (const originalBoard of source.boards) {
+      const rebuiltBoard = rebuilt.boards.find(item => item.id === originalBoard.id);
+      for (const originalNode of originalBoard.nodes) {
+        if (originalNode.id === "3e8c54f5-9853-4cc8-9764-e2efe4a82578") continue;
+        assert.ok(rebuiltBoard.nodes.some(item => item.id === originalNode.id), `保留原节点 ${originalNode.title}`);
+      }
+    }
+  }
+  await evaluate((projectKey, backupKey, markerKey, source) => {
+    localStorage.setItem(projectKey, source);
+    localStorage.removeItem(backupKey);
+    localStorage.removeItem(markerKey);
+    localStorage.setItem("stardust.test.unrelated", "preserve");
+  }, PROJECT_KEY, BACKUP_KEY, MIGRATION_KEY, sourceBytes);
+  const injected = await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => { const set = Storage.prototype.setItem; Object.defineProperty(Storage.prototype, "setItem", { configurable: true, writable: true, value(key, value) { if (key === ${JSON.stringify(BACKUP_KEY)}) throw new Error("test quota"); return set.call(this, key, value); } }); })();`,
+  });
+  await send("Page.reload", { ignoreCache: true });
+  try {
+    await until(() => evaluate(() => document.querySelector(".flow-design-status")?.textContent.includes("原存储已保留")), "备份失败时保护工程");
+  } catch (error) {
+    console.error("迁移页面状态", await evaluate(() => ({
+      status: document.querySelector(".flow-design-status")?.textContent,
+      canvas: !!document.querySelector(".flow-canvas"),
+      marker: localStorage.getItem("stardust.flow-project.v1.m5-c0.migration"),
+      backup: localStorage.getItem("stardust.flow-project.v1.m5-c0.backup") !== null,
+    })));
+    throw error;
+  }
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), PROJECT_KEY), sourceBytes);
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), BACKUP_KEY), null);
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: injected.identifier });
+  await send("Page.reload", { ignoreCache: true });
+  await until(() => evaluate(() => document.querySelector(".flow-design-status")?.textContent.includes("已备份原设计")), "一次性替换");
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), BACKUP_KEY), sourceBytes);
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), MIGRATION_KEY), "complete");
+  assert.equal(await evaluate(() => localStorage.getItem("stardust.test.unrelated")), "preserve");
+  assert.deepEqual(await storage(), defaultProject());
+  if (process.env.STARDUST_M5C0_CAPTURE) {
+    const screenshot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(process.env.STARDUST_M5C0_CAPTURE, Buffer.from(screenshot.data, "base64"));
+  }
+  await click(action("add-node"));
+  await renameNode("迁移后用户修改");
+  const editedDefault = await storage();
+  await send("Page.reload", { ignoreCache: true });
+  await waitFor("#flow-board .flow-canvas");
+  assert.deepEqual(await storage(), editedDefault);
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), BACKUP_KEY), sourceBytes);
+
+  const prior = oldRelationsProject();
+  prior.boards[0].nodes[0].title = "用户修改过的 QQ 入口";
+  const savedPosition = { x: 620, y: 110 };
+  prior.boards.find(board => board.name === "QQ 星核").nodes.find(node => node.title === "QQ 上下文来源").position = savedPosition;
+  const beforeRepair = JSON.stringify(prior);
+  await evaluate((projectKey, repairKey, markerKey, simplifyBackup, simplifyMarker, value) => {
+    localStorage.setItem(projectKey, value);
+    localStorage.removeItem(repairKey);
+    localStorage.removeItem(markerKey);
+    localStorage.removeItem(simplifyBackup);
+    localStorage.removeItem(simplifyMarker);
+  }, PROJECT_KEY, REPAIR_BACKUP_KEY, REPAIR_MARKER_KEY, SIMPLIFY_BACKUP_KEY, SIMPLIFY_MARKER_KEY, beforeRepair);
+  await send("Page.reload", { ignoreCache: true });
+  await until(() => evaluate(() => document.querySelector(".flow-design-status")?.textContent.includes("已备份原设计")), "修复已有画板");
+  const repaired = await storage();
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), REPAIR_BACKUP_KEY), beforeRepair);
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), REPAIR_MARKER_KEY), "complete");
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), SIMPLIFY_MARKER_KEY), "complete");
+  assert.ok(await evaluate(storageKey => localStorage.getItem(storageKey), SIMPLIFY_BACKUP_KEY));
+  assert.equal(repaired.boards[0].nodes[0].title, "用户修改过的 QQ 入口");
+  const repairedQQ = repaired.boards.find(board => board.name === "QQ 星核");
+  assert.deepEqual(repairedQQ.nodes.find(node => node.title === "输出：QQ 上下文").position, savedPosition);
+  const hasEdge = (board, from, to) => board.edges.some(edge =>
+    edge.fromNodeId === board.nodes.find(node => node.title === from)?.id
+      && edge.toNodeId === board.nodes.find(node => node.title === to)?.id);
+  assert.ok(hasEdge(repairedQQ, "输入过滤", "输出：QQ 上下文"));
+  assert.ok(hasEdge(repairedQQ, "Core 工具调用", "QQ msg Tool"));
+  assert.ok(hasEdge(repairedQQ, "QQ msg Tool", "QQ 消息发送"));
+  assert.ok(hasEdge(repairedQQ, "输入：主流程回复", "QQ 消息发送"));
+  assert.ok(!repairedQQ.nodes.some(node => node.title === "沙盒能力引用"));
+  assert.ok(!repaired.boards.find(board => board.name === "上下文").nodes.some(node => node.title === "Web Global Context"));
+  const repairedSandbox = repaired.boards.find(board => board.name === "沙盒执行");
+  assert.ok(hasEdge(repairedSandbox, "沙盒 Tool", "执行参数"));
+  assert.ok(hasEdge(repairedSandbox, "执行参数", "审批辅助模型"));
+  assert.ok(hasEdge(repairedSandbox, "审批辅助模型", "Core 权限与审批"));
+  if (process.env.STARDUST_M5C0_CAPTURE) {
+    for (const [board, suffix] of [[repairedQQ, "qq"], [repairedSandbox, "sandbox"]]) {
+      await choose(board.id);
+      await click(action("fit"));
+      const screenshot = await send("Page.captureScreenshot", { format: "png" });
+      writeFileSync(`${process.env.STARDUST_M5C0_CAPTURE}.${suffix}.png`, Buffer.from(screenshot.data, "base64"));
+    }
+  }
+  const repairedSaved = await storage();
+  await send("Page.reload", { ignoreCache: true });
+  await waitFor("#flow-board .flow-canvas");
+  assert.deepEqual(await storage(), repairedSaved);
+  assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), REPAIR_BACKUP_KEY), beforeRepair);
 
   await importFile(legacyFile);
   assert.deepEqual(await storage(), project);
@@ -534,7 +644,7 @@ try {
   assert.match(await evaluate(() => document.querySelector(".flow-design-status").textContent), /此页面之外/);
   assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), key), unreadable);
   await send("Page.reload", { ignoreCache: true });
-  await until(() => evaluate(() => document.querySelector(".flow-design-status")?.textContent.includes("原存储将保留")), "不可读存储保护");
+  await until(() => evaluate(() => document.querySelector(".flow-design-status")?.textContent.includes("原存储已保留")), "不可读存储保护");
   await click(action("add-node"));
   await click(action("fit"));
   assert.equal(await evaluate(storageKey => localStorage.getItem(storageKey), key), unreadable);

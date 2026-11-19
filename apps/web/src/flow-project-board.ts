@@ -5,8 +5,8 @@ import {
   linkBoard, newBoard, newId, newNode, parseProject, portSide, referenceTargets, removeBoard, removeNode, removePort,
 } from "./flow-project.js";
 import { CARD_HEIGHT, CARD_WIDTH, freeWirePreview, layoutNode, wirePath, type PortPosition } from "./flow-project-geometry.js";
+import { loadProject, PROJECT_KEY as key } from "./flow-project-migration.js";
 
-const key = "stardust.flow-project.v1";
 const svg = "http://www.w3.org/2000/svg";
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const sideLabels: Record<PortSide, string> = { left: "左侧", right: "右侧", top: "上侧", bottom: "下侧" };
@@ -34,12 +34,20 @@ export function initializeProjectBoard(root: HTMLElement): void {
   let project: FlowDesignProject;
   let lastSaved: string | null = null;
   let protectStorage = false;
-  const readError = "已保存的工程无法读取。当前显示示例，原存储将保留，直到确认导入或新建工程。";
+  let migrated = false;
+  const readError = "工程替换或读取失败。原存储已保留，自动保存已暂停，请检查浏览器存储。";
   try {
-    lastSaved = localStorage.getItem(key);
-    project = lastSaved === null ? exampleProject() : parseProject(JSON.parse(lastSaved));
+    const loaded = loadProject(localStorage);
+    project = loaded.project;
+    lastSaved = loaded.serialized;
+    migrated = loaded.migrated;
   } catch {
-    project = exampleProject();
+    try {
+      lastSaved = localStorage.getItem(key);
+      project = lastSaved === null ? exampleProject() : parseProject(JSON.parse(lastSaved));
+    } catch {
+      project = exampleProject();
+    }
     protectStorage = true;
   }
   let current = project.rootBoardId, trail = [current], selection: { type: "node" | "edge"; id: string } | undefined;
@@ -706,8 +714,11 @@ export function initializeProjectBoard(root: HTMLElement): void {
     }
   });
   function replaceProject(next: FlowDesignProject): boolean {
+    if (protectStorage) {
+      status.textContent = readError;
+      return false;
+    }
     project = next;
-    protectStorage = false;
     switchBoard(project.rootBoardId, [project.rootBoardId]);
     return save(true);
   }
@@ -810,6 +821,7 @@ export function initializeProjectBoard(root: HTMLElement): void {
   });
   render();
   if (protectStorage) status.textContent = readError;
+  else if (migrated) status.textContent = "已备份原设计并更新画板。";
   const resize = new ResizeObserver(() => { if (!board().viewport && canvas.clientWidth && canvas.clientHeight) fit(); });
   resize.observe(canvas);
 }

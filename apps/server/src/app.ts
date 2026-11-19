@@ -9,6 +9,7 @@ import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { isLocalRead, isTrustedLocalAccess } from "./local-access.js";
 import { ToolRuns } from "./tool-runs.js";
+import { AgentOrchestrator } from "./agent-orchestrator.js";
 import type { ConversationService } from "./conversation.js";
 import { WEB_CONTEXT_OWNER } from "./global-context.js";
 import { webChatExtension } from "./extensions/web-chat.js";
@@ -35,6 +36,7 @@ export interface AppOptions {
   toolExecutionFlow?: { enabled: boolean; definition?: ExecutableFlow };
   skillFlow?: { enabled: boolean; definition?: ExecutableFlow };
   flowPublication?: FlowPublication;
+  agentOrchestrator?: AgentOrchestrator;
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -135,13 +137,13 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-board.js": { filename: "flow-board.js", contentType: "text/javascript; charset=utf-8" },
-  "/flow-real-board.js": { filename: "flow-real-board.js", contentType: "text/javascript; charset=utf-8" },
-  "/flow-design-board.js": { filename: "flow-design-board.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-project-board.js": { filename: "flow-project-board.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-project.js": { filename: "flow-project.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-default-project.js": { filename: "flow-default-project.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-project-migration.js": { filename: "flow-project-migration.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-project-repair.js": { filename: "flow-project-repair.js", contentType: "text/javascript; charset=utf-8" },
+  "/flow-project-simplify.js": { filename: "flow-project-simplify.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-project-geometry.js": { filename: "flow-project-geometry.js", contentType: "text/javascript; charset=utf-8" },
-  "/flow-data.js": { filename: "flow-data.js", contentType: "text/javascript; charset=utf-8" },
-  "/flow-document.js": { filename: "flow-document.js", contentType: "text/javascript; charset=utf-8" },
   "/style.css": { filename: "style.css", contentType: "text/css; charset=utf-8" },
   "/favicon.svg": { filename: "favicon.svg", contentType: "image/svg+xml" },
 };
@@ -155,7 +157,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const logs = options.logService ?? logger;
   const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [webChatExtension], logs);
   const devProxyProof = process.env.STARDUST_DEV_PROXY_PROOF;
-  const toolRuns = new ToolRuns(model, extensions, logs);
+  const agent = options.agentOrchestrator ?? new AgentOrchestrator(model);
+  const toolRuns = new ToolRuns(model, extensions, logs, agent);
   const flowPublication = options.flowPublication ?? new FlowPublication();
   const streams = new Set<ServerResponse>();
   let conversations = options.conversationService;
@@ -379,25 +382,35 @@ export function createStardustServer(options: AppOptions = {}): Server {
           let skillBudget: number | undefined;
           const execute = async (context: import("./conversation-context.js").ConversationContextMessage[], activity: (event: Omit<import("./history-agent.js").ModelActivity, "requestId">) => void, evidence: (item: import("./history-search.js").HistoryEvidence) => void) => {
             const key = `${id}/${requestId}`;
-            const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
-            const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
-            assertSkills();
-            const runId = toolRuns.start(localConversationOwner, content, context, { searchHistory: (input) => store.searchHistory(input, evidence), activity, allowTool: (name) => (!selected || selected.has(name)) && coreAllows(name), ...(skillBudget === undefined ? {} : { maxPromptBytes: skillBudget }), ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}) });
-            conversationRuns.set(key, runId);
-            try {
-              while (!serverClosing) {
-                const run = toolRuns.get(localConversationOwner, runId);
-                if (run.status === "done") return run.reply ?? "";
-                if (run.status === "error") throw new ModelError(run.error ?? "TOOL_RUN_FAILED", 502);
-                await new Promise<void>((resolve) => setTimeout(resolve, 200));
-              }
-              throw new ModelError("REQUEST_CANCELLED", 499);
-            } finally { conversationRuns.delete(key); }
+            const conversation = store.getWeb(id);
+            const result = await agent.execute({
+              source: { starcoreId: conversation.starcoreId, channelId: conversation.channelId, conversationId: conversation.id },
+              current: content, messages: context, signal: controller.signal,
+            }, async request => {
+              const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
+              const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
+              assertSkills();
+              if (controller.signal.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
+              const runId = toolRuns.start(localConversationOwner, request.current, request.messages, {
+                searchHistory: input => store.searchHistory(input, evidence), activity,
+                allowTool: name => (!selected || selected.has(name)) && coreAllows(name),
+                ...(skillBudget === undefined ? {} : { maxPromptBytes: skillBudget }),
+                ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}),
+              }, request.source);
+              conversationRuns.set(key, runId);
+              return {
+                get: () => toolRuns.get(localConversationOwner, runId),
+                cancel: () => toolRuns.cancel(localConversationOwner, runId),
+                close: () => { conversationRuns.delete(key); },
+                isClosed: () => serverClosing,
+              };
+            });
+            return result.content;
           };
           const onClose = () => { if (!response.writableEnded) controller.abort(); };
           response.once("close", onClose);
           let messages;
-          try { messages = await store.submit(id, requestId, content, fields.retry === true, typeof model.chatWithTools === "function" ? execute : undefined, { signal: controller.signal, ...(contextDefinition ? { flowDefinition: contextDefinition } : {}), ...(skillGraph ? { prepareSkills: async (context, budget) => {
+          try { messages = await store.submit(id, requestId, content, fields.retry === true, execute, { signal: controller.signal, ...(contextDefinition ? { flowDefinition: contextDefinition } : {}), ...(skillGraph ? { prepareSkills: async (context, budget) => {
             const result = await runSkillFlow(skillGraph, skills, content, context, budget, controller.signal);
             if (result.message) skillBudget = budget;
             assertSkills = () => { if (controller.signal.aborted || result.loaded.some(id => { const skill = skills.find(item => item.declaration.id === id); return !skill || skill.signal?.aborted || !skill.isAvailable(); })) throw new SkillFlowError("SKILL_FLOW_CANCELLED"); };

@@ -1,85 +1,67 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { flowGraphs, flowViews, visibleFlowGraph } from "../apps/web/dist/flow-data.js";
+import { exampleProject, parseProject } from "../apps/web/dist/flow-project.js";
 
-const graph = id => flowGraphs.find(item => item.id === id);
-const edge = (item, id) => item.edges.find(value => value.id === id);
+const project = exampleProject();
+const board = name => project.boards.find(item => item.name === name);
+const node = (item, title) => item.nodes.find(entry => entry.title === title);
+const edge = (item, from, to) => item.edges.find(link =>
+  link.fromNodeId === node(item, from)?.id && link.toNodeId === node(item, to)?.id);
 
-test("feature graphs have stable unique nodes and valid local edges", () => {
-  assert.equal(new Set(flowGraphs.map(item => item.id)).size, flowGraphs.length);
-  assert.deepEqual(flowViews.map(view => view.id), ["all", "web", "qq"]);
-  for (const item of flowGraphs) {
-    const nodes = new Map(item.nodes.map(node => [node.id, node]));
-    assert.equal(nodes.size, item.nodes.length);
-    assert.equal(new Set(item.edges.map(link => link.id)).size, item.edges.length);
-    for (const link of item.edges) { assert.ok(nodes.has(link.source)); assert.ok(nodes.has(link.target)); assert.ok(link.relation); }
-    for (const node of item.nodes.filter(node => node.childGraphId)) assert.equal(graph(node.childGraphId)?.parentId, item.id);
+test("default project contains the six boards from the supplied V1 project", () => {
+  assert.deepEqual(project.boards.map(item => item.name), ["主流程", "上下文", "Skill", "Tool", "QQ 星核", "沙盒执行"]);
+  assert.equal(project.rootBoardId, board("主流程").id);
+  assert.deepEqual(parseProject(JSON.parse(JSON.stringify(project))), project);
+  const ids = [
+    "d68014d6-12dd-4304-92e6-e3e4bc5ad4d4", "0ea36c05-8e6f-4782-8110-e90b4e8f1e82",
+    "cbc34832-7368-445a-9743-9fdc94bcb14d", "e8923e0d-e64f-4009-bac1-a0337714d606",
+    "92a093d6-a325-4d0f-a263-8809bf26b370", "37da47c7-4f12-47c1-b2bc-f674cff425b3",
+  ];
+  assert.deepEqual(project.boards.map(item => item.id), ids);
+});
+
+test("both channels enter one agent and the direct reply bypasses optional capabilities", () => {
+  const main = board("主流程");
+  assert.equal(main.nodes.filter(item => item.title === "主 Agent").length, 1);
+  assert.ok(!board("QQ 星核").nodes.some(item => item.title === "主 Agent" || item.title === "模型处理"));
+  for (const [from, to] of [
+    ["QQ 消息", "QQ 输入适配"], ["QQ 输入适配", "上下文准备"],
+    ["Web 对话", "Web 输入适配"], ["Web 输入适配", "上下文准备"],
+    ["上下文准备", "主 Agent"], ["主 Agent", "模型调用"],
+    ["模型调用", "输出路由"], ["输出路由", "Web 回复"], ["输出路由", "QQ 回复"],
+  ]) assert.ok(edge(main, from, to), `${from} → ${to}`);
+  for (const capability of ["Skill 能力", "Tool 能力", "沙盒能力"]) {
+    assert.ok(!edge(main, "上下文准备", capability));
+    assert.ok(!edge(main, "主 Agent", capability));
   }
+  assert.equal(edge(main, "Skill 能力", "模型调用").semantic, "capability");
+  assert.equal(edge(main, "模型调用", "Tool Call").semantic, "optional");
+  assert.ok(main.edges.some(link => link.fromNodeId === node(main, "Tool 能力").id
+    && link.toNodeId === node(main, "模型调用").id && link.semantic === "feedback"));
+  assert.equal(edge(main, "沙盒能力", "Tool 能力").semantic, "optional");
 });
 
-test("overview links to each feature graph and keeps Tool optional", () => {
-  assert.deepEqual(flowGraphs.map(item => item.id), ["overview", "input", "context", "model", "tool", "output"]);
-  const overview = graph("overview");
-  assert.deepEqual(overview.nodes.map(node => node.childGraphId), ["input", "context", "model", "tool", "output"]);
-  assert.ok(flowGraphs.slice(1).every(item => item.parentId === overview.id));
-  assert.ok(overview.edges.some(link => link.source === "model" && link.target === "output"));
-  assert.ok(overview.edges.some(link => link.source === "model" && link.target === "tool"));
-  assert.ok(overview.edges.some(link => link.source === "tool" && link.target === "model"));
-  assert.deepEqual(visibleFlowGraph(overview, "web").nodes.map(node => node.id), ["input", "context", "model", "tool", "output"]);
-  const qq = visibleFlowGraph(overview, "qq");
-  assert.deepEqual(qq.nodes.map(node => node.id), ["input", "context", "model", "output"]);
-  assert.ok(qq.edges.every(link => link.source !== "tool" && link.target !== "tool"));
-});
-
-test("Web-only history and background synthesis are not shown as QQ execution paths", () => {
-  const context = graph("context");
-  for (const id of ["recent", "global", "assembler", "completed-turn", "synthesis"]) {
-    assert.ok(!context.nodes.find(node => node.id === id).views.includes("qq"));
-    assert.ok(!context.edges.some(link => (link.source === id || link.target === id) && link.views.includes("qq")));
+test("node group links reuse the original definitions, including a shared sandbox", () => {
+  const main = board("主流程");
+  for (const [title, target] of [["QQ 消息", "QQ 星核"], ["上下文准备", "上下文"],
+    ["Skill 能力", "Skill"], ["Tool 能力", "Tool"], ["沙盒能力", "沙盒执行"]]) {
+    assert.equal(node(main, title).childBoardId, board(target).id);
   }
-  assert.deepEqual(edge(context,"qq-current-output").views,["qq"]);
-  assert.equal(edge(context,"turn-synthesis").style,"dependency");
-  assert.match(context.nodes.find(node => node.id === "recent").description, /50/);
-  assert.match(context.nodes.find(node => node.id === "assembler").description, /36,000/);
-  assert.ok(!graph("tool").availableViews.includes("qq"));
-  const model = graph("model");
-  assert.deepEqual(model.nodes.find(node => node.id === "skill").views,["web"]);
-  assert.ok(!model.nodes.find(node => node.id === "channel-prompt").views.includes("qq"));
+  assert.equal(node(main, "沙盒能力").childBoardId, board("沙盒执行").id);
 });
 
-test("Tool subgraph distinguishes read-only retrieval, confirmation, rejection and model result", () => {
-  const tool = graph("tool");
-  assert.deepEqual(tool.nodes.map(node=>node.id),["tool-request","tool-policy","history","approval","denied","executor","tool-result"]);
-  assert.match(tool.nodes.find(node => node.id === "history").description, /按需/);
-  assert.equal(edge(tool,"policy-history").target,"history");
-  assert.equal(edge(tool,"approved-execute").target,"executor");
-  assert.equal(edge(tool,"denied-result").target,"tool-result");
-  assert.equal(edge(tool,"executor-result").target,"tool-result");
-});
-
-test("channel views contain only their own cards and connected paths", () => {
-  const input = graph("input");
-  const web = visibleFlowGraph(input, "web");
-  const qq = visibleFlowGraph(input, "qq");
-  assert.deepEqual(web.nodes.map(node => node.id), ["web-input", "channel-entry"]);
-  assert.deepEqual(qq.nodes.map(node => node.id), ["qq-input", "channel-entry"]);
-  assert.deepEqual(web.edges.map(link => link.id), ["web-to-agent"]);
-  assert.deepEqual(qq.edges.map(link => link.id), ["qq-to-agent"]);
-  const context = visibleFlowGraph(graph("context"), "qq");
-  assert.deepEqual(context.nodes.map(node => node.id), ["current", "context-output"]);
-  assert.deepEqual(context.edges.map(link => link.id), ["qq-current-output"]);
-  for (const item of [web, qq, context]) {
-    const ids = new Set(item.nodes.map(node => node.id));
-    assert.ok(item.edges.every(link => ids.has(link.source) && ids.has(link.target)));
-  }
-  assert.equal(input.nodes.length, 3, "view selection does not mutate the source graph");
-});
-
-test("Skill is shown only for the optional Web request path", () => {
-  for (const view of ["web", "qq"]) {
-    const model = visibleFlowGraph(graph("model"), view);
-    assert.equal(model.nodes.some(node => node.id === "skill"), view === "web");
-    assert.equal(model.edges.some(link => link.id === "skill-web"), view === "web");
-    assert.equal(model.nodes.some(node => node.id === "channel-prompt"), view === "web");
-  }
+test("context, tools, skills and sandbox distinguish the implemented path from future ideas", () => {
+  const ctx = board("上下文"), tools = board("Tool"), skills = board("Skill"), sandbox = board("沙盒执行");
+  assert.ok(edge(ctx, "完整短期上下文", "输出：模型"));
+  assert.equal(edge(ctx, "退出短期窗口", "上下文压缩").semantic, "optional");
+  assert.match(node(ctx, "长期记忆").subtitle, /未实现/);
+  assert.equal(node(ctx, "Web Global Context"), undefined);
+  assert.match(node(ctx, "QQ 上下文").subtitle, /当前消息/);
+  assert.match(node(skills, "选择 Skill").subtitle, /关键词/);
+  assert.match(node(skills, "模型自主读取").subtitle, /未来目标/);
+  assert.ok(edge(tools, "用户审批", "实际执行"));
+  assert.ok(edge(tools, "实际执行", "Tool Result"));
+  assert.ok(edge(tools, "拒绝 / 失败", "Tool Result"));
+  assert.match(node(sandbox, "Debian Shell").subtitle, /未提供/);
+  assert.match(node(sandbox, "Core 权限与审批").subtitle, /Core/);
 });

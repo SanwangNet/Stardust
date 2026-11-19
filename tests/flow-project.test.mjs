@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_EDGE_APPEARANCE, MAX_BOARDS, PORT_SIDES, boardReferences, connect, copyNode, exampleProject, linkBoard, newBoard, newNode,
+  DEFAULT_EDGE_APPEARANCE, MAX_BOARDS, PORT_SIDES, boardReferences, connect, copyNode, linkBoard, newBoard, newNode,
   parseProject, portSide, referenceTargets, removeBoard, removeNode, removePort,
 } from '../apps/web/dist/flow-project.js';
+import { exampleProject } from './flow-project-fixture.mjs';
 
 test('V1 projects preserve boards, positions, ports, edges and viewports in a JSON round trip', () => {
   const project = exampleProject();

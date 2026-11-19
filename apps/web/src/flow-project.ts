@@ -125,13 +125,7 @@ export function copyNode(project: FlowDesignProject, board: Board, original: Des
   return result;
 }
 export function exampleProject(): FlowDesignProject {
-  const main = newBoard("主流程"), child = newBoard("上下文");
-  const specs: [string, number, number, string][] = [["QQ 消息", 20, 20, "input"], ["Web 对话", 20, 200, "input"], ["上下文", 320, 110, "context"], ["Skill", 620, 110, "prompt"], ["Tool 可用性", 920, 110, "tool"], ["Tool 调用与审批", 1220, 110, "tool"], ["Web 回复", 1520, 20, "output"], ["QQ 回复", 1520, 200, "output"]];
-  main.nodes = specs.map(([title,x,y,style]) => { const n = newNode(title,x,y); n.visualStyle = style; return n; }); main.nodes[2]!.childBoardId = child.id;
-  for (const [a,b] of [[0,2],[1,2],[2,3],[3,4],[4,5],[5,6],[5,7]]) connect(main, main.nodes[a!]!, main.nodes[a!]!.outputPorts[0]!, main.nodes[b!]!, main.nodes[b!]!.inputPorts[0]!);
-  child.nodes = [["输入：QQ 上下文",0,0],["输入：Web 上下文",0,180],["上下文总结",300,90],["全局上下文池",600,90],["输出：模型",900,90]].map(([title,x,y]) => newNode(String(title),Number(x),Number(y)));
-  for (const [a,b] of [[0,2],[1,2],[2,3],[3,4]]) connect(child, child.nodes[a!]!, child.nodes[a!]!.outputPorts[0]!, child.nodes[b!]!, child.nodes[b!]!.inputPorts[0]!);
-  return { schemaVersion: 1, projectId: newId(), projectName: "Stardust 设计工程", rootBoardId: main.id, boards: [main, child] };
+  return parseProject(defaultProjectData);
 }
 
 /** Validate untrusted design data before it reaches the editor or persistent storage. */
@@ -200,3 +194,4 @@ export function parseProject(value: unknown): FlowDesignProject {
   for (const board of boards) visit(board.id);
   return { schemaVersion: 1, projectId, projectName, rootBoardId, boards };
 }
+import { defaultProjectData } from "./flow-default-project.js";
