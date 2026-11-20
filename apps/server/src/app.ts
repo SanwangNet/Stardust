@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, type ConfigUpdate } from "./config.js";
 import { setupService, type SetupService } from "./setup.js";
@@ -211,8 +212,20 @@ export function createStardustServer(options: AppOptions = {}): Server {
     conversations.globalContext.start();
     return conversations;
   }
-  if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function" && typeof model.chatContext === "function") {
-    extensions.setChannelChat(async (message, signal) => (await openConversations()).agent.chatChannel(model, message.channelId, message.content, signal, message.eventId));
+  if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function") {
+    extensions.setChannelChat(async (message, signal) => {
+      const core = (await openConversations()).agent;
+      // ExtensionManager verifies the channel against the running extension; QQ has
+      // already validated the reply target and scope before calling the host.
+      const conversationId = createHash("sha256").update(JSON.stringify([message.channelId, message.conversationType, message.conversationId])).digest("hex");
+      const result = await agent.execute({
+        source: { starcoreId: message.channelId, channelId: message.channelId, conversationId },
+        current: message.content,
+        messages: [{ role: "system", content: core.instructions(message.channelId) }, { role: "user", content: message.content }],
+        signal, modelContext: { eventId: message.eventId },
+      }, { mode: "model-only" });
+      return result.content;
+    });
   }
 
   const server: Server = createServer(async (request, response) => {
@@ -232,6 +245,13 @@ export function createStardustServer(options: AppOptions = {}): Server {
       if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try { sendJson(response, 200, overviewData(trusted(false))); }
       catch { sendJson(response, 500, { error: "FLOW_OVERVIEW_UNAVAILABLE" }); }
+      return;
+    }
+    if (pathname === "/api/v1/capabilities") {
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try { sendJson(response, 200, extensions.capabilityCatalog()); }
+      catch { sendJson(response, 500, { error: "CAPABILITIES_UNAVAILABLE" }); }
       return;
     }
     if (pathname === "/api/v1/flow-publication" || pathname.startsWith("/api/v1/flow-publication/")) {
@@ -376,7 +396,9 @@ export function createStardustServer(options: AppOptions = {}): Server {
           const contextDefinition = contextConfig.definition ?? publishedGraphs?.context;
           const controller = new AbortController();
           const skillEnabled = options.skillFlow?.enabled ?? process.env.STARDUST_WEB_SKILL_FLOW === "1";
-          const skills = skillEnabled && typeof extensions.skillSnapshot === "function" ? extensions.skillSnapshot() : [];
+          const skillCapabilities = skillEnabled && typeof extensions.requestCapabilities === "function" ? extensions.requestCapabilities({ channel: "web", allowTool: () => false, allowSkill: () => webChannelAvailable() }) : undefined;
+          const visibleSkills = skillCapabilities && new Set(skillCapabilities.visible.filter(item => item.kind === "skill").map(item => item.id));
+          const skills = skillEnabled && typeof extensions.skillSnapshot === "function" ? extensions.skillSnapshot().map(skill => ({ ...skill, available: skill.available && (!visibleSkills || visibleSkills.has(`skill:${skill.declaration.id}`)), isAvailable: () => skill.isAvailable() && (!skillCapabilities || skillCapabilities.isEligible(`skill:${skill.declaration.id}`)) })) : [];
           const skillGraph = skillEnabled ? structuredClone(options.skillFlow?.definition ?? builtInSkillFlow(skills)) : undefined;
           let assertSkills = () => {};
           let skillBudget: number | undefined;
@@ -388,7 +410,9 @@ export function createStardustServer(options: AppOptions = {}): Server {
               current: content, messages: context, signal: controller.signal,
             }, async request => {
               const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
-              const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools(), coreAllows, controller.signal) : undefined;
+              const capabilitySnapshot = toolEnabled && typeof extensions.requestCapabilities === "function" ? extensions.requestCapabilities({ channel: "web", allowTool: coreAllows, allowSkill: () => false }) : undefined;
+              const visibleTools = capabilitySnapshot && new Set(capabilitySnapshot.visible.filter(item => item.kind === "tool").map(item => item.name));
+              const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools().filter(tool => !visibleTools || visibleTools.has(tool.name)), coreAllows, controller.signal) : undefined;
               assertSkills();
               if (controller.signal.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
               const runId = toolRuns.start(localConversationOwner, request.current, request.messages, {

@@ -136,7 +136,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           let reply: string;
           host.log("DEBUG", "QQ 消息开始调用模型。", { eventId, scope });
           try { reply = await host.message({ channelId: "qq-bot", eventId, messageId: message.messageId, senderId: message.senderId, conversationId: message.replyTarget.targetId, conversationType: message.kind === "c2c" ? "private" : "group", content: message.content.trim(), timestamp: message.timestamp }, controller.signal); }
-          catch { if (!stopped) { host.log("ERROR", "QQ 消息的模型调用失败。", { eventId, scope }); host.reportError("MODEL_FAILED"); } return; }
+          catch (error) { if (!stopped && !controller.signal.aborted && !(error instanceof Error && error.message === "REQUEST_CANCELLED")) { host.log("ERROR", "QQ 消息的模型调用失败。", { eventId, scope }); host.reportError("MODEL_FAILED"); } return; }
           if (stopped || controller.signal.aborted || Date.now() - now > 240_000 || !reply.trim()) { filtered("expired_stopped_or_empty_reply"); return; }
           try {
             const content = Array.from(reply).slice(0, 1500).join("");

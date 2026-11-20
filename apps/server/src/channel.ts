@@ -66,6 +66,25 @@ export interface ToolDefinition {
   prepare(input: Readonly<ToolInput>, host: ToolHost): { approval: ToolApproval } | { error: string };
   execute(input: Readonly<ToolInput>, host: ToolHost, signal: AbortSignal): Promise<ToolResult>;
 }
+/** Public metadata only: no runtime adapters, parameters, targets or Skill content. */
+export interface CapabilityDescriptor {
+  id: string;
+  providerId: string;
+  kind: "tool" | "skill";
+  name: string;
+  description: string;
+  version?: string;
+  channels?: string[];
+  enabled: boolean;
+  available: boolean;
+  unavailableReason?: string;
+}
+/** Supplied by trusted server code, never derived from AgentSource or request text. */
+export interface CapabilityPolicy {
+  channel: "web" | "qq";
+  allowTool(name: string): boolean;
+  allowSkill(id: string): boolean;
+}
 export interface ExtensionPackage {
   manifest: ExtensionManifest;
   flow?: StarcoreFlowContract;

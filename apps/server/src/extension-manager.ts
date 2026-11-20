@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { parseEnv } from "node:util";
 import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
-import type { CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
+import type { CapabilityDescriptor, CapabilityPolicy, CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
 import { WEB_STARCORE_ID } from "./agent-core.js";
 import { qqInputDeclaration, resolveStarcoreInterfaces, StarcoreFlowRegistry, validateStarcoreFlow } from "./starcore-flow.js";
@@ -24,6 +24,7 @@ export class ExtensionManager {
   private readonly runtimes = new Map<string, Runtime>();
   private readonly toolControllers = new Map<string, AbortController>();
   private readonly skillControllers = new Map<string, AbortController>();
+  private readonly channelControllers = new Map<string, AbortController>();
   private readonly skillBindings = new Map<string, SkillBinding>();
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
@@ -150,10 +151,12 @@ export class ExtensionManager {
   /** Request snapshot contains metadata and Core-bound loaders, never arbitrary paths or frontend callbacks. */
   skillWarnings(): string[] {
     const warnings: string[] = [];
+    const counts = new Map<string, number>();
+    for (const item of this.packages.values()) for (const skill of item.manifest.skills ?? []) if (typeof skill?.id === "string") counts.set(skill.id, (counts.get(skill.id) ?? 0) + 1);
     for (const item of this.packages.values()) {
       const seen = new Set<string>();
       for (const skill of item.manifest.skills ?? []) {
-        if (!validSkill(item.manifest.id, skill) || seen.has(skill.id)) { warnings.push(`${item.manifest.id}:SKILL_CONTRACT_INVALID`); continue; }
+        if (!validSkill(item.manifest.id, skill) || seen.has(skill.id) || counts.get(skill.id) !== 1) { warnings.push(`${item.manifest.id}:SKILL_CONTRACT_INVALID`); continue; }
         seen.add(skill.id);
       }
     }
@@ -168,7 +171,7 @@ export class ExtensionManager {
       const declaration = structuredClone(raw), runtime = this.runtimes.get(owner), binding = this.skillBindings.get(raw.id), entry = state[owner];
       const enabled = entry?.skills?.[raw.id] ?? raw.defaultEnabled;
       const compatible = binding?.owner === owner && binding.contentHash === raw.contentHash && binding.contractHash === skillContractHash(raw);
-      const available = Boolean(isInstalled(entry) && entry?.enabled && runtime?.state === "connected" && enabled && compatible && raw.channels.includes("web") && raw.requiredCapabilities.length === 0);
+      const available = Boolean(!this.closed && isInstalled(entry) && entry?.enabled && runtime?.state === "connected" && !runtime.controller?.signal.aborted && enabled && compatible && raw.channels.includes("web") && raw.requiredCapabilities.length === 0);
       let controller = this.skillControllers.get(raw.id);
       if (!controller || controller.signal.aborted) { controller = new AbortController(); this.skillControllers.set(raw.id, controller); }
       const identity = JSON.stringify(raw), capturedController = controller;
@@ -176,10 +179,40 @@ export class ExtensionManager {
       result.push({ declaration, enabled, available, status, ...(compatible ? { load: binding!.load } : {}), signal: runtime?.controller ? AbortSignal.any([runtime.controller.signal, controller.signal]) : controller.signal,
         isAvailable: () => {
           const current = this.readInstalled()[owner], latest = this.packages.get(owner)?.manifest.skills?.find(skill => skill.id === declaration.id);
-          return !this.closed && !capturedController.signal.aborted && this.runtimes.get(owner) === runtime && runtime?.state === "connected" && !runtime.controller?.signal.aborted && isInstalled(current) && !!current?.enabled && (current.skills?.[declaration.id] ?? declaration.defaultEnabled) && !!latest && JSON.stringify(latest) === identity;
+          const unique = [...this.packages.values()].flatMap(item => item.manifest.skills ?? []).filter(skill => skill?.id === declaration.id).length === 1;
+          return unique && !!compatible && declaration.channels.includes("web") && declaration.requiredCapabilities.length === 0 && !this.closed && !capturedController.signal.aborted && this.runtimes.get(owner) === runtime && runtime?.state === "connected" && !runtime.controller?.signal.aborted && isInstalled(current) && !!current?.enabled && (current.skills?.[declaration.id] ?? declaration.defaultEnabled) && !!latest && JSON.stringify(latest) === identity;
         } });
     }
     return result;
+  }
+  /** Computed from ExtensionManager state; contains metadata, never executable objects. */
+  capabilityCatalog(): { providers: { id: string; name: string; version: string; installed: boolean; enabled: boolean; state: ExtensionStatus }[]; capabilities: CapabilityDescriptor[] } {
+    const state = this.readInstalled(), skills = this.skillSnapshot(), capabilities: CapabilityDescriptor[] = [];
+    const providers = [...this.packages.values()].map(item => {
+      const id = item.manifest.id, entry = state[id], runtime = this.runtimes.get(id);
+      const installed = isInstalled(entry), enabled = installed && !!entry?.enabled;
+      const connected = !this.closed && runtime?.state === "connected" && !runtime.controller?.signal.aborted;
+      const reason = !installed ? "uninstalled" : !enabled ? "extension_disabled" : !connected ? "disconnected" : undefined;
+      for (const tool of this.packageTools(item)) {
+        const toolEnabled = item.manifest.type === "tool" || entry?.tools?.[tool.name] === true;
+        const unavailableReason = reason ?? (!toolEnabled ? "disabled" : undefined);
+        capabilities.push({ id: `tool:${id}:${encodeURIComponent(tool.name)}`, providerId: id, kind: "tool", name: tool.name, description: tool.description, version: item.manifest.version, enabled: toolEnabled, available: !unavailableReason, ...(unavailableReason ? { unavailableReason } : {}) });
+      }
+      for (const skill of skills.filter(value => value.declaration.owner === id)) {
+        const d = skill.declaration, unavailableReason = skill.available ? undefined : reason ?? skill.status ?? "unavailable";
+        capabilities.push({ id: `skill:${d.id}`, providerId: id, kind: "skill", name: d.name, description: d.description, version: d.version, channels: [...d.channels], enabled: skill.enabled, available: skill.available, ...(unavailableReason ? { unavailableReason } : {}) });
+      }
+      return { id, name: item.manifest.name, version: item.manifest.version, installed, enabled, state: this.closed ? "disconnected" as const : runtime?.state ?? "disconnected" };
+    });
+    return { providers, capabilities };
+  }
+  /** Visibility is a request-time ceiling; eligibility is rechecked against current state and policy.
+   * Eligibility permits an attempt only: ToolRuns still validates and obtains approval. */
+  requestCapabilities(policy: CapabilityPolicy): { visible: CapabilityDescriptor[]; isEligible(id: string): boolean } {
+    const permitted = (item: CapabilityDescriptor) => item.available && (item.kind === "tool" ? policy.allowTool(item.name) : !!item.channels?.includes(policy.channel) && policy.allowSkill(item.id.slice("skill:".length)));
+    const visible = this.capabilityCatalog().capabilities.filter(permitted);
+    const ids = new Set(visible.map(item => item.id));
+    return { visible, isEligible: id => ids.has(id) && this.capabilityCatalog().capabilities.some(item => item.id === id && permitted(item)) };
   }
   list() {
     const installed = this.readInstalled();
@@ -190,7 +223,7 @@ export class ExtensionManager {
       const fields = manifest.fields.map((field) => ({ key: field.key, label: field.label, sensitive: field.sensitive, required: field.required, configured: Boolean(values[field.env]), ...(!field.sensitive ? { value: secrets.some((secret) => values[field.env]?.includes(secret)) ? "" : values[field.env] ?? "" } : {}) }));
       const runtime = this.runtimes.get(manifest.id);
       const item = this.packages.get(manifest.id)!;
-      const tools = this.packageTools(item).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, enabled: entry?.tools?.[tool.name] === true, available: Boolean(entry?.tools?.[tool.name] && entry?.enabled && runtime?.state === "connected") }));
+      const tools = this.packageTools(item).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, enabled: Boolean(entry && (manifest.type === "tool" || entry.tools?.[tool.name] === true)), available: Boolean(!this.closed && this.toolEnabled(item, tool, installed) && runtime?.state === "connected" && !runtime.controller?.signal.aborted) }));
       const skills = this.skillSnapshot().filter(skill => skill.declaration.owner === manifest.id).map(skill => ({ ...skill.declaration, enabled: skill.enabled, available: skill.available, trusted: !!skill.load, status: skill.status }));
       return { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description, type: manifest.type, builtin: manifest.builtin === true || manifest.id === WEB_STARCORE_ID, installed: Boolean(entry), enabled: entry?.enabled ?? false, state: runtime?.state ?? "disconnected", ...(runtime?.error ? { error: runtime.error } : {}), fields, managementPages: manifest.managementPages ?? [], skills, skillWarnings: this.skillWarnings().filter(warning => warning.startsWith(`${manifest.id}:`)), tools };
     });
@@ -221,7 +254,7 @@ export class ExtensionManager {
   }
   availableTools(): ToolDefinition[] {
     const state = this.readInstalled();
-    return [...this.packages.values()].flatMap((item) => this.runtimes.get(item.manifest.id)?.state === "connected" ? this.packageTools(item).filter((tool) => this.toolEnabled(item, tool, state)) : []);
+    return [...this.packages.values()].flatMap((item) => !this.closed && this.runtimes.get(item.manifest.id)?.state === "connected" && !this.runtimes.get(item.manifest.id)?.controller?.signal.aborted ? this.packageTools(item).filter((tool) => this.toolEnabled(item, tool, state)) : []);
   }
   channelEnabled(id: string): boolean { const item = this.item(id); const entry = this.readInstalled()[id]; return item.manifest.type === "channel" && isInstalled(entry) && Boolean(entry?.enabled); }
   setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal) => Promise<string>): void { this.channelChat = handler; }
@@ -230,7 +263,7 @@ export class ExtensionManager {
     const tool = item && this.packageTools(item).find((candidate) => candidate.name === name);
     if (!item || !tool || !this.toolEnabled(item, tool, this.readInstalled())) return undefined;
     const runtime = this.runtimes.get(item.manifest.id);
-    if (runtime?.state !== "connected" || !runtime.controller) return undefined;
+    if (this.closed || runtime?.state !== "connected" || !runtime.controller || runtime.controller.signal.aborted) return undefined;
     const key = `${item.manifest.id}:${name}`;
     let controller = this.toolControllers.get(key);
     if (!controller || controller.signal.aborted) { controller = new AbortController(); this.toolControllers.set(key, controller); }
@@ -241,7 +274,10 @@ export class ExtensionManager {
     const entry = this.readInstalled()[id];
     if (!item || item.manifest.type !== "channel" || !isInstalled(entry) || !entry?.enabled) return undefined;
     const runtime = this.runtimes.get(id);
-    return runtime?.state === "connected" ? runtime.controller?.signal : undefined;
+    if (this.closed || runtime?.state !== "connected" || !runtime.controller || runtime.controller.signal.aborted) return undefined;
+    let controller = this.channelControllers.get(id);
+    if (!controller || controller.signal.aborted) { controller = new AbortController(); this.channelControllers.set(id, controller); }
+    return AbortSignal.any([runtime.controller.signal, controller.signal]);
   }
   async executeTool(name: string, input: Readonly<ToolInput>, signal: AbortSignal): Promise<ToolResult> {
     const item = this.ownerOfTool(name);
@@ -382,7 +418,14 @@ export class ExtensionManager {
           if (!group) throw new Error("QQ_FLOW_INVALID");
           return runQQInputFlow(group.flow, request, controller.signal);
         } } : {}),
-        status: (state, error) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) { runtime.state = state; if (error) runtime.error = "扩展连接失败，请检查配置、网络和平台权限。"; } },
+        status: (state, error) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) {
+          if (runtime.state === "connected" && state !== "connected") {
+            this.channelControllers.get(id)?.abort(); this.channelControllers.delete(id);
+            for (const tool of this.packageTools(item)) { const key = `${id}:${tool.name}`; this.toolControllers.get(key)?.abort(); this.toolControllers.delete(key); }
+            for (const skill of item.manifest.skills ?? []) { this.skillControllers.get(skill.id)?.abort(); this.skillControllers.delete(skill.id); }
+          }
+          runtime.state = state; if (error) runtime.error = "扩展连接失败，请检查配置、网络和平台权限。";
+        } },
         log: (level, message, details) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) this.logs.write(level, id, message, details, item.manifest.fields.filter((field) => field.sensitive).map((field) => config[field.key] ?? "")); },
         reportError: (code) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) runtime.error = code === "MODEL_FAILED" ? runtime.error ?? "模型请求失败，请检查模型配置和服务状态。" : "渠道发送失败，请检查平台权限和连接状态。"; },
         message: async (message: ChannelMessage, signal: AbortSignal) => {
@@ -390,6 +433,7 @@ export class ExtensionManager {
           runtime.error = undefined;
           try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat(message, cancellation) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
           catch (error) {
+            if (controller.signal.aborted || signal.aborted || (error instanceof ModelError && error.code === "REQUEST_CANCELLED")) throw new Error("REQUEST_CANCELLED");
             if (!controller.signal.aborted && !signal.aborted) {
               const categories: Record<string, string> = { NOT_CONFIGURED: "模型未配置。", AUTH_FAILED: "模型认证失败。", MODEL_NOT_FOUND: "模型不存在。", RATE_LIMITED: "模型请求受到限流。", TIMEOUT: "模型请求超时。" };
               runtime.error = error instanceof ModelError ? categories[error.code] ?? "模型请求失败，请检查模型服务状态。" : "模型请求失败，请检查模型服务状态。";
@@ -401,6 +445,6 @@ export class ExtensionManager {
       runtime.instance.start();
     } catch { this.logs.write("ERROR", "extensions", "扩展启动异常。", { code: id }); controller.abort(); runtime.instance = undefined; runtime.state = "error"; runtime.error = "扩展启动失败，请检查配置。"; }
   }
-  private async stop(id: string): Promise<void> { const runtime = this.runtimes.get(id); if (!runtime) return; runtime.controller?.abort(); let pending: void | Promise<void> = undefined; try { pending = runtime.instance?.stop(); } catch {} this.runtimes.set(id, { state: "disconnected" }); try { await pending; } catch {} }
+  private async stop(id: string): Promise<void> { const runtime = this.runtimes.get(id); if (!runtime) return; runtime.controller?.abort(); this.channelControllers.get(id)?.abort(); this.channelControllers.delete(id); let pending: void | Promise<void> = undefined; try { pending = runtime.instance?.stop(); } catch {} this.runtimes.set(id, { state: "disconnected" }); try { await pending; } catch {} }
   async shutdown(): Promise<void> { this.closed = true; await Promise.all([...this.runtimes.keys()].map((id) => this.stop(id))); }
 }

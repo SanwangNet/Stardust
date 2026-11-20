@@ -9,6 +9,7 @@ export type AgentRequest = {
   current: string;
   messages: ConversationContextMessage[];
   signal?: AbortSignal;
+  modelContext?: { eventId?: string };
 };
 export type AgentResult = { source: AgentSource; content: string };
 type AgentModel = Partial<Pick<ModelService, "chatContext" | "chatWithTools">>;
@@ -42,17 +43,17 @@ export type AgentStepResult = { status: "done"; content: string } | { status: "p
 export class AgentOrchestrator {
   constructor(private readonly model: AgentModel) {}
 
-  async execute(request: AgentRequest, startTools: AgentRunFactory): Promise<AgentResult> {
+  async execute(request: AgentRequest, execution: AgentRunFactory | { mode: "model-only" }): Promise<AgentResult> {
     const source = { ...request.source };
     if (request.signal?.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
-    if (typeof this.model.chatWithTools !== "function") {
+    if (typeof execution !== "function" || typeof this.model.chatWithTools !== "function") {
       if (!this.model.chatContext) throw new ModelError("NOT_CONFIGURED", 400);
-      const content = await this.model.chatContext(request.messages, request.signal);
+      const content = await this.model.chatContext(request.messages, request.signal, request.modelContext);
       if (request.signal?.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
       return { source, content };
     }
 
-    const handle = await startTools({ ...request, source });
+    const handle = await execution({ ...request, source });
     const cancel = () => handle.cancel();
     request.signal?.addEventListener("abort", cancel, { once: true });
     try {
