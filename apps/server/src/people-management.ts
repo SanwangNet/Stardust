@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import type { ChannelMessage } from "./channel.js";
 import type { PeopleRepository } from "./people.js";
 
 export type ManagementQuery = "people" | "person" | "identities" | "personSpaces" | "spaces" | "space" | "members" | "identity" | "audit";
@@ -59,6 +60,20 @@ export class PeopleManagementReader {
       worker.once("message", (message: { ok: boolean; value?: unknown; error?: string }) => finish(message.ok ? message.value : message.error, !message.ok));
       worker.once("error", () => finish("PEOPLE_UNAVAILABLE", true));
       worker.once("exit", () => finish("PEOPLE_UNAVAILABLE", true));
+    });
+  }
+  /** Shares the management worker limit and lifecycle for bounded QQ history writes. */
+  async recordQQ(path: string, message: ChannelMessage, reply?: string): Promise<void> {
+    if (this.closed || this.workers.size >= 8) throw new Error("PEOPLE_UNAVAILABLE");
+    return new Promise((resolve, reject) => {
+      let worker: Worker;
+      try { worker = new Worker(new URL("./people-management-worker.js", import.meta.url), { workerData: { path, history: { message, reply } } }); }
+      catch { reject(new Error("HISTORY_UNAVAILABLE")); return; }
+      this.workers.add(worker); let settled = false;
+      const finish = (ok: boolean) => { if (settled) return; settled = true; clearTimeout(timer); this.workers.delete(worker); void worker.terminate().catch(() => {}); if (ok) resolve(); else reject(new Error("HISTORY_UNAVAILABLE")); };
+      const timer = setTimeout(() => finish(false), 1500);
+      worker.once("message", (result: { ok: boolean }) => finish(result.ok));
+      worker.once("error", () => finish(false)); worker.once("exit", () => finish(false));
     });
   }
   shutdown(): void { this.closed = true; for (const worker of this.workers) void worker.terminate().catch(() => {}); this.workers.clear(); }

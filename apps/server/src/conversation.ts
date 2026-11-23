@@ -1,3 +1,7 @@
+import { migrateHistoryProvenance, recordQQ } from "./history-provenance.js";
+import { ContextAccessPolicy } from "./context-access-policy.js";
+import { resolveIdentity } from "./identity-resolver.js";
+import type { ChannelMessage } from "./channel.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -46,7 +50,7 @@ export class ConversationService {
     try {
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version > 8) throw new Error("UNSUPPORTED_SCHEMA");
+    if (version > 9) throw new Error("UNSUPPORTED_SCHEMA");
     if (version === 0) this.db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE messages (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','complete','failed','unknown')), request_id TEXT NOT NULL, UNIQUE(conversation_id, request_id, role));
@@ -59,6 +63,7 @@ export class ConversationService {
     if (version < 6) migratePeople(this.db);
     if (version < 7) migratePeopleManagement(this.db);
     if (version < 8) migratePeopleMerge(this.db);
+    if (version < 9) migrateHistoryProvenance(this.db);
     this.db.prepare("UPDATE messages SET status = 'unknown' WHERE status = 'pending'").run();
     this.globalContext = new GlobalContextService(this.db, model.synthesizeGlobalContext ? { synthesizeGlobalContext: model.synthesizeGlobalContext.bind(model) } : undefined);
     this.agent = new AgentCore(this.db);
@@ -106,6 +111,37 @@ export class ConversationService {
   }
   getWeb(id: string): Conversation { const item = this.get(id); if (item.channelId !== WEB_CHANNEL_ID || item.scopeId !== WEB_SCOPE_ID) throw new Error("NOT_FOUND"); return item; }
   listWeb(): Conversation[] { return this.list().filter((item) => item.channelId === WEB_CHANNEL_ID && item.scopeId === WEB_SCOPE_ID); }
+  /** Trusted Core ingress; this never exposes provenance to a model or public API. */
+  recordQQ(message: ChannelMessage, reply?: string): void { recordQQ(this.db, message, reply); }
+  /** Restricted to the caller's current conversation. Other dimensions require future policy. */
+  historyProvenance(currentConversationId: string, requestedConversationId: string, after = 0, limit = 50) {
+    const current = this.get(currentConversationId);
+    const requested = this.get(requestedConversationId);
+    if (new ContextAccessPolicy().evaluateHistory({ conversationId: current.id, channelId: current.channelId }, { conversationId: requested.id, channelId: requested.channelId }, "CURRENT_CONVERSATION") !== "allow") throw new Error("HISTORY_ACCESS_DENIED");
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("INVALID_INPUT");
+    this.get(currentConversationId);
+    const rows = this.db.prepare(`SELECT m.sequence,m.id,m.conversation_id AS conversationId,m.role,m.content,m.created_at AS createdAt,
+      p.channel_id AS channelId,p.provider,p.conversation_type AS conversationType,p.author_kind AS authorKind,p.provenance_kind AS provenanceKind,
+      p.identity_state AS identityState,p.space_state AS spaceState,p.identity_id AS identityId,p.space_id AS spaceId,
+      p.account_key AS accountKey,p.sender_key AS senderKey,p.space_key AS spaceKey,p.observed_at AS observedAt
+      FROM messages m JOIN message_provenance p ON p.message_id=m.id WHERE m.conversation_id=? AND m.sequence>? ORDER BY m.sequence LIMIT ?`).all(currentConversationId,after,limit);
+    return rows.map(row => {
+      let identityId = row.identityId, spaceId = row.spaceId, currentPersonId: string | null = null;
+      let identityState = row.identityState, spaceState = row.spaceState;
+      if (row.provenanceKind === "trusted_channel" && row.channelId === "qq-bot" && typeof row.accountKey === "string") {
+        if (row.conversationType === "group" && typeof row.spaceKey === "string") {
+          const space = this.people.findSpace("qq", row.accountKey, "group", row.spaceKey);
+          if (space) { spaceId = space.id; spaceState = "known"; }
+        }
+        if (row.authorKind === "platform_user" && typeof row.senderKey === "string" && (row.conversationType === "group" || row.conversationType === "private")) {
+          const result = resolveIdentity(this.people, { channelId: "qq-bot", accountId: row.accountKey, senderId: row.senderKey, conversationType: row.conversationType, ...(typeof row.spaceKey === "string" ? { groupId: row.spaceKey } : {}) });
+          if (result.kind === "resolved") { identityId = result.identityId; identityState = "known"; currentPersonId = result.personId; }
+        }
+      }
+      const { accountKey, senderKey, spaceKey, ...safe } = row;
+      return { ...safe, identityState, spaceState, identityId, spaceId, currentPersonId };
+    });
+  }
   searchHistory(input: unknown, onResult?: (evidence: HistoryEvidence) => void) {
     return searchHistory(this.db, WEB_CONTEXT_OWNER, input, onResult);
   }

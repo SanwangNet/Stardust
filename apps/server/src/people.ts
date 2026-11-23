@@ -22,7 +22,7 @@ export function migratePeople(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 6 || version === 7 || version === 8) { db.exec("COMMIT"); return; }
+    if (version === 6 || version === 7 || version === 8 || version === 9) { db.exec("COMMIT"); return; }
     if (version !== 5) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`
       CREATE TABLE people (
@@ -82,7 +82,7 @@ export function migratePeopleManagement(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 7 || version === 8) { db.exec("COMMIT"); return; }
+    if (version === 7 || version === 8 || version === 9) { db.exec("COMMIT"); return; }
     if (version !== 6) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`ALTER TABLE people ADD COLUMN manual_name TEXT;
       ALTER TABLE people ADD COLUMN note TEXT;
@@ -109,7 +109,7 @@ export function migratePeopleMerge(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 8) { db.exec("COMMIT"); return; }
+    if (version === 8 || version === 9) { db.exec("COMMIT"); return; }
     if (version !== 7) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`ALTER TABLE people ADD COLUMN merged_into_id TEXT REFERENCES people(id) ON DELETE RESTRICT CHECK(merged_into_id IS NULL OR merged_into_id != id);
       ALTER TABLE people ADD COLUMN merged_at TEXT;
@@ -250,6 +250,14 @@ export class PeopleRepository {
     return this.db.prepare(`SELECT ${spaceCols} FROM spaces WHERE provider_id=? AND account_id=? AND space_type=? AND external_id=?`).get(provider,account,type,external) as unknown as Space;
   }
   getSpace(spaceId: string): Space | null { const row = this.db.prepare(`SELECT ${spaceCols} FROM spaces WHERE id=?`).get(id(spaceId)); return row ? row as unknown as Space : null; }
+  findSpace(providerId: string, accountId: string, spaceType: string, externalId: string): Space | null {
+    const row = this.db.prepare(`SELECT ${spaceCols} FROM spaces WHERE provider_id=? AND account_id=? AND space_type=? AND external_id=?`).get(providerId, accountId, spaceType, externalId);
+    return row ? row as unknown as Space : null;
+  }
+  getMembership(spaceId: string, identityId: string): Membership | null {
+    const row = this.db.prepare(`SELECT ${memberCols} FROM memberships WHERE space_id=? AND identity_id=?`).get(id(spaceId), id(identityId));
+    return row ? row as unknown as Membership : null;
+  }
   listSpaces(): Space[] { return this.db.prepare(`SELECT ${spaceCols} FROM spaces ORDER BY last_seen_at DESC,id`).all() as unknown as Space[]; }
   deleteSpace(spaceId: string): void { this.transaction(() => { if (!this.db.prepare("DELETE FROM spaces WHERE id=?").run(id(spaceId)).changes) throw new Error("NOT_FOUND"); }); }
 

@@ -136,21 +136,21 @@ test("rejects malformed external data and protects database constraints independ
 test("version 5 upgrades without changing existing conversations or global context; reopen and repeated migration are safe", async t => {
   const f = fixture(t), conversation = f.store.create("原始会话");
   await f.store.submit(conversation.id,randomUUID(),"原始消息"); f.store.close();
-  let db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON; DROP TABLE people_audit; DROP TABLE memberships; DROP TABLE identities; DROP TABLE spaces; DROP TABLE people; PRAGMA user_version=5;");
+  let db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON; DROP TRIGGER message_provenance_default; DROP TABLE message_provenance; DROP TABLE people_audit; DROP TABLE memberships; DROP TABLE identities; DROP TABLE spaces; DROP TABLE people; PRAGMA user_version=5;");
   db.prepare("INSERT INTO global_context_entries(id,owner,topic,content,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?)").run("legacy-entry","web:default","旧主题","旧内容",time(2020),time(2020),1); db.close();
   const migrated = f.open(); assert.deepEqual(migrated.messages(conversation.id).map(item => item.content),["原始消息","测试回复"]);
   assert.equal(migrated.globalContext.entries("web:default")[0].content,"旧内容");
   const result = migrated.people.observeIdentity(identity("persistent",{displayName:"持久化"})); migrated.close();
-  db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON"); assert.equal(db.prepare("PRAGMA user_version").get().user_version,8); migratePeople(db); assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(),[]); db.close();
+  db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON"); assert.equal(db.prepare("PRAGMA user_version").get().user_version,9); migratePeople(db); assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(),[]); db.close();
   const reopened = f.open(); assert.equal(reopened.people.getPerson(result.personId).displayName,"持久化"); assert.equal(reopened.people.getPersonIdentities(result.personId)[0].id,result.id);
 });
 
 test("failed migration rolls back and newer versions are rejected without clearing data", t => {
   const f = fixture(t); f.store.close();
-  let db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON; DROP TABLE people_audit; DROP TABLE memberships; DROP TABLE identities; DROP TABLE spaces; DROP TABLE people; CREATE TABLE identities(existing TEXT); INSERT INTO identities VALUES('preserve'); PRAGMA user_version=5;"); db.close();
+  let db = new DatabaseSync(f.path); db.exec("PRAGMA foreign_keys=ON; DROP TRIGGER message_provenance_default; DROP TABLE message_provenance; DROP TABLE people_audit; DROP TABLE memberships; DROP TABLE identities; DROP TABLE spaces; DROP TABLE people; CREATE TABLE identities(existing TEXT); INSERT INTO identities VALUES('preserve'); PRAGMA user_version=5;"); db.close();
   assert.throws(() => f.open(),/already exists/);
   db = new DatabaseSync(f.path); assert.equal(db.prepare("PRAGMA user_version").get().user_version,5); assert.equal(db.prepare("SELECT existing FROM identities").get().existing,"preserve"); assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='people'").get().n,0);
-  db.exec("PRAGMA user_version=9"); db.close();
+  db.exec("PRAGMA user_version=10"); db.close();
   assert.throws(() => f.open(),/UNSUPPORTED_SCHEMA/);
   db = new DatabaseSync(f.path); assert.equal(db.prepare("SELECT existing FROM identities").get().existing,"preserve"); db.close();
 });

@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import type { ConversationContextMessage } from "./conversation-context.js";
 import type { AgentCore } from "./agent-core.js";
 import type { ChannelMessage, ChannelDeliver } from "./channel.js";
 import type { ExtensionManager } from "./extension-manager.js";
@@ -35,8 +36,8 @@ export class QQToolRuns {
       : message.conversationType === "group" && this.groups.has(message.conversationId) && this.groupSenders.has(message.senderId));
   }
   start(message: ChannelMessage, signal?: AbortSignal): Promise<string>;
-  start(message: ChannelMessage, signal: AbortSignal | undefined, production: { deliver: ChannelDeliver }): Promise<string | undefined>;
-  async start(message: ChannelMessage, signal?: AbortSignal, production?: { deliver: ChannelDeliver }): Promise<string | undefined> {
+  start(message: ChannelMessage, signal: AbortSignal | undefined, production: { deliver: ChannelDeliver; personContext?: ConversationContextMessage }): Promise<string | undefined>;
+  async start(message: ChannelMessage, signal?: AbortSignal, production?: { deliver: ChannelDeliver; personContext?: ConversationContextMessage }): Promise<string | undefined> {
     message = { ...message };
     if (this.closed || signal?.aborted || message.channelId !== "qq-bot" || !["private", "group"].includes(message.conversationType) || !message.conversationId || !message.senderId || !message.messageId || typeof message.content !== "string" || !message.content.trim() || Buffer.byteLength(message.content, "utf8") > 32000) throw new Error("INVALID_QQ_REQUEST");
     if (production && !this.productionAllowed(message)) return undefined;
@@ -64,7 +65,7 @@ export class QQToolRuns {
     }
     const owner = `qq:${randomUUID()}`;
     const source = { starcoreId: "qq-bot", channelId: "qq-bot", conversationId: this.ref(scope, message.conversationId) };
-    const id = this.runs.start(owner, message.content, [{ role: "system", content: core.instructions("qq-bot") }, { role: "user", content: message.content }], {
+    const id = this.runs.start(owner, message.content, [{ role: "system", content: core.instructions("qq-bot") }, ...(production?.personContext ? [production.personContext] : []), { role: "user", content: message.content }], {
       searchHistory: () => [], activity: () => {},
       allowTool: name => name !== "search_history" && allow(name) && !!tools.get(name) && snapshot.isEligible(tools.get(name)!.id),
       targetRef: message.targetRef ?? "",

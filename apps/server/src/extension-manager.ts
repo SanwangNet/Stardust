@@ -442,7 +442,7 @@ export class ExtensionManager {
         message: async (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => {
           if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
           runtime.error = undefined;
-          try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat(message, cancellation, deliver) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
+          try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat({ ...message, identityAccountId: id === "qq-bot" ? config.appId : undefined }, cancellation, deliver) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
           catch (error) {
             if (controller.signal.aborted || signal.aborted || (error instanceof ModelError && error.code === "REQUEST_CANCELLED")) throw new Error("REQUEST_CANCELLED");
             if (!controller.signal.aborted && !signal.aborted) {

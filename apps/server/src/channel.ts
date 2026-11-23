@@ -6,6 +6,8 @@ import type { IdentityObservation, SpaceMemberObservation } from "./people.js";
 
 export interface ChannelMessage {
   channelId: string;
+  /** Injected by ExtensionManager from the running QQ configuration. */
+  identityAccountId?: string;
   messageId: string;
   senderId: string;
   conversationId: string;

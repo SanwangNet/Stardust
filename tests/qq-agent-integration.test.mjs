@@ -59,7 +59,7 @@ for (const supportsTools of [false, true]) test(`QQ through the real adapter use
   await f.bot.emit(event("group", "four", "other-group"));
   assert.equal(f.entries.length, 4); assert.equal(calls.length, 4); assert.equal(f.bot.sent.length, 4);
   assert.equal(toolCalls, 0); assert.equal(toolLookups, 0); assert.equal(targetLookups, 0);
-  assert.equal(f.store.list().length, 1);
+  assert.equal(f.store.listWeb().length, 1);
   const sources = f.entries.map(entry => entry.request.source);
   assert.ok(sources.every(source => source.starcoreId === "qq-bot" && source.channelId === "qq-bot"));
   assert.equal(new Set(sources.map(source => source.conversationId)).size, 4);
@@ -74,7 +74,7 @@ for (const supportsTools of [false, true]) test(`QQ through the real adapter use
   }
   assert.deepEqual(f.bot.sent.map(item => item.target), [a.replyTarget, event("group", "two", "group-openid").replyTarget, event("c2c", "three", "group-openid").replyTarget, event("group", "four", "other-group").replyTarget]);
   f.manager.availableTools = availableTools; f.manager.availableTargets = availableTargets;
-  const origin = `http://127.0.0.1:${f.server.address().port}`, webId = f.store.list()[0].id;
+  const origin = `http://127.0.0.1:${f.server.address().port}`, webId = f.store.listWeb()[0].id;
   const response = await fetch(`${origin}/api/v1/conversations/${webId}/messages`, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ requestId: randomUUID(), content: "Web 新请求" }) });
   assert.equal(response.status, 200); assert.equal(f.entries.length, 5);
   assert.equal(f.entries[4].request.source.starcoreId, "web-chat"); assert.equal(typeof f.entries[4].mode, "function");

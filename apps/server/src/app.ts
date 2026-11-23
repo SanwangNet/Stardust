@@ -1,3 +1,5 @@
+import { IdentityResolver, type IdentityInput } from "./identity-resolver.js";
+import { scopedPersonContext } from "./context-access-policy.js";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -224,6 +226,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   }
   const peopleObserver = new PeopleObserver(async () => (await openConversations()).databasePath, logs);
   const peopleReader = new PeopleManagementReader();
+  const identityResolver = new IdentityResolver();
   const controlToken = randomBytes(32).toString("base64url");
   const peoplePreviewKey = randomBytes(32);
   if (typeof extensions.setChannelObserver === "function") extensions.setChannelObserver((observation, signal) => peopleObserver.submit(observation, signal));
@@ -239,11 +242,22 @@ export function createStardustServer(options: AppOptions = {}): Server {
   });
   if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function") {
     extensions.setChannelChat(async (message, signal, deliver) => {
-      const core = (await openConversations()).agent;
+      const store = await openConversations();
+      const core = store.agent;
+      const identityInput: IdentityInput | undefined = message.channelId === "qq-bot" && message.identityAccountId ? { channelId: "qq-bot", accountId: message.identityAccountId, senderId: message.senderId, conversationType: message.conversationType, ...(message.conversationType === "group" ? { groupId: message.conversationId } : {}) } : undefined;
+      const resolution = identityInput ? await identityResolver.resolve(store.databasePath, store.people, identityInput) : undefined;
+      if (resolution?.kind === "unavailable") logs.write("WARN", "people", "人物身份解析暂不可用。", { code: "IDENTITY_UNAVAILABLE" });
+      const personContext = identityInput && resolution ? scopedPersonContext(identityInput, resolution) : undefined;
+      const saveHistory = async (reply?: string) => {
+        if (!identityInput) return;
+        try { if (store.databasePath === ":memory:") store.recordQQ(message, reply); else await peopleReader.recordQQ(store.databasePath, message, reply); }
+        catch { logs.write("WARN", "history", "QQ 历史保存未完成。", { code: "HISTORY_UNAVAILABLE" }); }
+      };
+      await saveHistory();
       const listener = server.address();
       const localControl = !!listener && typeof listener !== "string" && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(listener.address);
       if (message.channelId === "qq-bot" && qqEnabled && localControl && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
-        const runId = await qqRuns.start(message, signal, { deliver });
+        const runId = await qqRuns.start(message, signal, { deliver: async (reply, deliverySignal) => { await saveHistory(reply); return deliver(reply, deliverySignal); }, personContext });
         if (runId) return { kind: "deferred" as const };
       }
       // ExtensionManager verifies the channel against the running extension; QQ has
@@ -252,9 +266,10 @@ export function createStardustServer(options: AppOptions = {}): Server {
       const result = await agent.execute({
         source: { starcoreId: message.channelId, channelId: message.channelId, conversationId },
         current: message.content,
-        messages: [{ role: "system", content: core.instructions(message.channelId) }, { role: "user", content: message.content }],
+        messages: [{ role: "system", content: core.instructions(message.channelId) }, ...(personContext ? [personContext] : []), { role: "user", content: message.content }],
         signal, modelContext: { eventId: message.eventId },
       }, { mode: "model-only" });
+      await saveHistory(result.content);
       return result.content;
     });
   }
@@ -602,9 +617,14 @@ export function createStardustServer(options: AppOptions = {}): Server {
           const execute = async (context: import("./conversation-context.js").ConversationContextMessage[], activity: (event: Omit<import("./history-agent.js").ModelActivity, "requestId">) => void, evidence: (item: import("./history-search.js").HistoryEvidence) => void) => {
             const key = `${id}/${requestId}`;
             const conversation = store.getWeb(id);
+            // Web has no authenticated account binding yet; the shared resolver returns unresolved.
+            const webIdentity: IdentityInput = { channelId: "web-chat" };
+            const webResolution = await identityResolver.resolve(store.databasePath, store.people, webIdentity);
+            const webPersonContext = scopedPersonContext(webIdentity, webResolution);
+            const scopedContext = webPersonContext ? [...context.slice(0, -1), webPersonContext, ...context.slice(-1)] : context;
             const result = await agent.execute({
               source: { starcoreId: conversation.starcoreId, channelId: conversation.channelId, conversationId: conversation.id },
-              current: content, messages: context, signal: controller.signal,
+              current: content, messages: scopedContext, signal: controller.signal,
             }, async request => {
               const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
               const capabilitySnapshot = typeof extensions.requestCapabilities === "function" ? extensions.requestCapabilities({ channel: "web", allowTool: coreAllows, allowSkill: () => false }) : undefined;
@@ -940,7 +960,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
   });
   server.on("listening", () => { try { if (setup.getInitializationState().initialized) { void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); if (options.startConversations || options.conversationService) void openConversations().catch(() => logs.write("ERROR", "global-context", "无法打开会话数据库。")); } } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
-  server.on("close", () => { serverClosing = true; peopleObserver.shutdown(); peopleReader.shutdown(); qqRuns.shutdown(); toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
+  server.on("close", () => { serverClosing = true; peopleObserver.shutdown(); peopleReader.shutdown(); identityResolver.shutdown(); qqRuns.shutdown(); toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;

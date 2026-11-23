@@ -117,16 +117,16 @@ test("version 6 upgrade preserves old records and is repeatable", async t => {
   const root = await mkdtemp(join(tmpdir(),"stardust-people-v6-")), path = join(root,"test.sqlite"), model = {async chatContext(){return "ok";}};
   t.after(() => rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:50}));
   let store = new ConversationService(model,path); const before = store.people.observeSpaceMember(observation("legacy-group","legacy-member","旧昵称")), manuallyNamed = store.people.createPerson({displayName:"原有人名"}); store.close();
-  let db = new DatabaseSync(path); db.exec(removeV8 + "DROP TABLE people_audit; ALTER TABLE identities DROP COLUMN link_version; ALTER TABLE people DROP COLUMN version; ALTER TABLE people DROP COLUMN note; ALTER TABLE people DROP COLUMN manual_name; PRAGMA user_version=6;"); db.close();
+  let db = new DatabaseSync(path); db.exec("DROP TRIGGER message_provenance_default; DROP TABLE message_provenance;" + removeV8 + "DROP TABLE people_audit; ALTER TABLE identities DROP COLUMN link_version; ALTER TABLE people DROP COLUMN version; ALTER TABLE people DROP COLUMN note; ALTER TABLE people DROP COLUMN manual_name; PRAGMA user_version=6;"); db.close();
   store = new ConversationService(model,path); assert.equal(store.people.getIdentity(before.identity.id).personId,before.identity.personId); assert.equal(store.people.listSpaceMembers(before.space.id).length,1); assert.equal(store.people.getPerson(manuallyNamed.id).manualName,"原有人名"); store.close();
-  db = new DatabaseSync(path); assert.equal(db.prepare("PRAGMA user_version").get().user_version,8); migratePeopleManagement(db); assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(),[]); db.close();
+  db = new DatabaseSync(path); assert.equal(db.prepare("PRAGMA user_version").get().user_version,9); migratePeopleManagement(db); assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(),[]); db.close();
 });
 
 test("failed version 7 migration rolls back every schema change", async t => {
   const root = await mkdtemp(join(tmpdir(),"stardust-people-v6-fail-")), path = join(root,"test.sqlite"), model = {async chatContext(){return "ok";}};
   t.after(() => rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:50}));
   const store = new ConversationService(model,path), person = store.people.observeIdentity({providerId:"qq",accountId:"app",identityType:"user",scope:{kind:"account"},externalId:"legacy-secret",observedAt:when,source:"message_sender"}); store.close();
-  const db = new DatabaseSync(path); db.exec(removeV8 + "DROP TABLE people_audit; ALTER TABLE identities DROP COLUMN link_version; ALTER TABLE people DROP COLUMN version; ALTER TABLE people DROP COLUMN note; ALTER TABLE people DROP COLUMN manual_name; CREATE TABLE people_audit(existing TEXT); PRAGMA user_version=6;");
+  const db = new DatabaseSync(path); db.exec("DROP TRIGGER message_provenance_default; DROP TABLE message_provenance;" + removeV8 + "DROP TABLE people_audit; ALTER TABLE identities DROP COLUMN link_version; ALTER TABLE people DROP COLUMN version; ALTER TABLE people DROP COLUMN note; ALTER TABLE people DROP COLUMN manual_name; CREATE TABLE people_audit(existing TEXT); PRAGMA user_version=6;");
   assert.throws(() => migratePeopleManagement(db),/already exists/);
   assert.equal(db.prepare("PRAGMA user_version").get().user_version,6);
   assert.equal(db.prepare("SELECT person_id FROM identities WHERE id=?").get(person.id).person_id,person.personId);

@@ -9,7 +9,7 @@ if (typeof path !== "string" || !path || path === ":memory:" || !parentPort) thr
 if (!statSync(path).isFile()) throw new Error("OBSERVER_UNAVAILABLE");
 const db = new DatabaseSync(path);
 db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=250;");
-if (Number(db.prepare("PRAGMA user_version").get()?.user_version) !== 8) throw new Error("OBSERVER_SCHEMA_UNAVAILABLE");
+if (Number(db.prepare("PRAGMA user_version").get()?.user_version) !== 9) throw new Error("OBSERVER_SCHEMA_UNAVAILABLE");
 const port = parentPort;
 port.on("message", (job: { observation: ChannelObservation; cancellation: SharedArrayBuffer }) => {
   try {

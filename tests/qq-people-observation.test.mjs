@@ -10,6 +10,7 @@ import { ConversationService } from "../apps/server/dist/conversation.js";
 import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { createQQBotExtension } from "../apps/server/dist/extensions/qq-bot.js";
 import { LogService } from "../apps/server/dist/logger.js";
+import { qqKeys } from "../apps/server/dist/history-provenance.js";
 import { PeopleObserver } from "../apps/server/dist/people-observer.js";
 
 const until = async fn => { for (let i = 0; i < 500; i++) { const value = await fn(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 10)); } throw new Error("timed out"); };
@@ -128,4 +129,34 @@ test("bounded observer drops revoked pending work, closes safely and never waits
   assert.ok(fakeLogs.read().entries.some(entry => entry.details?.code === "OBSERVATION_QUEUE_FULL"));
   first.abort(); second.abort(); observer.shutdown(); resolvePath(f.database);
   await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(f.identity("qq_c2c_user", "must-not-write"), null);
+});
+
+
+test("accepted QQ messages deliver only current scoped identity to the real orchestrator", async t => {
+  const f = await fixture(t);
+  const meta = { observedAt: new Date(Date.now() - 5000).toISOString(), source: "message_sender" };
+  const add = (group, name) => f.store.people.observeSpaceMember({ space: { providerId: "qq", accountId: "123", spaceType: "group", externalId: group, ...meta }, identity: { identityType: "qq_group_member", scopeKind: "space", externalId: "openid-secret", displayName: name, ...meta }, membership: { displayName: name, ...meta } });
+  const first = add("group-a", "群甲名称"), second = add("group-b", "群乙秘密");
+  f.store.people.reassignIdentity(second.identity.id, first.identity.personId, 0, "人工确认");
+  await f.bot.emit(message("group", "ctx-a", "openid-secret", "group-a"));
+  await until(() => f.model.calls.length === 1);
+  const promptA = JSON.stringify(f.model.calls[0]);
+  assert.match(promptA, /群甲名称/);
+  for (const secret of ["群乙秘密", "openid-secret", first.identity.personId, "group-a"]) assert.ok(!promptA.includes(secret));
+  await f.bot.emit(message("group", "ctx-b", "openid-secret", "group-b"));
+  await until(() => f.model.calls.length === 2);
+  const promptB = JSON.stringify(f.model.calls[1]);
+  assert.match(promptB, /群乙秘密/); assert.ok(!promptB.includes("群甲名称"));
+});
+
+
+test("accepted QQ event persists scoped user and agent provenance without entering Web search", async t => {
+  const f = await fixture(t), event = message("group", "persist-event", "persist-user", "persist-group", { senderName: "当前群名字" });
+  await f.bot.emit(event); await until(() => f.sent.length === 1);
+  const input = { channelId:"qq-bot", identityAccountId:"123", senderId:"persist-user", messageId:"persist-event", conversationId:"persist-group", conversationType:"group", content:event.content, timestamp:event.timestamp };
+  const id=qqKeys(input).conversationId, rows=f.store.historyProvenance(id,id);
+  assert.equal(rows.length,2); assert.deepEqual(rows.map(row=>row.authorKind),["platform_user","agent"]);
+  assert.equal(rows[0].identityState,"known"); assert.equal(rows[0].spaceState,"known"); assert.equal(rows[1].identityState,"not_applicable");
+  assert.equal(f.store.searchHistory({keywords:["private text persist-event"]}).length,0);
+  assert.ok(!JSON.stringify(f.model.calls).includes("persist-user"));
 });
