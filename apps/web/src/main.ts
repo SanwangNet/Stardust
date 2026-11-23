@@ -1,6 +1,7 @@
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
 import { classifyModelName, isCompactModel } from "./model-classification.js";
 import { initializeConversationUI } from "./conversation-ui.js";
+import { initializePeopleUI } from "./people-ui.js";
 import { initializeGlobalContextUI } from "./global-context-ui.js";
 import { initializeFlowBoard } from "./flow-board.js";
 
@@ -50,6 +51,7 @@ const menu: MenuCategory[] = [
       { label: "日志", path: "/model/logs" },
     ],
   },
+  { label: "人物与群组", items: [{ label: "人物与群组", path: "/model/people" }] },
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }, { label: "星尘提示词", path: "/settings/agent" }] },
 ];
@@ -57,6 +59,7 @@ const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
   "/model/service": "配置、测试和使用你的模型服务。",
   "/model/chat": "与当前模型对话，记录你的想法。",
+  "/model/people": "管理 Stardust 已观察到的人物、平台身份及交流空间。",
   "/model/flow": "查看星尘当前的渠道、上下文与工具关系。",
   "/settings/agent": "设置星尘在各渠道共享的主体提示词。",
   "/model/context": "查看从交流中综合的经历和状态。",
@@ -176,7 +179,7 @@ function animateRootPage(snapshot: HTMLElement, direction: number): void {
 function spaceLevels(path: string): string[] {
   const modelServicePath = "/model/service";
   const extensions = { path: "/extensions/installed", label: "星核中心", icon: "⊞" };
-  if (path === modelServicePath || path === "/model/chat" || path === "/model/flow" || path === "/model/context" || path === "/model/logs") return [path];
+  if (path === modelServicePath || path === "/model/chat" || path === "/model/people" || path === "/model/flow" || path === "/model/context" || path === "/model/logs") return [path];
   if (path === "/model/service/config" || path === "/model/service/test") {
     return [modelServicePath, path];
   }
@@ -1360,6 +1363,7 @@ modelTest.addEventListener("click", () => {
     .finally(() => setModelBusy(false));
 });
 initializeConversationUI();
+initializePeopleUI();
 initializeGlobalContextUI();
 initializeFlowBoard();
 

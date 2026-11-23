@@ -11,7 +11,7 @@ import { AgentOrchestrator, type AgentSource } from "./agent-orchestrator.js";
 
 type InternalTools = { searchHistory: (input: unknown) => HistoryResult[]; activity: (event: Omit<ModelActivity, "requestId">) => void; allowTool?: (name: string) => boolean; allowInput?: (name: string, input: Readonly<ToolInput>) => boolean; targetRef?: string; executionFlow?: ExecutableFlow; maxPromptBytes?: number };
 
-type CallView = { id: string; name: string; status: string; input?: ToolInput; approval?: ToolApproval; approvalStatus?: "pending" | "approved" | "denied" | "expired" | "cancelled" | "unavailable"; createdAt?: string; expiresAt?: string; result?: unknown };
+type CallView = { id: string; name: string; status: string; input?: ToolInput; approval?: ToolApproval; approvalStatus?: "pending" | "approved" | "denied" | "feedback" | "expired" | "cancelled" | "unavailable"; createdAt?: string; expiresAt?: string; result?: unknown };
 type Run = {
   id: string; owner: string; source: AgentSource; status: "working" | "waiting" | "executing" | "done" | "error";
   messages: ModelTurnMessage[]; calls: CallView[]; queue: ToolCall[]; limits: { toolCalls: number }; reply?: string; error?: string; errorDetail?: { source: string; status?: number; code?: string; message?: string };
@@ -45,7 +45,31 @@ export class ToolRuns {
     this.expire(run);
     return { id: run.id, status: run.status, calls: structuredClone(run.calls.filter((call) => call.name !== "search_history")), ...(run.reply !== undefined ? { reply: run.reply } : {}), ...(run.error ? { error: run.error } : {}), ...(run.errorDetail ? { errorDetail: { ...run.errorDetail } } : {}) };
   }
-  decide(owner: string, id: string, toolCallId: string, approved: boolean): void {
+  /** A deliberately small projection: never expose raw target references or arbitrary input. */
+  approvalView(owner: string, id: string) {
+    const run = this.owned(owner, id); this.expire(run);
+    if (run.status !== "waiting" || !run.approval) return null;
+    const call = run.calls.find(item => item.id === run.approval!.call.id), input = run.approval.input, summary = call?.approval;
+    if (!call || !summary) return null;
+    const allowedKeys = new Set(["channel", "target", "content"]);
+    const target = typeof input.target === "string" ? input.target : "";
+    const safe = Object.keys(input).every(key => allowedKeys.has(key)) && (input.target === undefined || typeof input.target === "string") && (input.channel === undefined || typeof input.channel === "string") && !!summary.operation?.trim() && !!summary.targetDescription?.trim() && !!summary.risk?.trim()
+      && (input.content === undefined ? summary.content === undefined : typeof input.content === "string" && input.content === summary.content)
+      && (!target || ![summary.operation, summary.targetDescription, summary.risk].some(value => value.includes(target)));
+    const providerId = typeof this.extensions.capabilityCatalog === "function" ? this.extensions.capabilityCatalog().capabilities.find(item => item.kind === "tool" && item.name === call.name)?.providerId : undefined;
+    return { callId: call.id, name: call.name, providerId: providerId ?? "unknown", createdAt: call.createdAt, expiresAt: call.expiresAt,
+      operation: safe ? summary.operation : "无法安全展示此操作", targetDescription: safe ? summary.targetDescription : "操作详情不可用",
+      ...(safe && summary.content !== undefined ? { content: summary.content } : {}), risk: safe ? summary.risk : "请拒绝或补充说明。", canApprove: safe };
+  }
+  callStatus(owner: string, id: string, callId: string, conversationId?: string) {
+    const run = this.owned(owner, id); this.expire(run);
+    if (conversationId !== undefined && run.source.conversationId !== conversationId) throw new Error("RUN_NOT_FOUND");
+    const call = run.calls.find(item => item.id === callId); if (!call) throw new Error("RUN_NOT_FOUND");
+    const result = call.result && typeof call.result === "object" ? call.result as { code?: unknown } : undefined;
+    return { status: call.status, ...(typeof result?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(result.code) ? { code: result.code } : {}) };
+  }
+  decide(owner: string, id: string, toolCallId: string, approved: boolean, feedback?: string): void {
+    if (feedback !== undefined && (approved || typeof feedback !== "string" || !feedback.trim() || Buffer.byteLength(feedback, "utf8") > 4000)) throw new Error("INVALID_INPUT");
     const run = this.owned(owner, id); this.expire(run);
     const pending = run.approval;
     if (run.status !== "waiting" || !pending || pending.call.id !== toolCallId) throw new Error("APPROVAL_UNAVAILABLE");
@@ -57,9 +81,21 @@ export class ToolRuns {
     }
     const view = run.calls.find((entry) => entry.id === toolCallId)!;
     run.approval = undefined;
-    view.approvalStatus = approved ? "approved" : "denied";
+    view.approvalStatus = approved ? "approved" : feedback !== undefined ? "feedback" : "denied";
     this.logs.write("INFO", "tools", approved ? "工具调用已批准。" : "工具调用已拒绝。", { runId: run.id, toolCallId, toolName: pending.call.name, channel: pending.channel, approval: approved ? "approved" : "denied", stage: "approval" });
-    if (!approved) { view.status = "denied"; view.result = { status: "denied" }; run.messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(view.result) }); run.internal?.activity({ kind: "generating", state: "started", displayText: "正在生成回复…" }); run.status = "working"; void this.advance(run); return; }
+    if (!approved) {
+      view.status = feedback !== undefined ? "feedback" : "denied"; view.result = { status: feedback !== undefined ? "user_feedback" : "denied" };
+      run.messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(view.result) });
+      if (feedback !== undefined) {
+        // Close all calls from the same model turn before injecting the new user instruction.
+        for (const queued of run.queue.splice(0)) {
+          run.calls.push({ id: queued.id, name: queued.name, status: "cancelled", result: { status: "cancelled", code: "USER_FEEDBACK" } });
+          run.messages.push({ role: "tool", tool_call_id: queued.id, content: JSON.stringify({ status: "cancelled", code: "USER_FEEDBACK" }) });
+        }
+        run.messages.push({ role: "user", content: feedback.trim() });
+      }
+      run.internal?.activity({ kind: "generating", state: "started", displayText: "正在生成回复…" }); run.status = "working"; void this.advance(run); return;
+    }
     // Transition before any await, making repeated approvals harmless.
     run.status = "executing"; view.status = "executing";
     const started = Date.now();

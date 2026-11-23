@@ -14,14 +14,14 @@ import { LogService } from "../apps/server/dist/logger.js";
 const until = async fn => { for (let i = 0; i < 1000; i++) { const result = await fn(); if (result) return result; await new Promise(resolve => setTimeout(resolve, 10)); } throw new Error("timed out"); };
 const event = (id, content, options = {}) => ({ kind: "c2c", rawEventType: "C2C_MESSAGE_CREATE", senderId: "authorized", messageId: id, timestamp: new Date().toISOString(), content, replyTarget: { scope: "c2c", targetId: "private-one", msgId: id }, ...options });
 
-async function fixture(t, { enabled = true, policy, maxActive = 20, mode = "success", configured = true, runTimeoutMs } = {}) {
+async function fixture(t, { enabled = true, policy, maxActive = 20, mode = "success", configured = true, runTimeoutMs, people = false, listenHost = "127.0.0.1", opaqueInput = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "stardust-qq-production-"));
   const token = randomBytes(32).toString("base64url"), handlers = new Map(), platform = [], executions = [], turns = [];
   let finish, sendMode = mode, releaseSend, attemptedTarget;
   const bot = { on(name, fn) { handlers.set(name, fn); }, start() { handlers.get("ready")(); return new Promise(resolve => { finish = resolve; }); }, stop() { finish?.(); },
     async sendText(target, content) { platform.push({ target: structuredClone(target), content }); if (sendMode === "reject") throw Object.assign(new Error("mock rejection"), { httpStatus: 403 }); if (sendMode === "network") throw Object.assign(new Error("mock network"), { code: "ETIMEDOUT" }); if (sendMode === "hold") return await new Promise(resolve => { releaseSend = resolve; }); return { id: `reply-${platform.length}` }; },
     emit(value) { return handlers.get("message")({}, value); } };
-  const tool = { name: "mock_tool", description: "mock", parameters: { type: "object" }, validate: input => input?.content === "固定内容" ? { content: input.content } : null,
+  const tool = { name: "mock_tool", description: "mock", parameters: { type: "object" }, validate: input => input?.content === "固定内容" ? { content: input.content, ...(opaqueInput ? { secret: "mock-sensitive-value" } : {}) } : null,
     prepare: input => ({ approval: { operation: "模拟写入", targetDescription: "测试目标", content: input.content, risk: "模拟副作用" } }),
     async execute(input) { executions.push(structuredClone(input)); return { status: "sent" }; } };
   const pkg = { manifest: { id: "mock-provider", name: "Mock", version: "1", description: "mock", type: "channel", fields: [] }, tools: [tool], create(_config, host) { return { start() { host.status("connected"); }, stop() {} }; } };
@@ -34,10 +34,10 @@ async function fixture(t, { enabled = true, policy, maxActive = 20, mode = "succ
     return { content: "", toolCalls: [{ id: "call_1", name: current === "强制未授权" ? "not_allowed" : "mock_tool", arguments: JSON.stringify({ content: "固定内容" }) }] };
   } };
   const manager = new ExtensionManager(root, model, [createQQBotExtension(async () => bot), pkg], new LogService(100, () => {}));
-  const store = new ConversationService(model, ":memory:");
+  const store = new ConversationService(model, people ? join(root, "people.sqlite") : ":memory:");
   const defaultPolicy = { private: ["mock_tool"], privateSenders: ["authorized"], group: ["mock_tool"], groups: ["group-one"], groupSenders: ["authorized"] };
   const server = createStardustServer({ setupService: { getInitializationState: () => ({ initialized: true }) }, extensionManager: manager, modelService: model, conversationService: store, qqApprovalToken: configured ? token : "", qqToolCalling: { enabled, policy: policy ?? defaultPolicy, maxActive }, ...(runTimeoutMs ? { qqToolAdapter: { register() {}, runTimeoutMs } } : {}) });
-  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  server.listen(0, listenHost); await once(server, "listening");
   await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "mock-secret" }); await manager.enable("qq-bot");
   await until(() => handlers.has("message") && manager.list().find(item => item.id === "qq-bot").state === "connected");
   await manager.install("mock-provider"); await manager.enable("mock-provider"); await manager.setToolEnabled("mock-provider", "mock_tool", true);
@@ -48,13 +48,15 @@ async function fixture(t, { enabled = true, policy, maxActive = 20, mode = "succ
   const list = async () => (await (await get(base)).json()).runs;
   const read = async id => (await (await get(`${base}/${id}`)).json()).run;
   const decide = (id, approved) => post(`${base}/${id}/decision`, { toolCallId: "call_1", approved });
-  return { bot, handlers, manager, model, platform, executions, turns, origin, list, read, decide, post, get, setMode(value) { sendMode = value; }, setAttemptedTarget(value) { attemptedTarget = value; }, releaseSend(value) { releaseSend(value); } };
+  return { bot, handlers, manager, model, store, platform, executions, turns, origin, list, read, decide, post, get, setMode(value) { sendMode = value; }, setAttemptedTarget(value) { attemptedTarget = value; }, releaseSend(value) { releaseSend(value); } };
 }
 
 test("real QQ ingress detaches waiting runs, keeps ordinary replies moving and resumes each approved call once", async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, { people: true });
   const first = event("one", "执行工具"); await f.bot.emit(first);
   const waiting = await until(async () => (await f.list()).find(run => run.status === "waiting"));
+  const sender = await until(() => f.store.people.findIdentity({ providerId: "qq", accountId: "123", identityType: "qq_c2c_user", scope: { kind: "account" }, externalId: "authorized" }));
+  assert.equal(f.store.people.getPerson(sender.personId).status, "provisional");
   assert.equal(f.executions.length, 0); assert.equal(waiting.source.scope, "private"); assert.equal(waiting.calls[0].providerId, "mock-provider");
   assert.ok(f.turns[0].tools.some(tool => tool.function.name === "mock_tool"));
   assert.doesNotMatch(JSON.stringify(f.turns[0].messages), /private-one|authorized|Web 渠道补充说明/);
@@ -90,11 +92,58 @@ test("enabled switch with no explicit policy remains model-only", async t => {
   assert.equal(f.model.plain.length, 1); assert.equal(f.turns.length, 0); assert.equal((await f.list()).length, 0);
 });
 
-test("enabled switch without administrator credential remains model-only", async t => {
+test("local control can approve explicitly authorized QQ tools without a separate administrator credential", async t => {
   const f = await fixture(t, { configured: false });
   await f.bot.emit(event("no-admin", "执行工具"));
-  assert.equal(f.model.plain.length, 1); assert.equal(f.turns.length, 0);
+  const session = (await (await fetch(`${f.origin}/api/v1/control-session`)).json()).token;
+  const list = async () => (await (await fetch(`${f.origin}/api/v1/approvals`, { headers: { "x-stardust-control-token": session } })).json()).items;
+  const approval = await until(async () => (await list()).find(item => item.source === "qq"));
+  assert.equal(f.model.plain.length, 0); assert.equal(approval.scope, "private"); assert.equal(approval.canApprove, true); assert.equal(f.executions.length, 0);
+  const body = { source: "qq", runId: approval.runId, callId: approval.callId, decision: "approve" };
+  const decide = () => fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: f.origin, "content-type": "application/json", "x-stardust-control-token": session }, body: JSON.stringify(body) });
+  assert.equal((await decide()).status, 200); assert.equal((await decide()).status, 409);
+  await until(() => f.executions.length === 1); assert.equal(f.executions.length, 1);
   assert.equal((await f.get("/api/v1/qq-tool-runs")).status, 403);
+});
+
+test("wildcard listeners do not enable QQ tools or expose the control session", async t => {
+  const f = await fixture(t, { listenHost: "0.0.0.0" });
+  await f.bot.emit(event("remote-listener", "执行工具"));
+  assert.equal(f.model.plain.length, 1); assert.equal(f.turns.length, 0);
+  assert.equal((await fetch(`${f.origin}/api/v1/control-session`)).status, 403);
+});
+
+test("operations without a safe parameter summary cannot be approved", async t => {
+  const f = await fixture(t, { opaqueInput: true }); await f.bot.emit(event("opaque", "执行工具"));
+  const token = (await (await fetch(`${f.origin}/api/v1/control-session`)).json()).token;
+  const items = await until(async () => { const response = await fetch(`${f.origin}/api/v1/approvals`, { headers: { "x-stardust-control-token": token } }); const values = (await response.json()).items; return values.length && values; });
+  const item = items[0]; assert.equal(item.canApprove, false); assert.doesNotMatch(JSON.stringify(item), /mock-sensitive-value/);
+  const decide = decision => fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: f.origin, "content-type": "application/json", "x-stardust-control-token": token }, body: JSON.stringify({ source: "qq", runId: item.runId, callId: item.callId, decision }) });
+  assert.equal((await decide("approve")).status, 409); assert.equal(f.executions.length, 0);
+  assert.equal((await decide("deny")).status, 200); assert.equal(f.executions.length, 0);
+});
+
+test("QQ and distinct Web conversation approvals keep independent owners and histories", async t => {
+  const f = await fixture(t), token = (await (await fetch(`${f.origin}/api/v1/control-session`)).json()).token;
+  const a = (await (await f.post("/api/v1/conversations", {})).json()).conversation.id;
+  const b = (await (await f.post("/api/v1/conversations", {})).json()).conversation.id;
+  const requestId = crypto.randomUUID();
+  const web = f.post(`/api/v1/conversations/${a}/messages`, { requestId, content: "执行工具" });
+  await f.bot.emit(event("cross-channel", "执行工具"));
+  const list = async id => (await (await fetch(`${f.origin}/api/v1/approvals?conversationId=${id}`, { headers: { "x-stardust-control-token": token } })).json()).items;
+  const both = await until(async () => { const items = await list(a); return items.some(item => item.source === "web") && items.some(item => item.source === "qq") && items; });
+  const qq = both.find(item => item.source === "qq"), webItem = both.find(item => item.source === "web");
+  assert.deepEqual((await list(b)).map(item => item.source), ["qq"]);
+  const decide = body => fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: f.origin, "content-type": "application/json", "x-stardust-control-token": token }, body: JSON.stringify(body) });
+  assert.equal((await fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json", "x-stardust-control-token": token }, body: JSON.stringify({ source: "qq", runId: qq.runId, callId: qq.callId, decision: "approve" }) })).status, 403);
+  assert.equal((await fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: f.origin, "content-type": "application/json" }, body: JSON.stringify({ source: "qq", runId: qq.runId, callId: qq.callId, decision: "approve" }) })).status, 403);
+  assert.equal((await decide({ source: "qq", runId: qq.runId, callId: qq.callId, decision: "approve" })).status, 200);
+  await until(() => f.executions.length === 1);
+  assert.ok((await list(a)).some(item => item.runId === webItem.runId));
+  assert.equal((await decide({ source: "web", runId: webItem.runId, callId: webItem.callId, conversationId: a, requestId, decision: "deny" })).status, 200);
+  assert.equal((await web).status, 200); assert.equal(f.executions.length, 1);
+  assert.deepEqual(f.store.messages(a).map(item => item.content), ["执行工具", "工具结果:denied"]);
+  assert.deepEqual(f.store.messages(b), []);
 });
 
 test("authorized direct result is delivered once, expired group result remains queryable without sending", async t => {

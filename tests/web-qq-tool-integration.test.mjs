@@ -34,6 +34,7 @@ for (const flow of [false, true]) test(`Web invokes the real QQ Tool through Cor
       turns.push(structuredClone({ messages, tools }));
       const last = messages.at(-1);
       if (last.role === "tool") return { content: `结果：${JSON.parse(last.content).status}`, toolCalls: [] };
+      if (last.role === "user" && last.content === "请调整语气") return { content: "", toolCalls: [{ id: "call_qq2", name: "send_message", arguments: JSON.stringify({ channel: "qq-bot", target, content: "调整后的内容" }) }] };
       if (mode === "hold") { modelWaiting = true; await new Promise(resolve => { releaseModel = resolve; }); }
       const args = { channel: "qq-bot", target, content: mode === "invalid" ? "" : "测试消息" };
       return { content: "", toolCalls: [{ id: "call_qq", name: "send_message", arguments: JSON.stringify(args) }] };
@@ -64,8 +65,11 @@ for (const flow of [false, true]) test(`Web invokes the real QQ Tool through Cor
   const origin = `http://127.0.0.1:${server.address().port}`;
   const post = (path, body) => fetch(origin + path, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) });
   const id = (await (await post("/api/v1/conversations", {})).json()).conversation.id;
+  const otherId = (await (await post("/api/v1/conversations", {})).json()).conversation.id;
+  const session = (await (await fetch(`${origin}/api/v1/control-session`)).json()).token;
+  const controlPost = body => fetch(`${origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin, "content-type": "application/json", "x-stardust-control-token": session }, body: JSON.stringify(body) });
   const base = `/api/v1/conversations/${id}/messages`;
-  const start = content => { const requestId = randomUUID(); return { pending: post(base, { requestId, content }), path: `${base}/${requestId}/tool` }; };
+  const start = content => { const requestId = randomUUID(); return { requestId, pending: post(base, { requestId, content }), path: `${base}/${requestId}/tool` }; };
   const waitApproval = async path => until(async () => { const response = await fetch(origin + path); if (!response.ok) return; const run = (await response.json()).run; return run?.status === "waiting" && run; });
   const decide = (path, approved, extra = {}) => post(path + "/decision", { toolCallId: "call_qq", approved, ...extra });
 
@@ -75,20 +79,42 @@ for (const flow of [false, true]) test(`Web invokes the real QQ Tool through Cor
   assert.equal((await fetch(`${origin}/api/v1/tool-runs/${waiting.id}`)).status, 404);
   assert.equal((await post(`/api/v1/tool-runs/${waiting.id}/decision`, { toolCallId: "call_qq", approved: true })).status, 404);
   assert.equal(waiting.calls[0].approval.content, "测试消息");
-  assert.equal(waiting.calls[0].input.target, target);
+  assert.equal(waiting.calls[0].input.target, undefined);
   assert.ok(waiting.calls[0].expiresAt);
   assert.ok(turns[0].tools.some(item => item.function.name === "send_message"));
   assert.match(JSON.stringify(turns[0].messages), new RegExp(target));
   assert.doesNotMatch(JSON.stringify(turns[0].messages), /mock-openid|mock-sender|QQ 私有历史/);
   assert.equal((await decide(success.path, true, { content: "替换" })).status, 400);
-  assert.equal((await decide(success.path, true)).status, 200);
-  assert.equal((await decide(success.path, true)).status, 409);
+  const approvals = async conversation => (await (await fetch(`${origin}/api/v1/approvals?conversationId=${conversation}`, { headers: { "x-stardust-control-token": session } })).json()).items;
+  const safe = (await approvals(id)).find(item => item.requestId === success.requestId);
+  assert.equal((await approvals(otherId)).some(item => item.runId === safe.runId), false);
+  const decisionOnce = { source: "web", runId: safe.runId, callId: safe.callId, conversationId: id, requestId: success.requestId, decision: "approve" };
+  assert.equal((await controlPost({ ...decisionOnce, conversationId: otherId })).status, 409);
+  assert.equal((await controlPost(decisionOnce)).status, 200);
+  assert.equal((await controlPost(decisionOnce)).status, 409);
   assert.equal((await success.pending).status, 200);
+  const callStatus = await fetch(`${origin}/api/v1/approvals/status?source=web&runId=${safe.runId}&callId=${safe.callId}&conversationId=${id}`, { headers: { "x-stardust-control-token": session } });
+  assert.equal((await callStatus.json()).result.status, "sent");
   assert.equal(platform.length, 1); assert.equal(platform[0].body.content, "测试消息");
   assert.equal(turns[1].messages.at(-1).tool_call_id, "call_qq");
   assert.equal(JSON.parse(turns[1].messages.at(-1).content).status, "sent");
   assert.deepEqual(store.messages(id).map(message => message.content), ["发送消息", "结果：sent"]);
   assert.equal(qqRequests, 1); assert.deepEqual(sources.map(source => source.starcoreId), ["qq-bot", "web-chat"]);
+
+  const feedbackRequest = start("请求调整"); await waitApproval(feedbackRequest.path);
+  const approvalUrl = `${origin}/api/v1/approvals?conversationId=${id}`;
+  assert.equal((await fetch(approvalUrl)).status, 403);
+  assert.equal((await fetch(approvalUrl, { headers: { "x-stardust-control-token": session, origin: "https://evil.example" } })).status, 403);
+  const listApprovals = async () => (await (await fetch(approvalUrl, { headers: { "x-stardust-control-token": session } })).json()).items;
+  const firstApproval = (await listApprovals()).find(item => item.requestId === feedbackRequest.requestId);
+  assert.equal(firstApproval.content, "测试消息"); assert.equal(firstApproval.canApprove, true); assert.doesNotMatch(JSON.stringify(firstApproval), new RegExp(target));
+  const decision = { source: "web", runId: firstApproval.runId, callId: firstApproval.callId, conversationId: id, requestId: feedbackRequest.requestId, decision: "feedback", feedback: "请调整语气" };
+  assert.equal((await controlPost(decision)).status, 200); assert.equal((await controlPost(decision)).status, 409);
+  const next = await until(async () => (await listApprovals()).find(item => item.callId === "call_qq2"));
+  assert.equal(next.content, "调整后的内容"); assert.equal(platform.length, 1);
+  assert.ok(turns.some(turn => turn.messages.at(-1).role === "user" && turn.messages.at(-1).content === "请调整语气"));
+  assert.equal((await controlPost({ source: "web", runId: next.runId, callId: next.callId, conversationId: id, requestId: feedbackRequest.requestId, decision: "deny" })).status, 200);
+  assert.equal((await feedbackRequest.pending).status, 200); assert.equal(platform.length, 1);
 
   const denied = start("拒绝发送"); await waitApproval(denied.path);
   assert.equal((await decide(denied.path, false)).status, 200); assert.equal((await denied.pending).status, 200);

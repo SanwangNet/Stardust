@@ -167,6 +167,20 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           if (wait) await delay(wait, undefined, { signal: controller.signal });
           if (stopped || Date.now() - now > 240_000) { filtered("expired_or_stopped"); return; }
           lastAccepted = Date.now();
+          // Only accepted SDK metadata is submitted; message text, raw events and mentions stay out.
+          try {
+            const at = new Date(Number.isFinite(messageTime) ? Math.min(messageTime, now) : now).toISOString();
+            const meta = { observedAt: at, source: "message_sender", sourceEventId: eventId };
+            const candidate = message.kind === "group" && typeof message.senderName === "string" ? message.senderName.trim() : "";
+            const name = candidate && Buffer.byteLength(candidate, "utf8") <= 512 && !/[\u0000-\u001f\u007f]/.test(candidate) ? candidate : undefined;
+            const validId = (value: unknown, limit: number): value is string => typeof value === "string" && !!value && value === value.trim() && Buffer.byteLength(value, "utf8") <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+            if (validId(config.appId, 512) && validId(message.senderId, 1024) && message.kind === "c2c") host.observe?.({ kind: "identity", value: { providerId: "qq", accountId: config.appId, identityType: "qq_c2c_user", scope: { kind: "account" }, externalId: message.senderId, ...meta } }, controller.signal);
+            else if (validId(config.appId, 512) && validId(message.senderId, 1024) && message.kind === "group" && validId(message.groupOpenid, 1024)) host.observe?.({ kind: "space_member", value: {
+              space: { providerId: "qq", accountId: config.appId!, spaceType: "group", externalId: message.groupOpenid, ...meta },
+              identity: { identityType: "qq_group_member", scopeKind: "space", externalId: message.senderId, ...(name ? { displayName: name } : {}), ...meta },
+              membership: { ...(name ? { displayName: name } : {}), ...meta },
+            } }, controller.signal);
+          } catch { host.log("WARN", "人物观察提交失败。", { code: "OBSERVATION_FAILED" }); }
           let reply: Awaited<ReturnType<typeof host.message>>;
           host.log("DEBUG", "QQ 消息开始调用模型。", { eventId, scope });
           try { reply = await host.message({ channelId: "qq-bot", eventId, messageId: message.messageId, senderId: message.senderId, conversationId: replyTarget.targetId, conversationType: message.kind === "c2c" ? "private" : "group", content: message.content.trim(), timestamp: message.timestamp, targetRef }, controller.signal, deliver); }

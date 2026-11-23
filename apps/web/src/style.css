@@ -435,9 +435,116 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .conversation-list button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; background: transparent; padding: 10px; color: var(--muted); cursor: pointer; }
 .conversation-list button[aria-current="true"] { color: var(--accent); background: var(--accent-soft); }
 .conversation-list-panel p { color: var(--muted); font-size: 12px; line-height: 1.6; }
-.qq-approvals input { width: 100%; min-width: 0; box-sizing: border-box; }
-.qq-approvals .tool-call { padding: 8px 0; }
-.qq-approvals .tool-call p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-composer { flex: none; min-width: 0; background: var(--panel); }
+#approval-card { max-height: min(45dvh, 380px); overflow-y: auto; }
+.approval-card { margin: 8px 20px; padding: 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--background); }
+.approval-card strong { font-size: 13px; }
+.approval-details { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 12px; }
+.approval-actions, .approval-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.approval-feedback[hidden] { display: none; }
+.approval-feedback textarea { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+#approval-status { margin: 0 20px; font-size: 12px; color: var(--muted); }
+/* Directory pages scroll as a unit, so the transparent workspace title never floats over the filters. */
+.space-shell.is-space:has(> .page-stage > .people-page:not([hidden])) > .page-heading { position: static; }
+.people-content { display: grid; gap: 14px; min-width: 0; padding: 0 10px 20px; }
+.people-muted, .people-status, .people-dialog-status, .people-empty { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.people-search, .people-picker-search { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.people-search label { font-size: 12px; }
+.people-search input, .people-picker-search input { flex: 1 1 200px; min-width: 0; max-width: 440px; }
+.people-search input, .people-search select, .people-picker-search input, .people-edit-field :is(input, textarea, select) {
+  min-height: 38px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text);
+}
+.people-tabs { display: flex; flex-wrap: wrap; gap: 0 12px; border-bottom: 1px solid var(--line); }
+.people-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 9px 12px; background: transparent; color: var(--muted); cursor: pointer; }
+.people-tabs button:is([aria-pressed="true"], [aria-selected="true"]) { border-color: var(--accent); color: var(--text); font-weight: 650; }
+.people-status { margin: 0; }
+.people-status:empty, .people-dialog-status:empty { display: none; }
+.people-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  justify-items: start; gap: 14px; min-width: 0;
+}
+.people-card, .people-related-card, .people-candidate {
+  display: grid; width: 100%; min-width: 0; gap: 8px; padding: 14px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text);
+  text-align: start; cursor: pointer; overflow-wrap: anywhere;
+}
+.people-card { max-width: 320px; min-height: 142px; align-content: space-between; }
+.people-card:hover, .people-related-card:hover, .people-candidate:hover { border-color: var(--accent); background: var(--accent-soft); }
+.people-card-top, .people-card-foot { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.people-card-foot { justify-content: space-between; color: var(--muted); }
+.people-card-labels { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.people-card-labels strong, .people-card-labels small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.people-card-labels small, .people-card-foot small { color: var(--muted); font-size: 11px; }
+.people-card-counts { font-size: 12px; }
+.people-avatar { display: grid; flex: none; width: 36px; height: 36px; place-items: center; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 15px; font-weight: 650; overflow: hidden; }
+.people-badge { flex: none; padding: 3px 6px; border-radius: 5px; background: var(--surface); color: var(--muted); font-size: 10px; }
+.people-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+.people-pagination:not([hidden]) { margin-block: 6px; }
+:root:has(.people-dialog[open]) { overflow: hidden; scrollbar-gutter: stable; }
+.people-dialog { width: min(760px, calc(100% - 32px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); }
+.people-dialog::backdrop { background: rgb(13 11 19 / 48%); }
+.people-dialog-layout { display: flex; flex-direction: column; max-height: calc(100dvh - 34px); }
+.people-dialog-header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.people-dialog-heading { flex: 1; min-width: min(100%, 120px); }
+.people-dialog-heading h2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin: 0; font-size: 19px; overflow-wrap: anywhere; }
+.people-dialog-heading p { margin: 3px 0 0; }
+.people-dialog-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.people-dialog .people-tabs { padding-inline: 12px; }
+.people-dialog-status { margin: 0; padding: 8px 20px; border-bottom: 1px solid var(--line); }
+.people-discard { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 20px; background: var(--accent-soft); font-size: 12px; }
+.people-discard p { margin: 0; }
+.people-dialog-content { display: grid; align-content: start; gap: 12px; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px 20px; }
+.people-dialog :is(h3,h4,p) { margin-block: 0; overflow-wrap: anywhere; }
+.people-dialog-content > button { justify-self: start; }
+.people-dialog [hidden], .people-content [hidden] { display: none; }
+.people-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 12px; margin: 0; font-size: 12px; }
+.people-facts dt { color: var(--muted); }
+.people-facts dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.people-note, .people-notice { padding: 10px 12px; border-radius: 6px; background: var(--surface); white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+.people-notice button { margin: 8px 8px 0 0; }
+.people-relation-grid, .people-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 245px), 1fr)); gap: 10px; margin-bottom: 10px; }
+.people-identity, .people-compare > section, .people-audit { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.people-identity-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.people-identity-header > div { flex: 1 1 120px; min-width: 0; }
+.people-identity h3 { font-size: 14px; }
+.people-identity .people-facts, .people-compare .people-facts { grid-template-columns: repeat(auto-fit, minmax(min(100%, 115px), 1fr)); }
+.people-audit summary, .people-menu summary { cursor: pointer; list-style: none; }
+.people-audit summary { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.people-audit summary::before { content: "›"; }
+.people-audit[open] summary::before { content: "⌄"; }
+.people-audit summary strong { flex: 1; }
+.people-audit-body { display: grid; justify-items: start; gap: 12px; margin-top: 10px; }
+.people-audit-body .people-facts { width: 100%; }
+.people-menu { min-width: 0; }
+.people-menu > summary { display: flex; align-items: center; }
+.people-menu-options { display: grid; justify-items: stretch; gap: 4px; margin-top: 4px; }
+.people-menu-options button { justify-content: start; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+.people-operation, .people-picker { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; min-width: 0; }
+.people-operation > :not(button), .people-picker > :not(button) { flex: 1 1 100%; min-width: 0; }
+.people-edit-field { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.people-edit-field :is(input, textarea, select) { min-width: 0; width: 100%; }
+.people-edit-field textarea { resize: vertical; }
+.people-batch-identities, .people-target-results { display: grid; gap: 6px; max-height: 240px; overflow: auto; margin: 0; padding: 4px; }
+.people-batch-identities:is(ul) { padding-inline-start: 22px; }
+.people-batch-choice { display: flex; align-items: flex-start; gap: 8px; padding: 6px; overflow-wrap: anywhere; }
+.people-candidate { gap: 4px; padding: 8px 10px; }
+.people-candidate small { color: var(--muted); }
+@media (min-width: 601px) {
+  .people-dialog-actions .people-menu { position: relative; }
+  .people-dialog-actions .people-menu-options {
+    position: absolute; z-index: 1; inset-inline-end: 0; min-width: max-content;
+    padding: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  }
+}
+@media (max-width: 600px) {
+  .people-content { padding-inline: 0; }
+  .people-card { max-width: none; }
+  .people-search input { max-width: none; flex-basis: 100%; }
+  .people-dialog { width: 100%; max-height: 100dvh; margin: 0; border-radius: 0; }
+  .people-dialog-layout { height: 100dvh; max-height: 100dvh; }
+  .people-dialog-header, .people-dialog-content, .people-dialog-status, .people-discard { padding-inline: 14px; }
+  .people-dialog-content { flex: 1; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+}
 .conversation-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .conversation-toolbar { padding: 10px 18px; border-bottom: 1px solid var(--line); }
 .conversation-toolbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

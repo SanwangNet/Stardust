@@ -1,8 +1,7 @@
+import { initializeApprovals } from "./approval-ui.js";
 type Conversation = { id: string; title: string };
 type Message = { id: string; requestId: string; sequence: number; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "failed" | "unknown" };
-type ToolRun = { status: string; calls: { id: string; name: string; status: string; input?: Record<string, unknown>; approval?: { operation: string; targetDescription: string; channel?: string; content?: string; risk: string }; result?: unknown }[] };
 type ModelActivity = { requestId: string; kind: "tool_call" | "thinking" | "generating"; displayText?: string; state: "started" | "completed" | "failed" };
-type QQRun = { id: string; status: string; createdAt: string; reply?: string; error?: string; generation: string; delivery: string; deliveryReason?: string; deliveryAt?: string; source: { scope: "private" | "group"; conversationRef: string; senderRef: string }; calls: { id: string; name: string; providerId?: string; status: string; approvalStatus?: string; input?: Record<string, unknown>; createdAt?: string; expiresAt?: string; approval?: { operation: string; targetDescription: string; content?: string; risk: string }; result?: unknown }[] };
 
 export function activityDisplayText(activity: ModelActivity): string {
   const text = activity.displayText;
@@ -34,33 +33,7 @@ export function initializeConversationUI(): void {
   let renderRevision = 0;
   const activityPolls = new Set<string>();
 
-  const approvalToken = element<HTMLInputElement>("qq-approval-token");
-  const approvalList = element<HTMLElement>("qq-approval-list");
-  const approvalStatus = element<HTMLElement>("qq-approval-status");
-  async function refreshQQApprovals(): Promise<void> {
-    approvalStatus.textContent = ""; approvalList.replaceChildren();
-    try {
-      const response = await fetch("/api/v1/qq-tool-runs", { cache: "no-store", headers: { "X-Stardust-Approval-Token": approvalToken.value } });
-      if (!response.ok) throw new Error("UNAVAILABLE");
-      const { runs } = await response.json() as { runs: QQRun[] };
-      if (!runs.length) approvalStatus.textContent = "没有待查看的 QQ 运行。";
-      for (const run of runs) {
-        const card = document.createElement("div"); card.className = "tool-call";
-        const title = document.createElement("strong"); title.textContent = `QQ ${run.source.scope === "group" ? "群聊" : "私聊"} · ${run.status}`; card.append(title);
-        const info = document.createElement("p"); info.textContent = `运行：${run.id}\n会话：${run.source.conversationRef}\n发送者：${run.source.senderRef}\n创建：${run.createdAt}\n生成：${run.generation}；QQ 投递：${({ not_attempted: "未尝试", delivering: "投递中", delivered: "已投递", unavailable: "不可投递", rejected: "平台拒绝", unknown_outcome: "结果未知" } as Record<string, string>)[run.delivery] ?? run.delivery}${run.deliveryReason ? `\n投递原因：${run.deliveryReason}` : ""}${run.deliveryAt ? `\n投递时间：${run.deliveryAt}` : ""}${run.reply ? `\n结果：${run.reply}` : ""}${run.error ? `\n错误：${run.error}` : ""}`; card.append(info);
-        for (const call of run.calls) {
-          const details = document.createElement("p"); details.textContent = `Tool：${call.name}（${call.providerId ?? "未授权"}）\n调用：${call.id} · ${call.status}${call.approval ? `\n审批：${call.approvalStatus}\n操作：${call.approval.operation}\n目标：${call.approval.targetDescription}\n参数：${JSON.stringify(call.input)}\n风险：${call.approval.risk}\n创建：${call.createdAt}\n有效至：${call.expiresAt}` : ""}${call.result ? `\n结果：${JSON.stringify(call.result)}` : ""}`; card.append(details);
-          if (call.status === "waiting") for (const [label, approved] of [["批准", true], ["拒绝", false]] as const) {
-            const button = document.createElement("button"); button.type = "button"; button.className = "setup-secondary"; button.textContent = label;
-            button.addEventListener("click", () => { button.disabled = true; void fetch(`/api/v1/qq-tool-runs/${encodeURIComponent(run.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json", "X-Stardust-Approval-Token": approvalToken.value }, body: JSON.stringify({ toolCallId: call.id, approved }) }).then(response => { if (!response.ok) throw new Error("UNAVAILABLE"); return refreshQQApprovals(); }).catch(() => { approvalStatus.textContent = "审批未完成，请重新查看状态。"; button.disabled = false; }); });
-            card.append(button);
-          }
-        }
-        approvalList.append(card);
-      }
-    } catch { approvalStatus.textContent = "无法读取审批，请检查管理员凭据和本机访问。"; }
-  }
-  element<HTMLButtonElement>("qq-approval-refresh").addEventListener("click", () => { void refreshQQApprovals(); });
+  const approvals = initializeApprovals(() => selected);
 
   async function request<T>(url: string, method = "GET", body?: unknown): Promise<T> {
     const response = await fetch(url, { method, cache: "no-store", ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
@@ -130,38 +103,6 @@ export function initializeConversationUI(): void {
     };
     void poll();
   }
-  async function renderToolRun(id: string, requestId: string, token: number, revision: number): Promise<void> {
-    const data = await request<{ run: ToolRun | null }>(`${base(id)}/messages/${encodeURIComponent(requestId)}/tool`);
-    if (!data.run || selected !== id || token !== generation || revision !== renderRevision) return;
-    const placeholder = Array.from(messages.querySelectorAll<HTMLElement>(".conversation-reply-placeholder")).find((row) => row.dataset.requestId === requestId);
-    if (!placeholder) return;
-    for (const call of data.run.calls) {
-      const card = document.createElement("div"); card.className = "tool-call";
-      const heading = document.createElement("strong"); heading.textContent = "Tool 操作"; card.append(heading);
-      if (call.approval) {
-        const details = document.createElement("p");
-        details.textContent = `${call.approval.operation} · ${call.approval.targetDescription}${call.approval.content ? `\n${call.approval.content}` : ""}${call.approval.risk ? `\n${call.approval.risk}` : ""}`;
-        card.append(details);
-      }
-      if (call.status === "waiting") {
-        const controls = document.createElement("div"); controls.className = "extension-actions";
-        for (const [label, approved] of [["确定", true], ["取消", false]] as const) {
-          const button = document.createElement("button"); button.type = "button"; button.className = approved ? "setup-primary" : "setup-secondary"; button.textContent = label;
-          button.addEventListener("click", () => {
-            controls.querySelectorAll("button").forEach((item) => { item.disabled = true; });
-            void request(`${base(id)}/messages/${encodeURIComponent(requestId)}/tool/decision`, "POST", { toolCallId: call.id, approved })
-              .then(() => refreshMessages(id, token)).catch(() => { if (selected === id && token === generation) status.textContent = "操作未完成，请重试。"; });
-          });
-          controls.append(button);
-        }
-        card.append(controls);
-      } else {
-        const state = document.createElement("p"); state.textContent = ({ executing: "正在执行…", sent: "已完成", denied: "已取消", expired: "已过期", failed: "执行失败", unavailable: "不可用", rejected: "已拒绝", unknown_outcome: "结果未知" } as Record<string, string>)[call.status] ?? "处理中…";
-        card.append(state);
-      }
-      placeholder.append(card);
-    }
-  }
   async function refreshMessages(id: string, token: number): Promise<void> {
     const revision = ++renderRevision;
     const history = await readMessages(id);
@@ -196,7 +137,6 @@ export function initializeConversationUI(): void {
     messages.scrollTop = messages.scrollHeight;
     for (const message of history) {
       if (message.role === "user" && message.status === "pending") {
-        void renderToolRun(id, message.requestId, token, revision).catch(() => {});
         watchActivity(id, message.requestId, token);
       }
     }
@@ -208,6 +148,7 @@ export function initializeConversationUI(): void {
   }
   async function select(id: string): Promise<void> {
     selected = id; const token = ++generation;
+    approvals.refresh();
     try { localStorage.setItem(storageKey, id); } catch { /* Storage can be disabled. */ }
     title.textContent = entries.find((entry) => entry.id === id)?.title ?? "会话";
     messages.replaceChildren(); status.textContent = "正在读取会话…"; renderList(); updateControls();

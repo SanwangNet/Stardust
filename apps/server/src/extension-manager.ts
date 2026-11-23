@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { parseEnv } from "node:util";
 import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
-import type { CapabilityDescriptor, CapabilityPolicy, CapabilityTestInput, ChannelInstance, ChannelMessage, ChannelDeliver, ChannelResponse, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
+import type { CapabilityDescriptor, CapabilityPolicy, CapabilityTestInput, ChannelInstance, ChannelMessage, ChannelDeliver, ChannelResponse, ChannelObservation, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
 import { WEB_STARCORE_ID } from "./agent-core.js";
 import { qqInputDeclaration, resolveStarcoreInterfaces, StarcoreFlowRegistry, validateStarcoreFlow } from "./starcore-flow.js";
@@ -29,6 +29,7 @@ export class ExtensionManager {
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
   private channelChat?: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>;
+  private channelObserver?: (observation: ChannelObservation, signal: AbortSignal) => void;
   constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger, bindings: readonly SkillBinding[] = []) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
     if (new Set(packages.map(item => item.manifest.id)).size !== packages.length) throw new Error("DUPLICATE_EXTENSION");
@@ -260,6 +261,7 @@ export class ExtensionManager {
   }
   channelEnabled(id: string): boolean { const item = this.item(id); const entry = this.readInstalled()[id]; return item.manifest.type === "channel" && isInstalled(entry) && Boolean(entry?.enabled); }
   setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>): void { this.channelChat = handler; }
+  setChannelObserver(handler: (observation: ChannelObservation, signal: AbortSignal) => void): void { this.channelObserver = handler; }
   toolSignal(name: string): AbortSignal | undefined {
     const item = this.ownerOfTool(name);
     const tool = item && this.packageTools(item).find((candidate) => candidate.name === name);
@@ -410,6 +412,13 @@ export class ExtensionManager {
     this.runtimes.set(id, runtime);
     try {
       runtime.instance = item.create(config, {
+        observe: (observation, signal) => {
+          try {
+            if (this.closed || this.runtimes.get(id) !== runtime || runtime.state !== "connected" || controller.signal.aborted || signal.aborted || !this.channelObserver) return;
+            const lease = this.channelSignal(id);
+            if (lease && !lease.aborted) this.channelObserver(observation, AbortSignal.any([controller.signal, signal, lease]));
+          } catch { this.logs.write("WARN", "people", "人物观察未完成。", { code: "OBSERVATION_FAILED" }); }
+        },
         ...(runtime.qqFlowEnabled ? { qqInputFlow: async (request: import("./qq-input-flow.js").QQInputRequest) => {
           const state = this.readInstalled()[id];
           if (this.closed || this.runtimes.get(id) !== runtime || runtime.state !== "connected" || controller.signal.aborted || !isInstalled(state) || !state?.enabled || !item.flow) throw new Error("QQ_FLOW_UNAVAILABLE");

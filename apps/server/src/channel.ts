@@ -2,6 +2,7 @@ import type { LogDetails, LogLevel } from "./logger.js";
 import type { StarcoreFlowContract } from "./starcore-flow.js";
 import type { QQInputRequest } from "./qq-input-flow.js";
 import type { SkillDeclaration } from "./skill-flow.js";
+import type { IdentityObservation, SpaceMemberObservation } from "./people.js";
 
 export interface ChannelMessage {
   channelId: string;
@@ -18,6 +19,8 @@ export interface ChannelMessage {
 export type ChannelDeliveryResult = { status: "delivered" | "unavailable" | "rejected" | "unknown_outcome"; reason?: string };
 export type ChannelDeliver = (reply: string, signal: AbortSignal) => Promise<ChannelDeliveryResult>;
 export type ChannelResponse = string | { kind: "deferred" };
+/** Metadata only, submitted by a running trusted channel adapter. */
+export type ChannelObservation = { kind: "identity"; value: IdentityObservation } | { kind: "space_member"; value: SpaceMemberObservation };
 
 export type ExtensionStatus = "disconnected" | "connecting" | "connected" | "error";
 export interface ExtensionField { key: string; env: string; label: string; sensitive: boolean; required: boolean }
@@ -25,6 +28,7 @@ export interface ManagementPage { pageId: string; title: string; description: st
 export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: SkillDeclaration[] }
 export interface ChannelHost {
   message(message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver): Promise<ChannelResponse>;
+  observe?(observation: ChannelObservation, signal: AbortSignal): void;
   qqInputFlow?(request: QQInputRequest): Promise<"allow" | "skip">;
   status(state: ExtensionStatus, error?: string): void;
   reportError(code: "MODEL_FAILED" | "SEND_FAILED"): void;

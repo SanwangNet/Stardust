@@ -214,7 +214,7 @@ test("a real Web request enters the common agent with server-derived provenance 
     }
   }
   const tool = { name: "mock_write", description: "mock", parameters: {}, validate: input => input?.content === "ok" ? input : null,
-    prepare: () => ({ approval: { operation: "测试", targetDescription: "测试", risk: "测试" } }) };
+    prepare: input => ({ approval: { operation: "测试", targetDescription: "测试", content: input.content, risk: "测试" } }) };
   const extensions = {
     restore: async () => {}, shutdown: async () => {}, availableTools: () => [tool], availableTargets: () => [],
     toolHost: () => ({}), toolSignal: () => lease.signal,

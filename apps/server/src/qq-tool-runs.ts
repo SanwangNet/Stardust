@@ -90,7 +90,7 @@ export class QQToolRuns {
     }
     if (run.status === "error" && entry.deliver && entry.delivery === "not_attempted") { entry.deliver = undefined; entry.delivery = "unavailable"; entry.deliveryReason = "RUN_CANCELLED"; entry.deliveryAt = new Date().toISOString(); }
     return { ...run, source: { starcoreId: "qq-bot", channelId: "qq-bot", scope: entry.scope, conversationRef: entry.conversationRef, senderRef: entry.senderRef }, createdAt: entry.createdAt,
-      calls: run.calls.map(call => ({ ...call, providerId: entry.providers.get(call.name) })),
+      calls: run.calls.map(({ input, ...call }) => ({ ...call, ...(typeof input?.content === "string" ? { input: { content: input.content } } : {}), providerId: entry.providers.get(call.name) })),
       generation: run.status === "done" ? "generated" : run.status === "error" ? "failed" : "pending",
       delivery: entry.delivery, ...(entry.deliveryReason ? { deliveryReason: entry.deliveryReason } : {}), ...(entry.deliveryAt ? { deliveryAt: entry.deliveryAt } : {}) };
   }
@@ -102,10 +102,22 @@ export class QQToolRuns {
     }
     return result;
   }
-  decide(id: string, callId: string, approved: boolean): void {
+  approvalViews() {
+    const result: { runId: string; scope: "private" | "group"; approval: NonNullable<ReturnType<ToolRuns["approvalView"]>> }[] = [];
+    for (const [id, entry] of this.entries) {
+      try { this.get(id); const approval = this.runs.approvalView(entry.owner, id); if (approval) result.push({ runId: id, scope: entry.scope, approval }); } catch { /* The run may have expired. */ }
+    }
+    return result;
+  }
+  callStatus(id: string, callId: string) {
+    const entry = this.entries.get(id); if (!entry) throw new Error("RUN_NOT_FOUND");
+    this.get(id); return this.runs.callStatus(entry.owner, id, callId);
+  }
+  decide(id: string, callId: string, approved: boolean, feedback?: string, requireSafe = true): void {
     const entry = this.entries.get(id); if (!entry) throw new Error("RUN_NOT_FOUND");
     this.get(id); // Enforce the deadline even between timer ticks.
-    this.runs.decide(entry.owner, id, callId, approved);
+    if (approved && requireSafe && !this.runs.approvalView(entry.owner, id)?.canApprove) throw new Error("APPROVAL_UNAVAILABLE");
+    this.runs.decide(entry.owner, id, callId, approved, feedback);
   }
   private sweep(): void {
     const now = Date.now();

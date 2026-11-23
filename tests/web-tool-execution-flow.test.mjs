@@ -24,7 +24,7 @@ test("required execution stages cannot be bypassed or invoked on cancellation", 
 test("real Web tool requests obey graph, approval, denial and availability", async t => {
   const flow = builtInWebToolExecutionFlow(), availability = builtInWebToolFlow(), sent = [], modelCalls = [], controller = new AbortController();
   const tool = { name: "send_message", description: "mock", parameters: {}, validate: value => value?.content === "ok" ? value : null,
-    prepare: () => ({ approval: { operation: "mock", targetDescription: "mock", channel: "mock", risk: "mock" } }) };
+    prepare: input => ({ approval: { operation: "mock", targetDescription: "mock", content: input.content, channel: "mock", risk: "mock" } }) };
   const extensions = { restore: async () => {}, shutdown: async () => {}, availableTools: () => [tool], availableTargets: () => [], toolHost: () => ({}),
     toolSignal: () => controller.signal, channelSignal: () => controller.signal, executeTool: async (_name, input) => { sent.push(input.content); return { status: "sent" }; } };
   const model = { chatContext: async () => "unused", chatWithTools: async (messages, tools) => {

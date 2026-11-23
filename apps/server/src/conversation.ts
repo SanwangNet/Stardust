@@ -11,6 +11,7 @@ import { searchHistory, type HistoryEvidence } from "./history-search.js";
 import type { HistoryToolModel, ModelActivity } from "./history-agent.js";
 import { logger } from "./logger.js";
 import { AgentCore, migrateAgentCore, WEB_CHANNEL_ID, WEB_SCOPE_ID, WEB_STARCORE_ID } from "./agent-core.js";
+import { migratePeople, migratePeopleManagement, migratePeopleMerge, PeopleRepository } from "./people.js";
 import { builtInWebContextFlow, runWebContextFlow } from "./web-context-flow.js";
 import type { ExecutableFlow } from "./executable-flow.js";
 
@@ -30,6 +31,8 @@ export class ConversationService {
   private readonly activities = new Map<string, ModelActivity>();
   readonly globalContext: GlobalContextService;
   readonly agent: AgentCore;
+  readonly people: PeopleRepository;
+  readonly databasePath: string;
 
   /** Read-only runtime configuration for the flow overview; no request data is exposed. */
   contextFlowConfiguration(): { enabled?: boolean; definition?: ExecutableFlow; historyToolSupported: boolean } {
@@ -37,11 +40,13 @@ export class ConversationService {
   }
 
   constructor(private readonly model: ConversationModel, path = join(projectConfigRoot, "data", "conversations.sqlite"), private readonly budgetBytes = 48_000, private readonly recentMessageLimit = 50, private readonly options: ConversationOptions = {}) {
+    this.databasePath = path;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    try {
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version > 5) { this.db.close(); throw new Error("UNSUPPORTED_SCHEMA"); }
+    if (version > 8) throw new Error("UNSUPPORTED_SCHEMA");
     if (version === 0) this.db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE messages (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','complete','failed','unknown')), request_id TEXT NOT NULL, UNIQUE(conversation_id, request_id, role));
@@ -51,9 +56,14 @@ export class ConversationService {
     if (version < 3) migrateGlobalContextOutcome(this.db);
     if (version < 4) migrateGlobalContextEvidence(this.db);
     if (version < 5) migrateAgentCore(this.db);
+    if (version < 6) migratePeople(this.db);
+    if (version < 7) migratePeopleManagement(this.db);
+    if (version < 8) migratePeopleMerge(this.db);
     this.db.prepare("UPDATE messages SET status = 'unknown' WHERE status = 'pending'").run();
     this.globalContext = new GlobalContextService(this.db, model.synthesizeGlobalContext ? { synthesizeGlobalContext: model.synthesizeGlobalContext.bind(model) } : undefined);
     this.agent = new AgentCore(this.db);
+    this.people = new PeopleRepository(this.db);
+    } catch (error) { try { this.db.close(); } catch {} throw error; }
   }
 
   create(title = "新对话", source = "web"): Conversation {

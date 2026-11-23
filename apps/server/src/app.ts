@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, type ConfigUpdate } from "./config.js";
 import { setupService, type SetupService } from "./setup.js";
@@ -10,6 +10,8 @@ import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { isLocalRead, isTrustedLocalAccess } from "./local-access.js";
 import { ToolRuns } from "./tool-runs.js";
+import { PeopleObserver } from "./people-observer.js";
+import { PeopleManagementReader, type ManagementQuery, type ManagementMutation } from "./people-management.js";
 import { QQToolRuns, type QQToolPolicy, type QQToolStarter } from "./qq-tool-runs.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
 import type { ConversationService } from "./conversation.js";
@@ -141,6 +143,8 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/model-classification.js": { filename: "model-classification.js", contentType: "text/javascript; charset=utf-8" },
   "/chat-history.js": { filename: "chat-history.js", contentType: "text/javascript; charset=utf-8" },
   "/conversation-ui.js": { filename: "conversation-ui.js", contentType: "text/javascript; charset=utf-8" },
+  "/approval-ui.js": { filename: "approval-ui.js", contentType: "text/javascript; charset=utf-8" },
+  "/people-ui.js": { filename: "people-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/global-context-ui.js": { filename: "global-context-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-board.js": { filename: "flow-board.js", contentType: "text/javascript; charset=utf-8" },
   "/flow-project-board.js": { filename: "flow-project-board.js", contentType: "text/javascript; charset=utf-8" },
@@ -170,7 +174,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   let conversations = options.conversationService;
   let conversationOpening: Promise<ConversationService> | undefined;
   const conversationRuns = new Map<string, string>();
-  const localConversationOwner = "local-conversation";
+  const conversationOwner = (id: string) => `web:${id}`;
   const localToolOwner = "local-tool-api";
   let serverClosing = false;
   const webChannelAvailable = (): boolean => typeof extensions.channelEnabled !== "function" || !extensions.list().some((item) => item.id === "web-chat" && item.builtin) || extensions.channelEnabled("web-chat");
@@ -218,6 +222,11 @@ export function createStardustServer(options: AppOptions = {}): Server {
     conversations.globalContext.start();
     return conversations;
   }
+  const peopleObserver = new PeopleObserver(async () => (await openConversations()).databasePath, logs);
+  const peopleReader = new PeopleManagementReader();
+  const controlToken = randomBytes(32).toString("base64url");
+  const peoplePreviewKey = randomBytes(32);
+  if (typeof extensions.setChannelObserver === "function") extensions.setChannelObserver((observation, signal) => peopleObserver.submit(observation, signal));
   const approvalToken = options.qqApprovalToken ?? process.env.STARDUST_QQ_APPROVAL_TOKEN ?? "";
   const validApprovalToken = /^[A-Za-z0-9_-]{43}$/.test(approvalToken);
   const envList = (name: string) => (process.env[name] ?? "").split(",").map(value => value.trim()).filter(Boolean);
@@ -231,7 +240,9 @@ export function createStardustServer(options: AppOptions = {}): Server {
   if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function") {
     extensions.setChannelChat(async (message, signal, deliver) => {
       const core = (await openConversations()).agent;
-      if (message.channelId === "qq-bot" && qqEnabled && validApprovalToken && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
+      const listener = server.address();
+      const localControl = !!listener && typeof listener !== "string" && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(listener.address);
+      if (message.channelId === "qq-bot" && qqEnabled && localControl && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
         const runId = await qqRuns.start(message, signal, { deliver });
         if (runId) return { kind: "deferred" as const };
       }
@@ -257,13 +268,71 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
     const trusted = (requireOrigin: boolean) => isTrustedLocalAccess(request, server.address(), requireOrigin, devProxyProof);
+    const adminAuthorized = () => {
+      const supplied = request.headers["x-stardust-approval-token"];
+      return validApprovalToken && typeof supplied === "string" && /^[A-Za-z0-9_-]{43}$/.test(supplied) && timingSafeEqual(Buffer.from(supplied), Buffer.from(approvalToken));
+    };
+    const controlAuthorized = () => {
+      const value = request.headers["x-stardust-control-token"];
+      return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(value), Buffer.from(controlToken));
+    };
     if (pathname.startsWith("/api/v1/") && !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
       if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN" }); return; }
     }
+    if (pathname === "/api/v1/control-session") {
+      response.setHeader("Cache-Control", "no-store");
+      if (request.method !== "GET" || !setup.getInitializationState().initialized || !trusted(false)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      sendJson(response, 200, { token: controlToken }); return;
+    }
+    if (pathname === "/api/v1/approvals" || pathname === "/api/v1/approvals/decision" || pathname === "/api/v1/approvals/status") {
+      response.setHeader("Cache-Control", "no-store");
+      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET") || !controlAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try {
+        if (request.method === "GET" && pathname === "/api/v1/approvals/status") {
+          const params = new URL(request.url ?? "/", "http://localhost").searchParams;
+          const source = params.get("source"), runId = params.get("runId"), callId = params.get("callId"), conversationId = params.get("conversationId");
+          if (!runId || !callId || !["web", "qq"].includes(source ?? "") || (source === "web" && !conversationId)) throw new Error("INVALID_INPUT");
+          const result = source === "qq" ? qqRuns.callStatus(runId, callId) : toolRuns.callStatus(conversationOwner(conversationId!), runId, callId, conversationId!);
+          sendJson(response, 200, { result }); return;
+        }
+        if (request.method === "GET" && pathname === "/api/v1/approvals") {
+          const conversationId = new URL(request.url ?? "/", "http://localhost").searchParams.get("conversationId");
+          const items: Record<string, unknown>[] = [];
+          if (conversationId && /^[0-9a-f-]{36}$/i.test(conversationId)) for (const [key, runId] of conversationRuns) {
+            const [conversation, requestId] = key.split("/"); if (conversation !== conversationId) continue;
+            const approval = toolRuns.approvalView(conversationOwner(conversationId), runId);
+            if (approval) items.push({ source: "web", conversationId, requestId, runId, ...approval });
+          }
+          for (const item of qqRuns.approvalViews()) items.push({ source: "qq", scope: item.scope, runId: item.runId, ...item.approval });
+          items.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.runId).localeCompare(String(b.runId)));
+          sendJson(response, 200, { items }); return;
+        }
+        if (request.method === "POST" && pathname === "/api/v1/approvals/decision") {
+          if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          const body = await readSetupBody(request, 8192);
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("INVALID_INPUT");
+          const fields = body as Record<string, unknown>;
+          if (Object.keys(fields).some(key => !["source", "runId", "callId", "decision", "feedback", "conversationId", "requestId"].includes(key)) || !["web", "qq"].includes(String(fields.source)) || typeof fields.runId !== "string" || typeof fields.callId !== "string" || !["approve", "deny", "feedback"].includes(String(fields.decision)) || (fields.decision === "feedback" ? typeof fields.feedback !== "string" || !fields.feedback.trim() || Buffer.byteLength(fields.feedback, "utf8") > 4000 : fields.feedback !== undefined)) throw new Error("INVALID_INPUT");
+          const approved = fields.decision === "approve", feedback = fields.decision === "feedback" ? fields.feedback as string : undefined;
+          if (fields.source === "qq") {
+            if (fields.conversationId !== undefined || fields.requestId !== undefined) throw new Error("INVALID_INPUT");
+            qqRuns.decide(fields.runId, fields.callId, approved, feedback, true);
+          } else {
+            if (typeof fields.conversationId !== "string" || typeof fields.requestId !== "string" || conversationRuns.get(`${fields.conversationId}/${fields.requestId}`) !== fields.runId) throw new Error("APPROVAL_UNAVAILABLE");
+            if (approved && !toolRuns.approvalView(conversationOwner(fields.conversationId), fields.runId)?.canApprove) throw new Error("APPROVAL_UNAVAILABLE");
+            toolRuns.decide(conversationOwner(fields.conversationId), fields.runId, fields.callId, approved, feedback);
+          }
+          sendJson(response, 200, { ok: true }); return;
+        }
+        sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+      } catch (error) {
+        const code = error instanceof Error && ["INVALID_INPUT", "RUN_NOT_FOUND", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "APPROVAL_UNAVAILABLE";
+        sendJson(response, code === "INVALID_INPUT" ? 400 : 409, { error: code });
+      }
+      return;
+    }
     if (pathname === "/api/v1/qq-tool-runs" || pathname.startsWith("/api/v1/qq-tool-runs/")) {
-      const supplied = request.headers["x-stardust-approval-token"];
-      const authorized = validApprovalToken && typeof supplied === "string" && /^[A-Za-z0-9_-]{43}$/.test(supplied) && timingSafeEqual(Buffer.from(supplied), Buffer.from(approvalToken));
-      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET") || !authorized) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET") || !adminAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try {
         if (request.method === "GET" && pathname === "/api/v1/qq-tool-runs") { sendJson(response, 200, { runs: qqRuns.list() }); return; }
         const match = /^\/api\/v1\/qq-tool-runs\/([0-9a-f-]{36})(\/decision)?$/.exec(pathname);
@@ -281,6 +350,85 @@ export function createStardustServer(options: AppOptions = {}): Server {
       } catch (error) {
         const code = error instanceof Error && ["RUN_NOT_FOUND", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "RUN_UNAVAILABLE";
         sendJson(response, code === "RUN_NOT_FOUND" ? 404 : code === "APPROVAL_UNAVAILABLE" ? 409 : 500, { error: code });
+      }
+      return;
+    }
+    const identityManagement = /^\/api\/v1\/identities\/([0-9a-f-]{36})(?:\/(reassign|detach))?$/i.exec(pathname);
+    const editPerson = /^\/api\/v1\/people\/([0-9a-f-]{36})$/i.exec(pathname);
+    const undoAudit = /^\/api\/v1\/people\/audit\/([0-9a-f-]{36})\/undo$/i.exec(pathname);
+    const undoMerge = /^\/api\/v1\/people\/merge\/([0-9a-f-]{36})\/undo$/i.exec(pathname);
+    const batchPath = ["/api/v1/people/merge/preview","/api/v1/people/merge","/api/v1/people/split/preview","/api/v1/people/split"].includes(pathname);
+    if (identityManagement || (editPerson && request.method === "PATCH") || undoAudit || undoMerge || batchPath) {
+      response.setHeader("Cache-Control", "no-store");
+      const reading = !!identityManagement && !identityManagement[2] && request.method === "GET";
+      if (!setup.getInitializationState().initialized || !trusted(!reading) || !controlAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try {
+        const store = await openConversations();
+        if (reading) { const identity = await peopleReader.query(store.databasePath,store.people,"identity",[identityManagement![1]!,0,0]); sendJson(response,200,{ identity }); return; }
+        if (!(editPerson && request.method === "PATCH") && !(request.method === "POST" && (identityManagement?.[2] || undoAudit || undoMerge || batchPath))) { sendJson(response,405,{ error: "METHOD_NOT_ALLOWED" }); return; }
+        if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new Error("INVALID_INPUT");
+        const body = await readSetupBody(request,16384);
+        if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("INVALID_INPUT");
+        const fields = body as Record<string, unknown>, keys = Object.keys(fields).sort().join(",");
+        let action: ManagementMutation, args: unknown[];
+        if (editPerson && request.method === "PATCH" && keys === "manualName,note,version") { action = "edit"; args = [editPerson[1],fields.version,fields.manualName,fields.note]; }
+        else if (identityManagement?.[2] === "reassign" && keys === "reason,targetPersonId,version") { action = "reassign"; args = [identityManagement[1],fields.targetPersonId,fields.version,fields.reason]; }
+        else if (identityManagement?.[2] === "detach" && keys === "reason,version") { action = "detach"; args = [identityManagement[1],fields.version,fields.reason]; }
+        else if (undoAudit && keys === "reason") { action = "undo"; args = [undoAudit[1],fields.reason]; }
+        else if (undoMerge && keys === "reason") { action = "undoMerge"; args = [undoMerge[1],fields.reason]; }
+        else if (pathname === "/api/v1/people/merge/preview" && keys === "options,sourceId,targetId") { action = "mergePreview"; args = [fields.sourceId,fields.targetId,fields.options]; }
+        else if (pathname === "/api/v1/people/merge" && keys === "fingerprint,options,reason,sourceId,targetId") { action = "merge"; args = [fields.sourceId,fields.targetId,fields.options,fields.fingerprint,fields.reason]; }
+        else if (pathname === "/api/v1/people/split/preview" && keys === "identities,sourceId,targetId" && (fields.targetId === null || typeof fields.targetId === "string")) { action = "splitPreview"; args = [fields.sourceId,fields.targetId,fields.identities]; }
+        else if (pathname === "/api/v1/people/split" && keys === "fingerprint,identities,reason,sourceId,targetId" && (fields.targetId === null || typeof fields.targetId === "string")) { action = "split"; args = [fields.sourceId,fields.targetId,fields.identities,fields.fingerprint,fields.reason]; }
+        else throw new Error("INVALID_INPUT");
+        if (action === "merge" || action === "split") {
+          const ticket = args[3];
+          if (typeof ticket !== "string" || !/^[a-f0-9]{64}\.[a-f0-9]{64}$/.test(ticket)) throw new Error("INVALID_INPUT");
+          const [digest, signature] = ticket.split(".") as [string,string];
+          const expected = createHmac("sha256",peoplePreviewKey).update(`${action}:${digest}`).digest("hex");
+          if (!timingSafeEqual(Buffer.from(signature),Buffer.from(expected))) throw new Error("CONFLICT");
+          args[3] = digest;
+        }
+        let result = await peopleReader.mutate(store.databasePath,store.people,action,args);
+        if ((action === "mergePreview" || action === "splitPreview") && result && typeof result === "object") {
+          const preview = result as { fingerprint: string }, purpose = action === "mergePreview" ? "merge" : "split";
+          const signature = createHmac("sha256",peoplePreviewKey).update(`${purpose}:${preview.fingerprint}`).digest("hex");
+          result = { ...preview, fingerprint: `${preview.fingerprint}.${signature}` };
+        }
+        sendJson(response,200,{ result });
+      } catch (error) {
+        const code = error instanceof Error && ["NOT_FOUND","INVALID_INPUT","CONFLICT","BATCH_LIMIT"].includes(error.message) ? error.message : "PEOPLE_UNAVAILABLE";
+        sendJson(response,code === "NOT_FOUND" ? 404 : code === "INVALID_INPUT" || code === "BATCH_LIMIT" ? 400 : code === "CONFLICT" ? 409 : 503,{ error: code });
+      }
+      return;
+    }
+    if (/^\/api\/v1\/(people|spaces)(?:\/|$)/.test(pathname)) {
+      response.setHeader("Cache-Control", "no-store");
+      if (!setup.getInitializationState().initialized || !trusted(false) || !controlAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      const url = new URL(request.url ?? "/", "http://localhost"), params = url.searchParams;
+      const limitText = params.get("limit") ?? "20", offsetText = params.get("offset") ?? "0", search = params.get("q") ?? "", state = params.get("state") ?? "active";
+      if ([...params.keys()].some(key => !["limit", "offset", "q", "state"].includes(key) || params.getAll(key).length !== 1) || !["active","merged"].includes(state) || !/^[1-9]\d{0,1}$/.test(limitText) || Number(limitText) > 50 || !/^(0|[1-9]\d{0,5})$/.test(offsetText) || search.length > 100 || /[\u0000-\u001f\u007f]/.test(search)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+      const limit = Number(limitText), offset = Number(offsetText), match = /^\/api\/v1\/(people|spaces)(?:\/([0-9a-f-]{36})(?:\/(identities|spaces|members|audit))?)?$/.exec(pathname);
+      if (!match) { sendJson(response, 404, { error: "NOT_FOUND" }); return; }
+      try {
+        const store = await openConversations(), [, resource, resourceId, relation] = match;
+        const read = (action: ManagementQuery, value: string) => peopleReader.query(store.databasePath, store.people, action, [value, limit + 1, offset, state as "active" | "merged"]);
+        if (!resourceId) {
+          const items = await read(resource === "people" ? "people" : "spaces", search) as unknown[];
+          sendJson(response, 200, { items: items.slice(0,limit), hasMore: items.length > limit, offset, limit }); return;
+        }
+        if (!relation) { const value = await read(resource === "people" ? "person" : "space", resourceId); sendJson(response, 200, resource === "people" ? { person: value } : { space: value }); return; }
+        const action = resource === "people" && relation === "identities" ? "identities"
+          : resource === "people" && relation === "spaces" ? "personSpaces"
+          : resource === "people" && relation === "audit" ? "audit"
+          : resource === "spaces" && relation === "members" ? "members" : null;
+        if (!action) { sendJson(response, 404, { error: "NOT_FOUND" }); return; }
+        const items = await read(action, resourceId) as unknown[];
+        sendJson(response, 200, { items: items.slice(0,limit), hasMore: items.length > limit, offset, limit });
+      } catch (error) {
+        const notFound = error instanceof Error && ["NOT_FOUND", "INVALID_INPUT"].includes(error.message);
+        sendJson(response, notFound ? 404 : 503, { error: notFound ? "NOT_FOUND" : "PEOPLE_UNAVAILABLE" });
       }
       return;
     }
@@ -386,17 +534,22 @@ export function createStardustServer(options: AppOptions = {}): Server {
         }
         const toolRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/tool(?:\/(decision))?$/i.exec(pathname);
         if (toolRoute) {
+          if (!trusted(request.method !== "GET")) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
           (await openConversations()).getWeb(toolRoute[1]!);
           const key = `${toolRoute[1]}/${toolRoute[2]}`;
           const runId = conversationRuns.get(key);
           if (!runId) { sendJson(response, request.method === "GET" ? 200 : 409, request.method === "GET" ? { run: null } : { error: "TOOL_UNAVAILABLE" }); return; }
-          if (request.method === "GET" && !toolRoute[3]) { sendJson(response, 200, { run: toolRuns.get(localConversationOwner, runId) }); return; }
+          if (request.method === "GET" && !toolRoute[3]) {
+            const run = toolRuns.get(conversationOwner(toolRoute[1]!), runId);
+            sendJson(response, 200, { run: { ...run, calls: run.calls.map(({ input, ...call }) => ({ ...call, ...(typeof input?.content === "string" ? { input: { content: input.content } } : {}) })) } }); return;
+          }
           if (request.method === "POST" && toolRoute[3]) {
             if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
             let body: unknown; try { body = await readSetupBody(request); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
             if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 2 || typeof (body as Record<string, unknown>).toolCallId !== "string" || typeof (body as Record<string, unknown>).approved !== "boolean") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
             const fields = body as { toolCallId: string; approved: boolean };
-            toolRuns.decide(localConversationOwner, runId, fields.toolCallId, fields.approved);
+            if (fields.approved && !toolRuns.approvalView(conversationOwner(toolRoute[1]!), runId)?.canApprove) throw new Error("APPROVAL_UNAVAILABLE");
+            toolRuns.decide(conversationOwner(toolRoute[1]!), runId, fields.toolCallId, fields.approved);
             sendJson(response, 200, { ok: true }); return;
           }
           sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return;
@@ -459,7 +612,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
               const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools().filter(tool => !visibleTools || visibleTools.has(tool.name)), coreAllows, controller.signal) : undefined;
               assertSkills();
               if (controller.signal.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
-              const runId = toolRuns.start(localConversationOwner, request.current, request.messages, {
+              const runId = toolRuns.start(conversationOwner(id), request.current, request.messages, {
                 searchHistory: input => store.searchHistory(input, evidence), activity,
                 allowTool: name => (!selected || selected.has(name)) && coreAllows(name) && (name === "search_history" || !capabilitySnapshot || (!!visibleTools?.has(name) && capabilitySnapshot.isEligible(visibleTools.get(name)!))),
                 ...(skillBudget === undefined ? {} : { maxPromptBytes: skillBudget }),
@@ -467,8 +620,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
               }, request.source);
               conversationRuns.set(key, runId);
               return {
-                get: () => toolRuns.get(localConversationOwner, runId),
-                cancel: () => toolRuns.cancel(localConversationOwner, runId),
+                get: () => toolRuns.get(conversationOwner(id), runId),
+                cancel: () => toolRuns.cancel(conversationOwner(id), runId),
                 close: () => { conversationRuns.delete(key); },
                 isClosed: () => serverClosing,
               };
@@ -502,7 +655,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/tool-runs" || pathname.startsWith("/api/v1/tool-runs/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!trusted(request.method !== "GET")) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (request.method === "POST") {
           if (!request.headers.origin || !isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
           if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
@@ -517,13 +670,17 @@ export function createStardustServer(options: AppOptions = {}): Server {
           const decision = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})\/decision$/.exec(pathname);
           if (decision) {
             if (Object.keys(fields).length !== 2 || typeof fields.toolCallId !== "string" || typeof fields.approved !== "boolean") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+            if (fields.approved && !toolRuns.approvalView(owner, decision[1]!)?.canApprove) throw new Error("APPROVAL_UNAVAILABLE");
             toolRuns.decide(owner, decision[1]!, fields.toolCallId, fields.approved); sendJson(response, 202, { ok: true }); return;
           }
         } else if (request.method === "GET") {
           if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
           const owner = localToolOwner;
           const match = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})$/.exec(pathname);
-          if (match) { sendJson(response, 200, toolRuns.get(owner, match[1]!)); return; }
+          if (match) {
+            const run = toolRuns.get(owner, match[1]!);
+            sendJson(response, 200, { ...run, calls: run.calls.map(({ input, ...call }) => ({ ...call, ...(typeof input?.content === "string" ? { input: { content: input.content } } : {}) })) }); return;
+          }
         }
         sendJson(response, 404, { error: "NOT_FOUND" });
       } catch (error) {
@@ -783,7 +940,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
   });
   server.on("listening", () => { try { if (setup.getInitializationState().initialized) { void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); if (options.startConversations || options.conversationService) void openConversations().catch(() => logs.write("ERROR", "global-context", "无法打开会话数据库。")); } } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
-  server.on("close", () => { serverClosing = true; qqRuns.shutdown(); toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
+  server.on("close", () => { serverClosing = true; peopleObserver.shutdown(); peopleReader.shutdown(); qqRuns.shutdown(); toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;
