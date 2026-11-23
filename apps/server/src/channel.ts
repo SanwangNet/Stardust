@@ -12,14 +12,19 @@ export interface ChannelMessage {
   content: string;
   timestamp: string;
   eventId?: string;
+  /** Opaque reference created by the channel adapter for this accepted message. */
+  targetRef?: string;
 }
+export type ChannelDeliveryResult = { status: "delivered" | "unavailable" | "rejected" | "unknown_outcome"; reason?: string };
+export type ChannelDeliver = (reply: string, signal: AbortSignal) => Promise<ChannelDeliveryResult>;
+export type ChannelResponse = string | { kind: "deferred" };
 
 export type ExtensionStatus = "disconnected" | "connecting" | "connected" | "error";
 export interface ExtensionField { key: string; env: string; label: string; sensitive: boolean; required: boolean }
 export interface ManagementPage { pageId: string; title: string; description: string; pageKind: string }
 export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: SkillDeclaration[] }
 export interface ChannelHost {
-  message(message: ChannelMessage, signal: AbortSignal): Promise<string>;
+  message(message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver): Promise<ChannelResponse>;
   qqInputFlow?(request: QQInputRequest): Promise<"allow" | "skip">;
   status(state: ExtensionStatus, error?: string): void;
   reportError(code: "MODEL_FAILED" | "SEND_FAILED"): void;

@@ -9,9 +9,9 @@ import { runToolExecutionFlow } from "./web-tool-execution-flow.js";
 import type { ExecutableFlow } from "./executable-flow.js";
 import { AgentOrchestrator, type AgentSource } from "./agent-orchestrator.js";
 
-type InternalTools = { searchHistory: (input: unknown) => HistoryResult[]; activity: (event: Omit<ModelActivity, "requestId">) => void; allowTool?: (name: string) => boolean; executionFlow?: ExecutableFlow; maxPromptBytes?: number };
+type InternalTools = { searchHistory: (input: unknown) => HistoryResult[]; activity: (event: Omit<ModelActivity, "requestId">) => void; allowTool?: (name: string) => boolean; allowInput?: (name: string, input: Readonly<ToolInput>) => boolean; targetRef?: string; executionFlow?: ExecutableFlow; maxPromptBytes?: number };
 
-type CallView = { id: string; name: string; status: string; input?: ToolInput; approval?: ToolApproval; expiresAt?: string; result?: unknown };
+type CallView = { id: string; name: string; status: string; input?: ToolInput; approval?: ToolApproval; approvalStatus?: "pending" | "approved" | "denied" | "expired" | "cancelled" | "unavailable"; createdAt?: string; expiresAt?: string; result?: unknown };
 type Run = {
   id: string; owner: string; source: AgentSource; status: "working" | "waiting" | "executing" | "done" | "error";
   messages: ModelTurnMessage[]; calls: CallView[]; queue: ToolCall[]; limits: { toolCalls: number }; reply?: string; error?: string; errorDetail?: { source: string; status?: number; code?: string; message?: string };
@@ -31,7 +31,8 @@ export class ToolRuns {
     if (typeof text !== "string" || !text.trim() || Buffer.byteLength(text, "utf8") > 32000) throw new Error("INVALID_INPUT");
     for (const [id, run] of this.runs) if (Date.now() - run.created > 30 * 60_000 && run.status !== "executing") { run.controller.abort(); this.runs.delete(id); }
     if (this.runs.size >= 100) throw new Error("RUN_LIMIT");
-    const targets = this.extensions.availableTools().length ? this.extensions.availableTargets() : [];
+    const canSend = this.extensions.availableTools().some(tool => tool.name === "send_message") && (!internal?.allowTool || internal.allowTool("send_message"));
+    const targets = canSend ? this.extensions.availableTargets().filter(item => item.channel === "qq-bot").map(item => internal?.targetRef === undefined ? item : { ...item, targets: item.targets.filter(target => target.id === internal.targetRef) }).filter(item => item.targets.length) : [];
     const prompt = `以下是已知的可用消息渠道及目标引用。仅可使用这些引用；同类型多个目标无法明确区分时必须询问用户，不可猜测。\n${JSON.stringify(targets)}`;
     const messages: ModelTurnMessage[] = history ? structuredClone(history) : [{ role: "user", content: text }];
     const scopedInternal = internal?.executionFlow ? { ...internal, executionFlow: structuredClone(internal.executionFlow) } : internal;
@@ -50,12 +51,13 @@ export class ToolRuns {
     if (run.status !== "waiting" || !pending || pending.call.id !== toolCallId) throw new Error("APPROVAL_UNAVAILABLE");
     if (run.internal?.allowTool && !run.internal.allowTool(pending.call.name)) {
       const view = run.calls.find((entry) => entry.id === toolCallId)!;
-      run.approval = undefined; view.status = "unavailable"; view.result = { status: "unavailable", code: "TOOL_DISABLED" };
+      run.approval = undefined; view.status = "unavailable"; view.approvalStatus = "unavailable"; view.result = { status: "unavailable", code: "TOOL_DISABLED" };
       run.messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(view.result) }); run.status = "working"; void this.advance(run);
       throw new Error("APPROVAL_UNAVAILABLE");
     }
     const view = run.calls.find((entry) => entry.id === toolCallId)!;
     run.approval = undefined;
+    view.approvalStatus = approved ? "approved" : "denied";
     this.logs.write("INFO", "tools", approved ? "工具调用已批准。" : "工具调用已拒绝。", { runId: run.id, toolCallId, toolName: pending.call.name, channel: pending.channel, approval: approved ? "approved" : "denied", stage: "approval" });
     if (!approved) { view.status = "denied"; view.result = { status: "denied" }; run.messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(view.result) }); run.internal?.activity({ kind: "generating", state: "started", displayText: "正在生成回复…" }); run.status = "working"; void this.advance(run); return; }
     // Transition before any await, making repeated approvals harmless.
@@ -65,7 +67,7 @@ export class ToolRuns {
     const execute = async (): Promise<ToolResult> => {
       let result: ToolResult = { status: "unavailable", code: "TOOL_EXECUTION_FLOW_FAILED" };
       const invoke = async () => {
-        if (run.controller.signal.aborted || pending.toolSignal.aborted || pending.channelSignal?.aborted || Date.now() >= pending.deadline || (run.internal?.allowTool && !run.internal.allowTool(pending.call.name))) return;
+        if (run.controller.signal.aborted || pending.toolSignal.aborted || pending.channelSignal?.aborted || Date.now() >= pending.deadline || (run.internal?.allowTool && !run.internal.allowTool(pending.call.name)) || (run.internal?.allowInput && !run.internal.allowInput(pending.call.name, pending.input))) return;
         startedExecution = true;
         result = await this.extensions.executeTool(pending.call.name, pending.input, run.controller.signal);
       };
@@ -88,9 +90,24 @@ export class ToolRuns {
     if (run.owner !== owner) throw new Error("RUN_NOT_FOUND");
     if (run.status === "done" || run.status === "error") return;
     run.controller.abort();
+    if (run.approval) {
+      const view = run.calls.find(call => call.id === run.approval!.call.id);
+      if (view) { view.status = "cancelled"; view.approvalStatus = "cancelled"; view.result = { status: "cancelled", code: "REQUEST_CANCELLED" }; }
+    } else if (run.status === "executing") {
+      // The external side effect may already have happened. A late definitive result can replace this.
+      const view = run.calls.find(call => call.status === "executing");
+      if (view) { view.status = "unknown_outcome"; view.result = { status: "unknown_outcome", code: "UNKNOWN_OUTCOME" }; }
+    }
     run.approval = undefined;
     run.status = "error";
     run.error = "REQUEST_CANCELLED";
+  }
+  /** Drop an owned, finished run after its retention period. */
+  forget(owner: string, id: string): void {
+    const run = this.runs.get(id);
+    if (!run || run.owner !== owner) return;
+    if (run.status === "working" || run.status === "waiting" || run.status === "executing") return;
+    run.controller.abort(); this.runs.delete(id);
   }
   private owned(owner: string, id: string): Run {
     const run = this.runs.get(id); if (!run || run.owner !== owner) throw new Error("RUN_NOT_FOUND"); return run;
@@ -101,7 +118,7 @@ export class ToolRuns {
     const reason = pending.toolSignal.aborted ? "TOOL_DISABLED" : pending.channelSignal?.aborted ? "CHANNEL_UNAVAILABLE" : Date.now() >= pending.deadline ? "APPROVAL_EXPIRED" : undefined;
     if (!reason) return;
     const call = pending.call; run.approval = undefined;
-    const view = run.calls.find((item) => item.id === call.id)!; view.status = reason === "APPROVAL_EXPIRED" ? "expired" : "unavailable"; view.result = { status: view.status, code: reason };
+    const view = run.calls.find((item) => item.id === call.id)!; view.status = reason === "APPROVAL_EXPIRED" ? "expired" : "unavailable"; view.approvalStatus = reason === "APPROVAL_EXPIRED" ? "expired" : "unavailable"; view.result = { status: view.status, code: reason };
     this.logs.write("WARN", "tools", "工具审批已失效。", { runId: run.id, toolCallId: call.id, toolName: call.name, channel: view.approval?.channel, approval: "expired", stage: "approval", code: reason });
     run.messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(view.result) });
     run.status = "working"; void this.advance(run);
@@ -146,6 +163,7 @@ export class ToolRuns {
     let failure: string | undefined;
     if (!tool) failure = "TOOL_UNAVAILABLE";
     else if (!input) failure = "INVALID_ARGUMENTS";
+    else if (run.internal?.allowInput && !run.internal.allowInput(call.name, input)) failure = "TOOL_UNAVAILABLE";
     else {
       const prepared = tool.prepare(input, this.extensions.toolHost());
       if ("error" in prepared) failure = prepared.error;
@@ -159,7 +177,7 @@ export class ToolRuns {
         else {
           const deadline = Math.min(Date.now() + 5 * 60_000, targetExpiry);
           const snapshot = structuredClone(input); freezeInput(snapshot);
-          view.input = structuredClone(snapshot); view.approval = structuredClone(prepared.approval); view.expiresAt = new Date(deadline).toISOString(); view.status = "waiting";
+          view.input = structuredClone(snapshot); view.approval = structuredClone(prepared.approval); view.approvalStatus = "pending"; view.createdAt = new Date().toISOString(); view.expiresAt = new Date(deadline).toISOString(); view.status = "waiting";
           run.internal?.activity({ kind: "tool_call", state: "started", displayText: "等待确认 Tool 操作" });
           run.approval = { call, input: snapshot, deadline, channel: prepared.approval.channel, toolSignal, channelSignal }; run.status = "waiting";
           this.logs.write("INFO", "tools", "工具调用等待批准。", { runId: run.id, toolCallId: call.id, toolName: call.name, channel: prepared.approval.channel, approval: "pending", stage: "approval" }); return false;

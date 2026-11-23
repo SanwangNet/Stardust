@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, type ConfigUpdate } from "./config.js";
 import { setupService, type SetupService } from "./setup.js";
@@ -10,6 +10,7 @@ import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { isLocalRead, isTrustedLocalAccess } from "./local-access.js";
 import { ToolRuns } from "./tool-runs.js";
+import { QQToolRuns, type QQToolPolicy, type QQToolStarter } from "./qq-tool-runs.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
 import type { ConversationService } from "./conversation.js";
 import { WEB_CONTEXT_OWNER } from "./global-context.js";
@@ -38,6 +39,10 @@ export interface AppOptions {
   skillFlow?: { enabled: boolean; definition?: ExecutableFlow };
   flowPublication?: FlowPublication;
   agentOrchestrator?: AgentOrchestrator;
+  /** Trusted server integration only; it is deliberately not wired to production QQ input. */
+  qqToolAdapter?: { policy?: QQToolPolicy; register(start: QQToolStarter): void; runTimeoutMs?: number; retentionMs?: number };
+  qqApprovalToken?: string;
+  qqToolCalling?: { enabled: boolean; policy: QQToolPolicy; maxActive?: number };
 }
 
 const defaultStaticDir = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -166,6 +171,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   let conversationOpening: Promise<ConversationService> | undefined;
   const conversationRuns = new Map<string, string>();
   const localConversationOwner = "local-conversation";
+  const localToolOwner = "local-tool-api";
   let serverClosing = false;
   const webChannelAvailable = (): boolean => typeof extensions.channelEnabled !== "function" || !extensions.list().some((item) => item.id === "web-chat" && item.builtin) || extensions.channelEnabled("web-chat");
   function overviewData(canEdit: boolean) {
@@ -212,9 +218,23 @@ export function createStardustServer(options: AppOptions = {}): Server {
     conversations.globalContext.start();
     return conversations;
   }
+  const approvalToken = options.qqApprovalToken ?? process.env.STARDUST_QQ_APPROVAL_TOKEN ?? "";
+  const validApprovalToken = /^[A-Za-z0-9_-]{43}$/.test(approvalToken);
+  const envList = (name: string) => (process.env[name] ?? "").split(",").map(value => value.trim()).filter(Boolean);
+  const qqPolicy = options.qqToolCalling?.policy ?? options.qqToolAdapter?.policy ?? { private: envList("STARDUST_QQ_TOOL_PRIVATE_ALLOW"), group: envList("STARDUST_QQ_TOOL_GROUP_ALLOW"), privateSenders: envList("STARDUST_QQ_TOOL_PRIVATE_SENDERS"), groups: envList("STARDUST_QQ_TOOL_GROUPS"), groupSenders: envList("STARDUST_QQ_TOOL_GROUP_SENDERS") };
+  const qqEnabled = options.qqToolCalling?.enabled ?? process.env.STARDUST_QQ_TOOL_CALLING === "1";
+  const qqRuns = new QQToolRuns(toolRuns, extensions, async () => (await openConversations()).agent, qqPolicy, options.qqToolAdapter?.runTimeoutMs, options.qqToolAdapter?.retentionMs, options.qqToolCalling?.maxActive);
+  options.qqToolAdapter?.register((message, signal) => {
+    if (!validApprovalToken) throw new Error("ADMIN_NOT_CONFIGURED");
+    return qqRuns.start(message, signal);
+  });
   if ((options.startConversations || !options.extensionManager || options.modelService) && typeof extensions.setChannelChat === "function") {
-    extensions.setChannelChat(async (message, signal) => {
+    extensions.setChannelChat(async (message, signal, deliver) => {
       const core = (await openConversations()).agent;
+      if (message.channelId === "qq-bot" && qqEnabled && validApprovalToken && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
+        const runId = await qqRuns.start(message, signal, { deliver });
+        if (runId) return { kind: "deferred" as const };
+      }
       // ExtensionManager verifies the channel against the running extension; QQ has
       // already validated the reply target and scope before calling the host.
       const conversationId = createHash("sha256").update(JSON.stringify([message.channelId, message.conversationType, message.conversationId])).digest("hex");
@@ -239,6 +259,30 @@ export function createStardustServer(options: AppOptions = {}): Server {
     const trusted = (requireOrigin: boolean) => isTrustedLocalAccess(request, server.address(), requireOrigin, devProxyProof);
     if (pathname.startsWith("/api/v1/") && !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
       if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN" }); return; }
+    }
+    if (pathname === "/api/v1/qq-tool-runs" || pathname.startsWith("/api/v1/qq-tool-runs/")) {
+      const supplied = request.headers["x-stardust-approval-token"];
+      const authorized = validApprovalToken && typeof supplied === "string" && /^[A-Za-z0-9_-]{43}$/.test(supplied) && timingSafeEqual(Buffer.from(supplied), Buffer.from(approvalToken));
+      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET") || !authorized) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      try {
+        if (request.method === "GET" && pathname === "/api/v1/qq-tool-runs") { sendJson(response, 200, { runs: qqRuns.list() }); return; }
+        const match = /^\/api\/v1\/qq-tool-runs\/([0-9a-f-]{36})(\/decision)?$/.exec(pathname);
+        if (!match) { sendJson(response, 404, { error: "NOT_FOUND" }); return; }
+        if (request.method === "GET" && !match[2]) { sendJson(response, 200, { run: qqRuns.get(match[1]!) }); return; }
+        if (request.method === "POST" && match[2]) {
+          if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          let body: unknown; try { body = await readSetupBody(request); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          const fields = body as Record<string, unknown>;
+          if (Object.keys(fields).sort().join(",") !== "approved,toolCallId" || typeof fields.toolCallId !== "string" || typeof fields.approved !== "boolean") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
+          qqRuns.decide(match[1]!, fields.toolCallId, fields.approved); sendJson(response, 200, { ok: true }); return;
+        }
+        sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+      } catch (error) {
+        const code = error instanceof Error && ["RUN_NOT_FOUND", "APPROVAL_UNAVAILABLE"].includes(error.message) ? error.message : "RUN_UNAVAILABLE";
+        sendJson(response, code === "RUN_NOT_FOUND" ? 404 : code === "APPROVAL_UNAVAILABLE" ? 409 : 500, { error: code });
+      }
+      return;
     }
     if (pathname === "/api/v1/flow-overview") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
@@ -410,14 +454,14 @@ export function createStardustServer(options: AppOptions = {}): Server {
               current: content, messages: context, signal: controller.signal,
             }, async request => {
               const coreAllows = (name: string) => webChannelAvailable() && store.agent.toolAllowed(name);
-              const capabilitySnapshot = toolEnabled && typeof extensions.requestCapabilities === "function" ? extensions.requestCapabilities({ channel: "web", allowTool: coreAllows, allowSkill: () => false }) : undefined;
-              const visibleTools = capabilitySnapshot && new Set(capabilitySnapshot.visible.filter(item => item.kind === "tool").map(item => item.name));
+              const capabilitySnapshot = typeof extensions.requestCapabilities === "function" ? extensions.requestCapabilities({ channel: "web", allowTool: coreAllows, allowSkill: () => false }) : undefined;
+              const visibleTools = capabilitySnapshot && new Map(capabilitySnapshot.visible.filter(item => item.kind === "tool").map(item => [item.name, item.id]));
               const selected = toolEnabled ? await runWebToolFlow(options.toolAvailabilityFlow?.definition ?? publishedGraphs?.tools ?? builtInWebToolFlow(), extensions.availableTools().filter(tool => !visibleTools || visibleTools.has(tool.name)), coreAllows, controller.signal) : undefined;
               assertSkills();
               if (controller.signal.aborted) throw new ModelError("REQUEST_CANCELLED", 499);
               const runId = toolRuns.start(localConversationOwner, request.current, request.messages, {
                 searchHistory: input => store.searchHistory(input, evidence), activity,
-                allowTool: name => (!selected || selected.has(name)) && coreAllows(name),
+                allowTool: name => (!selected || selected.has(name)) && coreAllows(name) && (name === "search_history" || !capabilitySnapshot || (!!visibleTools?.has(name) && capabilitySnapshot.isEligible(visibleTools.get(name)!))),
                 ...(skillBudget === undefined ? {} : { maxPromptBytes: skillBudget }),
                 ...(executionEnabled ? { executionFlow: options.toolExecutionFlow?.definition ?? builtInWebToolExecutionFlow() } : {}),
               }, request.source);
@@ -465,7 +509,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
           let body: unknown; try { body = await readSetupBody(request, 32768); } catch { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
           if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
           const fields = body as Record<string, unknown>;
-          const owner = localConversationOwner;
+          const owner = localToolOwner;
           if (pathname === "/api/v1/tool-runs") {
             if (Object.keys(fields).length !== 1 || typeof fields.message !== "string") { sendJson(response, 400, { error: "INVALID_INPUT" }); return; }
             const id = toolRuns.start(owner, fields.message); sendJson(response, 202, { id }); return;
@@ -477,7 +521,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
           }
         } else if (request.method === "GET") {
           if (!isSameOrigin(request)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
-          const owner = localConversationOwner;
+          const owner = localToolOwner;
           const match = /^\/api\/v1\/tool-runs\/([0-9a-f-]{36})$/.exec(pathname);
           if (match) { sendJson(response, 200, toolRuns.get(owner, match[1]!)); return; }
         }
@@ -739,7 +783,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
   });
   server.on("listening", () => { try { if (setup.getInitializationState().initialized) { void extensions.restore().catch(() => logs.write("ERROR", "extensions", "恢复已启用扩展失败。")); if (options.startConversations || options.conversationService) void openConversations().catch(() => logs.write("ERROR", "global-context", "无法打开会话数据库。")); } } catch { logs.write("ERROR", "server", "读取初始化状态失败。"); } });
-  server.on("close", () => { serverClosing = true; toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
+  server.on("close", () => { serverClosing = true; qqRuns.shutdown(); toolRuns.shutdown(); void extensions.shutdown(); try { conversations?.close(); } catch { logs.write("ERROR", "server", "会话数据库关闭失败。"); } });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => { for (const stream of streams) stream.end(); return closeServer(callback); }) as typeof server.close;
   return server;

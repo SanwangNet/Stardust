@@ -435,6 +435,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .conversation-list button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; background: transparent; padding: 10px; color: var(--muted); cursor: pointer; }
 .conversation-list button[aria-current="true"] { color: var(--accent); background: var(--accent-soft); }
 .conversation-list-panel p { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.qq-approvals input { width: 100%; min-width: 0; box-sizing: border-box; }
+.qq-approvals .tool-call { padding: 8px 0; }
+.qq-approvals .tool-call p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .conversation-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .conversation-toolbar { padding: 10px 18px; border-bottom: 1px solid var(--line); }
 .conversation-toolbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

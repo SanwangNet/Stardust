@@ -103,6 +103,15 @@ test("QQ suppresses empty replies and preserves model error categories", async t
   assert.equal(f.manager.list()[0].error, undefined); assert.equal(f.bot.sent.length, 0);
 });
 
+test("QQ never sends a passive reply using an expired or invalid message timestamp", async t => {
+  const model = { async chatContext() { return "回复"; } };
+  const f = await fixture(t, model);
+  await f.bot.emit(event("group", "expired", "group-openid", { timestamp: new Date(Date.now() - 6 * 60_000).toISOString() }));
+  await f.bot.emit(event("c2c", "invalid-time", "private-openid", { timestamp: "invalid" }));
+  assert.equal(f.bot.sent.length, 0);
+  assert.equal(f.entries.length, 2);
+});
+
 test("model-only mode fails closed when chatContext is unavailable", async () => {
   let tools = 0;
   const agent = new AgentOrchestrator({ async chatWithTools() { tools++; return { content: "", toolCalls: [] }; } });

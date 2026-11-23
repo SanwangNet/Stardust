@@ -1,7 +1,7 @@
 import type { QQBot, QQBotInboundMessage } from "@tencent-connect/qqbot-nodejs";
 import { setTimeout as delay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
-import type { CapabilityTestInput, CapabilityTestResult, ExtensionPackage } from "../channel.js";
+import type { CapabilityTestInput, CapabilityTestResult, ChannelDeliveryResult, ExtensionPackage } from "../channel.js";
 import { ExtensionError } from "../extension-manager.js";
 import { isPublicHttpsImageUrl, performQQCapabilityTest, performQQStreamCapabilityTest, type DiagnosticFetch, type QQTestTarget } from "./qq-capability.js";
 import { qqSendMessageTool } from "./qq-send-message.js";
@@ -53,9 +53,12 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
     let connected = false;
     let pending = 0;
     let queue: Promise<void> = Promise.resolve();
-    let sending: Promise<unknown> | undefined;
+    const sends = new Set<Promise<ChannelDeliveryResult>>();
+    const platformSends = new Set<Promise<unknown>>();
     let lastAccepted = 0;
     async function receive(message: QQBotInboundMessage): Promise<void> {
+      // Keep the validated event stable while the queue and deferred delivery run.
+      message = { ...message, ...(message.replyTarget && typeof message.replyTarget === "object" ? { replyTarget: { ...message.replyTarget } } : {}), ...(Array.isArray(message.mentions) ? { mentions: message.mentions.map(mention => mention && typeof mention === "object" ? { ...mention } : mention) } : {}) };
       const eventId = randomUUID();
       const scope = message.kind === "group" ? "group" : message.kind === "c2c" ? "private" : "other";
       function makeDiagnostic() {
@@ -124,7 +127,38 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
       // The opaque ID alone is exposed; actual targets remain in bounded runtime memory.
       const messageTime = Date.parse(message.timestamp);
       const expiry = Number.isFinite(messageTime) ? Math.min(messageTime, now) + (message.kind === "c2c" ? 60 : 5) * 60_000 : null;
-      capabilityTargets.push({ id: randomUUID(), targetOpenid: message.replyTarget.targetId, messageId: message.messageId, scope: message.kind === "c2c" ? "private" : "group", receivedAt: new Date(now).toISOString(), replyExpiresAt: expiry === null ? null : new Date(expiry).toISOString() });
+      const replyTarget = { scope: message.replyTarget.scope, targetId: message.replyTarget.targetId, msgId: message.messageId };
+      const deliver = (reply: string, signal: AbortSignal): Promise<ChannelDeliveryResult> => {
+        const work = (async (): Promise<ChannelDeliveryResult> => {
+          if (stopped || !connected || !bot || signal.aborted || controller.signal.aborted) return { status: "unavailable", reason: "CHANNEL_UNAVAILABLE" };
+          if (expiry === null || Date.now() >= expiry || Date.now() - now > 240_000) return { status: "unavailable", reason: "REPLY_EXPIRED" };
+          if (!reply.trim()) return { status: "unavailable", reason: "EMPTY_REPLY" };
+          const content = Array.from(reply).slice(0, 1500).join("");
+          const cancelled = AbortSignal.any([controller.signal, signal, AbortSignal.timeout(30_000)]);
+          let onAbort: (() => void) | undefined;
+          try {
+            const request = bot.sendText(replyTarget, content);
+            platformSends.add(request);
+            void request.then(sent => {
+              if (sent.id) seen.set(`${message.kind}:${sent.id}`, Date.now());
+              replies.set(`${conversation}:${digest(content)}`, Date.now());
+              if (replies.size > 4096) replies.delete(replies.keys().next().value!);
+            }).catch(() => {}).finally(() => platformSends.delete(request));
+            const interrupted = new Promise<undefined>(resolve => { onAbort = () => resolve(undefined); if (cancelled.aborted) onAbort(); else cancelled.addEventListener("abort", onAbort, { once: true }); });
+            const result = await Promise.race([request, interrupted]);
+            if (!result) return { status: "unknown_outcome", reason: "DELIVERY_INTERRUPTED" };
+            host.log("INFO", "QQ 回复发送成功。", { eventId, scope });
+            return { status: "delivered" };
+          } catch (error) {
+            const safe = platformError(error);
+            if (!stopped) { host.log("ERROR", "QQ 回复发送失败。", { eventId, scope, ...safe }); host.reportError("SEND_FAILED"); }
+            return safe.status && safe.status >= 400 && safe.status < 500 ? { status: "rejected", reason: `HTTP_${safe.status}` } : { status: "unknown_outcome", reason: "DELIVERY_NETWORK_UNKNOWN" };
+          } finally { if (onAbort) cancelled.removeEventListener("abort", onAbort); }
+        })();
+        sends.add(work); void work.finally(() => sends.delete(work)); return work;
+      };
+      const targetRef = randomUUID();
+      capabilityTargets.push({ id: targetRef, targetOpenid: message.replyTarget.targetId, messageId: message.messageId, scope: message.kind === "c2c" ? "private" : "group", receivedAt: new Date(now).toISOString(), replyExpiresAt: expiry === null ? null : new Date(expiry).toISOString() });
       if (capabilityTargets.length > 50) capabilityTargets.shift();
       host.log("INFO", "QQ 消息已接受。", getDiagnostic());
       const work = async (): Promise<void> => {
@@ -133,21 +167,13 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           if (wait) await delay(wait, undefined, { signal: controller.signal });
           if (stopped || Date.now() - now > 240_000) { filtered("expired_or_stopped"); return; }
           lastAccepted = Date.now();
-          let reply: string;
+          let reply: Awaited<ReturnType<typeof host.message>>;
           host.log("DEBUG", "QQ 消息开始调用模型。", { eventId, scope });
-          try { reply = await host.message({ channelId: "qq-bot", eventId, messageId: message.messageId, senderId: message.senderId, conversationId: message.replyTarget.targetId, conversationType: message.kind === "c2c" ? "private" : "group", content: message.content.trim(), timestamp: message.timestamp }, controller.signal); }
+          try { reply = await host.message({ channelId: "qq-bot", eventId, messageId: message.messageId, senderId: message.senderId, conversationId: replyTarget.targetId, conversationType: message.kind === "c2c" ? "private" : "group", content: message.content.trim(), timestamp: message.timestamp, targetRef }, controller.signal, deliver); }
           catch (error) { if (!stopped && !controller.signal.aborted && !(error instanceof Error && error.message === "REQUEST_CANCELLED")) { host.log("ERROR", "QQ 消息的模型调用失败。", { eventId, scope }); host.reportError("MODEL_FAILED"); } return; }
-          if (stopped || controller.signal.aborted || Date.now() - now > 240_000 || !reply.trim()) { filtered("expired_stopped_or_empty_reply"); return; }
-          try {
-            const content = Array.from(reply).slice(0, 1500).join("");
-            const request = bot!.sendText({ scope: message.replyTarget.scope, targetId: message.replyTarget.targetId, msgId: message.messageId }, content);
-            sending = request;
-            const sent = await request.finally(() => { if (sending === request) sending = undefined; });
-            if (sent.id) seen.set(`${message.kind}:${sent.id}`, Date.now());
-            replies.set(`${conversation}:${digest(content)}`, Date.now());
-            if (replies.size > 4096) replies.delete(replies.keys().next().value!);
-            host.log("INFO", "QQ 回复发送成功。", { eventId, scope });
-          } catch (error) { if (!stopped) { host.log("ERROR", "QQ 回复发送失败。", { eventId, scope, ...platformError(error) }); host.reportError("SEND_FAILED"); } }
+          if (typeof reply !== "string") return;
+          const outcome = await deliver(reply, controller.signal);
+          if (outcome.status === "unavailable") filtered("expired_stopped_or_empty_reply");
         } catch {
           if (!stopped) host.reportError("MODEL_FAILED");
         } finally { pending--; }
@@ -284,7 +310,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           } catch (error) { if (!stopped) { host.log("ERROR", "QQ Gateway 启动失败。", platformError(error)); host.status("error", "QQ 连接失败，请检查凭据、网络及平台权限。"); } }
         })();
       },
-      async stop() { if (!stopped) host.log("INFO", "QQ Gateway 正在停止。"); stopped = true; connected = false; capabilityTargets.length = 0; controller.abort(); bot?.stop(); await Promise.all([sending?.catch(() => {}), activeTest?.catch(() => {}), activeToolSend?.catch(() => {})]); },
+      async stop() { if (!stopped) host.log("INFO", "QQ Gateway 正在停止。"); stopped = true; connected = false; capabilityTargets.length = 0; controller.abort(); bot?.stop(); await Promise.all([...sends, activeTest?.catch(() => {}), activeToolSend?.catch(() => {}), Promise.race([Promise.allSettled([...platformSends]), delay(30_000, undefined, { ref: false })])]); },
     };
   },
 }; }

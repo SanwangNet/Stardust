@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { parseEnv } from "node:util";
 import { createEnvLoader, projectConfigRoot } from "./env.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
-import type { CapabilityDescriptor, CapabilityPolicy, CapabilityTestInput, ChannelInstance, ChannelMessage, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
+import type { CapabilityDescriptor, CapabilityPolicy, CapabilityTestInput, ChannelInstance, ChannelMessage, ChannelDeliver, ChannelResponse, ExtensionPackage, ExtensionStatus, ToolDefinition, ToolHost, MessageTarget, ChannelSendResult, ToolInput, ToolResult } from "./channel.js";
 import { logger, type LogService } from "./logger.js";
 import { WEB_STARCORE_ID } from "./agent-core.js";
 import { qqInputDeclaration, resolveStarcoreInterfaces, StarcoreFlowRegistry, validateStarcoreFlow } from "./starcore-flow.js";
@@ -28,7 +28,7 @@ export class ExtensionManager {
   private readonly skillBindings = new Map<string, SkillBinding>();
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
-  private channelChat?: (message: ChannelMessage, signal: AbortSignal) => Promise<string>;
+  private channelChat?: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>;
   constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger, bindings: readonly SkillBinding[] = []) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
     if (new Set(packages.map(item => item.manifest.id)).size !== packages.length) throw new Error("DUPLICATE_EXTENSION");
@@ -212,7 +212,9 @@ export class ExtensionManager {
     const permitted = (item: CapabilityDescriptor) => item.available && (item.kind === "tool" ? policy.allowTool(item.name) : !!item.channels?.includes(policy.channel) && policy.allowSkill(item.id.slice("skill:".length)));
     const visible = this.capabilityCatalog().capabilities.filter(permitted);
     const ids = new Set(visible.map(item => item.id));
-    return { visible, isEligible: id => ids.has(id) && this.capabilityCatalog().capabilities.some(item => item.id === id && permitted(item)) };
+    // A request must not regain an old grant after its provider reconnects or its Tool is re-enabled.
+    const toolLeases = new Map(visible.filter(item => item.kind === "tool").map(item => [item.id, this.toolSignal(item.name)]));
+    return { visible, isEligible: id => ids.has(id) && (!toolLeases.has(id) || !!toolLeases.get(id) && !toolLeases.get(id)!.aborted) && this.capabilityCatalog().capabilities.some(item => item.id === id && permitted(item)) };
   }
   list() {
     const installed = this.readInstalled();
@@ -257,7 +259,7 @@ export class ExtensionManager {
     return [...this.packages.values()].flatMap((item) => !this.closed && this.runtimes.get(item.manifest.id)?.state === "connected" && !this.runtimes.get(item.manifest.id)?.controller?.signal.aborted ? this.packageTools(item).filter((tool) => this.toolEnabled(item, tool, state)) : []);
   }
   channelEnabled(id: string): boolean { const item = this.item(id); const entry = this.readInstalled()[id]; return item.manifest.type === "channel" && isInstalled(entry) && Boolean(entry?.enabled); }
-  setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal) => Promise<string>): void { this.channelChat = handler; }
+  setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>): void { this.channelChat = handler; }
   toolSignal(name: string): AbortSignal | undefined {
     const item = this.ownerOfTool(name);
     const tool = item && this.packageTools(item).find((candidate) => candidate.name === name);
@@ -428,10 +430,10 @@ export class ExtensionManager {
         } },
         log: (level, message, details) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) this.logs.write(level, id, message, details, item.manifest.fields.filter((field) => field.sensitive).map((field) => config[field.key] ?? "")); },
         reportError: (code) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) runtime.error = code === "MODEL_FAILED" ? runtime.error ?? "模型请求失败，请检查模型配置和服务状态。" : "渠道发送失败，请检查平台权限和连接状态。"; },
-        message: async (message: ChannelMessage, signal: AbortSignal) => {
+        message: async (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => {
           if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
           runtime.error = undefined;
-          try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat(message, cancellation) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
+          try { const cancellation = AbortSignal.any([controller.signal, signal]); return this.channelChat ? await this.channelChat(message, cancellation, deliver) : await this.model.chat(message.content, cancellation, { eventId: message.eventId }); }
           catch (error) {
             if (controller.signal.aborted || signal.aborted || (error instanceof ModelError && error.code === "REQUEST_CANCELLED")) throw new Error("REQUEST_CANCELLED");
             if (!controller.signal.aborted && !signal.aborted) {

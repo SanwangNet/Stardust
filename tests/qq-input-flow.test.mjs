@@ -57,7 +57,7 @@ function mockBot() {
   const handlers = new Map(); let finish;
   return { sent: [], on(name, fn) { handlers.set(name, fn); }, start() { handlers.get("ready")(); return new Promise(resolve => { finish = resolve; }); }, stop() { finish?.(); }, async sendText(target, content) { this.sent.push({ target, content }); return { id: `reply-${this.sent.length}` }; }, emit(message) { return handlers.get("message")({}, message); } };
 }
-const event = (kind, id, extra = {}) => ({ kind, rawEventType: kind === "c2c" ? "C2C_MESSAGE_CREATE" : "GROUP_AT_MESSAGE_CREATE", senderId: "sender", messageId: id, timestamp: "2026-11-18T00:00:00Z", content: " hello ", ...(kind === "group" ? { groupOpenid: "session" } : {}), replyTarget: { scope: kind, targetId: "session", msgId: id }, ...extra });
+const event = (kind, id, extra = {}) => ({ kind, rawEventType: kind === "c2c" ? "C2C_MESSAGE_CREATE" : "GROUP_AT_MESSAGE_CREATE", senderId: "sender", messageId: id, timestamp: new Date().toISOString(), content: " hello ", ...(kind === "group" ? { groupOpenid: "session" } : {}), replyTarget: { scope: kind, targetId: "session", msgId: id }, ...extra });
 async function fixture(enabled) {
   process.env.STARDUST_QQ_INPUT_FLOW = enabled ? "1" : "0";
   const root = await mkdtemp(join(tmpdir(), "stardust-qq-flow-")), bot = mockBot(), item = createQQBotExtension(async () => bot);
@@ -65,7 +65,7 @@ async function fixture(enabled) {
   item.create = (config, host) => { retainedAdapter = host.qqInputFlow; return create(config, host); };
   const model = { calls: [], async chat(content) { this.calls.push(content); return "mock reply"; } };
   const manager = new ExtensionManager(root, model, [item]); const received = [];
-  manager.setChannelChat(async (message, signal) => { received.push({ ...message, eventId: undefined }); return model.chat(message.content, signal); });
+  manager.setChannelChat(async (message, signal) => { received.push({ ...message, eventId: undefined, targetRef: undefined }); return model.chat(message.content, signal); });
   await manager.install("qq-bot"); await manager.saveConfig("qq-bot", { appId: "123", appSecret: "secret" }); await manager.enable("qq-bot");
   for (let i = 0; i < 50 && manager.list()[0].state !== "connected"; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(manager.list()[0].state, "connected");

@@ -79,6 +79,20 @@ test("disconnect revokes existing tool and skill leases; reconnect gives new sna
   assert.equal(f.manager.skillSnapshot().find(item => item.declaration.id === "alpha:one").isAvailable(), true);
 });
 
+test("a request tool grant stays revoked after disconnect or disable and reconnect", async t => {
+  const f = fixture(t); await f.setup();
+  const id = "tool:alpha:alpha_tool", first = f.manager.requestCapabilities(webPolicy);
+  assert.equal(first.isEligible(id), true);
+  f.hosts.get("alpha").status("disconnected"); f.hosts.get("alpha").status("connected");
+  assert.equal(first.isEligible(id), false);
+  const second = f.manager.requestCapabilities(webPolicy);
+  assert.equal(second.isEligible(id), true);
+  await f.manager.setToolEnabled("alpha", "alpha_tool", false);
+  await f.manager.setToolEnabled("alpha", "alpha_tool", true);
+  assert.equal(second.isEligible(id), false);
+  assert.equal(f.manager.requestCapabilities(webPolicy).isEligible(id), true);
+});
+
 test("a pending approval cannot survive a disconnect and reconnect", async t => {
   const f = fixture(t); await f.setup(); let turns = 0, result;
   const model = { async chatWithTools(messages) { turns++; if (turns === 1) return { content: "", toolCalls: [{ id: "one", name: "alpha_tool", arguments: "{}" }] }; result = JSON.parse(messages.at(-1).content); return { content: "done", toolCalls: [] }; } };
