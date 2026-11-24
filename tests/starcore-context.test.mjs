@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { ConversationService } from "../apps/server/dist/conversation.js";
 import { ContextService } from "../apps/server/dist/context-service.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
@@ -30,8 +31,10 @@ async function launch(root,path,tool=false){
 test("real QQ model-only uses durable history, restores after restart and shares it with tool mode",async t=>{
  const root=await mkdtemp(join(tmpdir(),"starcore-context-")),path=join(root,"db.sqlite");let app;
  t.after(async()=>{if(app)await app.close();await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100})});
- app=await launch(root,path);await app.bot.emit(input("first","我买了一张显卡"));await app.bot.emit(input("second","9070 XT"));
- let text=JSON.stringify(app.calls[1]);assert.match(text,/我买了一张显卡/);assert.match(text,/答复:我买了一张显卡/);assert.equal(app.calls[1].filter(m=>m.content==='9070 XT').length,1);assert.equal(app.tools.length,0);
+ app=await launch(root,path);
+ const db=new DatabaseSync(path);db.prepare("INSERT INTO global_context_entries(id,owner,topic,content,created_at,updated_at,version) VALUES(?,?,?,?,?,?,1)").run(randomUUID(),'web:default','显卡','仅 Web 私人显卡记忆','2026','2026');db.close();
+ await app.bot.emit(input("first","我买了一张显卡"));await app.bot.emit(input("second","9070 XT"));
+ let text=JSON.stringify(app.calls[1]);assert.match(text,/我买了一张显卡/);assert.match(text,/答复:我买了一张显卡/);assert.doesNotMatch(text,/仅 Web 私人显卡记忆/);assert.equal(app.calls[1].filter(m=>m.content==='9070 XT').length,1);assert.equal(app.tools.length,0);
  await app.close();app=undefined;app=await launch(root,path,true);await app.bot.emit(input("third","上面是什么型号"));
  for(let i=0;i<400&&!app.tools.length;i++)await new Promise(r=>setTimeout(r,10));
  text=JSON.stringify(app.tools[0].messages);assert.match(text,/我买了一张显卡/);assert.match(text,/9070 XT/);assert.equal(app.tools[0].messages.filter(m=>m.content==='上面是什么型号').length,1);assert.doesNotMatch(text,/private-secret|sender-secret|bot-secret/);

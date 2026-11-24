@@ -5,6 +5,13 @@ import type { ConversationContextMessage } from "./conversation-context.js";
 export type ContextCategory = "current_identity" | "other_space" | "history" | "manual_name" | "note" | "audit" | "identities" | "global_context";
 /** Same person is never itself an authorization to access another source. */
 export class ContextAccessPolicy {
+  /** Subject describes content; visibility alone constrains where it may be used. */
+  evaluateMemory(request: { channelId?: string; scopeId?: string; conversationId?: string }, memory: { visibility: string; visibilityConversationId?: string | null; visibilityChannelId?: string | null; subjectStatus?: string }): "allow" | "deny" {
+    if (memory.subjectStatus === "needs_review") return "deny";
+    if (memory.visibility === "web_local" && this.evaluateWebHistory(request) === "allow") return "allow";
+    if (memory.visibility === "conversation" && !!request.channelId && request.channelId === memory.visibilityChannelId && !!request.conversationId && request.conversationId === memory.visibilityConversationId) return "allow";
+    return "deny";
+  }
   /** The trusted local Web control plane retains its established Web-only search scope. */
   evaluateWebHistory(request: { channelId?: string; scopeId?: string }): "allow" | "deny" {
     return request.channelId === "web" && request.scopeId === "web:default" ? "allow" : "deny";

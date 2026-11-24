@@ -96,7 +96,7 @@ tests/              HTTP 行为测试
 
 ## 后续路线（未实现）
 
-长期记忆、多 Agent、扩展沙盒及第三方 Tool 加载尚未实现。
+Web 已有基于对话综合的长期记忆，Core 的来源与作用域基础见 [星核上下文](docs/starcore-context.md)。QQ 长期记忆自动综合和注入、跨渠道记忆共享、多 Agent、扩展沙盒及第三方 Tool 加载尚未实现。
 
 Git 的 `add / commit / push` 由项目拥有者自行执行。
 

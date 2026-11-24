@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { projectConfigRoot } from "./env.js";
 import { buildConversationContext, type ConversationContextMessage } from "./conversation-context.js";
 import { ModelError } from "./model.js";
-import { GlobalContextService, migrateGlobalContext, migrateGlobalContextOutcome, migrateGlobalContextEvidence, WEB_CONTEXT_OWNER } from "./global-context.js";
+import { GlobalContextService, migrateGlobalContext, migrateGlobalContextOutcome, migrateGlobalContextEvidence, migrateMemoryScopes, migrateMemoryIdentity, WEB_CONTEXT_OWNER } from "./global-context.js";
 import { searchHistory, type HistoryEvidence } from "./history-search.js";
 import type { HistoryToolModel, ModelActivity } from "./history-agent.js";
 import { logger } from "./logger.js";
@@ -53,7 +53,7 @@ export class ConversationService {
     try {
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version > 9) throw new Error("UNSUPPORTED_SCHEMA");
+    if (version > 11) throw new Error("UNSUPPORTED_SCHEMA");
     if (version === 0) this.db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE messages (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','complete','failed','unknown')), request_id TEXT NOT NULL, UNIQUE(conversation_id, request_id, role));
@@ -67,6 +67,8 @@ export class ConversationService {
     if (version < 7) migratePeopleManagement(this.db);
     if (version < 8) migratePeopleMerge(this.db);
     if (version < 9) migrateHistoryProvenance(this.db);
+    if (version < 10) migrateMemoryScopes(this.db);
+    if (version < 11) migrateMemoryIdentity(this.db);
     this.db.prepare("UPDATE messages SET status = 'unknown' WHERE status = 'pending' AND conversation_id IN (SELECT id FROM conversations WHERE channel_id != 'qq-bot')").run();
     this.globalContext = new GlobalContextService(this.db, model.synthesizeGlobalContext ? { synthesizeGlobalContext: model.synthesizeGlobalContext.bind(model) } : undefined);
     this.agent = new AgentCore(this.db);

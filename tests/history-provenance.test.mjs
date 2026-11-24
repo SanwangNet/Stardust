@@ -18,7 +18,7 @@ test("Web and legacy messages preserve authors without inventing identities",asy
  const f=fixture(t), c=f.store.create(); await f.store.submit(c.id,randomUUID(),"旧消息");
  const original=f.store.messages(c.id); let rows=f.store.historyProvenance(c.id,c.id);
  assert.deepEqual(rows.map(x=>x.authorKind),["web_user","agent"]); assert.ok(rows.every(x=>x.currentPersonId===null));
- f.store.close(); const db=new DatabaseSync(f.path); db.exec("DROP TRIGGER message_provenance_default; DROP TABLE message_provenance; PRAGMA user_version=8"); db.close();
+ f.store.close(); const db=new DatabaseSync(f.path); db.exec("DROP TRIGGER global_context_scope_default; DROP TRIGGER global_context_source_removed; DROP TABLE global_context_message_sources; DROP TABLE global_context_revisions; DROP TABLE global_context_scope; DROP TRIGGER message_provenance_default; DROP TABLE message_provenance; PRAGMA user_version=8"); db.close();
  f.reopen = () => {}; const reopened=new ConversationService(model,f.path);
  rows=reopened.historyProvenance(c.id,c.id); assert.deepEqual(reopened.messages(c.id),original); assert.deepEqual(rows.map(x=>x.authorKind),["web_user","agent"]); reopened.close();
 });

@@ -71,7 +71,7 @@ test("actual Web request obeys rewired graph, scoped reads, errors and reconnect
   insert.run("qq-entry", "unbound:qq", "猫", "猫私密QQ记忆", "2026", "2026"); db.close();
   const recentIds = [], owners = [], originalMessages = store.messages.bind(store), originalEntries = store.globalContext.entries.bind(store.globalContext);
   store.messages = (...args) => { recentIds.push(args[0]); return originalMessages(...args); };
-  store.globalContext.entries = owner => { owners.push(owner); return originalEntries(owner); };
+  store.globalContext.entries = (owner, request) => { owners.push(owner); return originalEntries(owner, request); };
   const extensions = { restore: async () => {}, shutdown: async () => {}, availableTools: () => [], availableTargets: () => [] };
   const server = createStardustServer({ setupService: { getInitializationState: () => ({ initialized: true }) }, extensionManager: extensions, modelService: model, conversationService: store });
   server.listen(0, "127.0.0.1"); await once(server, "listening");

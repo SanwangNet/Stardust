@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { HistoryEvidence } from "./history-search.js";
+import { ContextAccessPolicy } from "./context-access-policy.js";
 
 export const WEB_CONTEXT_OWNER = "web:default";
 const maxAttempts = 3;
@@ -12,6 +13,134 @@ type Entry = { id: string; owner: string; topic: string; content: string; create
 type Job = { id: number; owner: string; conversationId: string; requestId: string; startSequence: number; endSequence: number; status: string; attempts: number; createdAt: string; updatedAt: string; nextAttemptAt: string; lastError: string | null; outcome: string | null };
 type Update = { topic: string; content: string };
 type Synthesizer = { synthesizeGlobalContext(system: string, input: string, signal?: AbortSignal): Promise<string> };
+
+export type MemorySubject = { kind: "legacy" | "global"; id?: never } | { kind: "person" | "space" | "conversation"; id: string };
+export type MemoryVisibility = { kind: "none" | "web_local" } | { kind: "conversation"; conversationId: string } | { kind: "space"; spaceId: string };
+export type MemoryRequest = { channelId: string; scopeId?: string; conversationId?: string };
+
+/** Add metadata without rewriting legacy content or the original source ranges. */
+export function migrateMemoryScopes(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
+    if (version === 10 || version === 11) { db.exec("COMMIT"); return; }
+    if (version !== 9) throw new Error("UNSUPPORTED_SCHEMA");
+    db.exec(`CREATE TABLE global_context_scope (
+      entry_id TEXT PRIMARY KEY REFERENCES global_context_entries(id) ON DELETE CASCADE,
+      subject_kind TEXT NOT NULL CHECK(subject_kind IN ('legacy','global','person','space','conversation')),
+      person_id TEXT REFERENCES people(id) ON DELETE RESTRICT,
+      space_id TEXT REFERENCES spaces(id) ON DELETE RESTRICT,
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+      visibility TEXT NOT NULL CHECK(visibility IN ('none','web_local','conversation','space')),
+      visibility_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+      visibility_space_id TEXT REFERENCES spaces(id) ON DELETE RESTRICT,
+      CHECK ((subject_kind IN ('legacy','global') AND person_id IS NULL AND space_id IS NULL AND conversation_id IS NULL)
+        OR (subject_kind='person' AND person_id IS NOT NULL AND space_id IS NULL AND conversation_id IS NULL)
+        OR (subject_kind='space' AND person_id IS NULL AND space_id IS NOT NULL AND conversation_id IS NULL)
+        OR (subject_kind='conversation' AND person_id IS NULL AND space_id IS NULL AND conversation_id IS NOT NULL)),
+      CHECK ((visibility='conversation') = (visibility_conversation_id IS NOT NULL)),
+      CHECK ((visibility='space') = (visibility_space_id IS NOT NULL))
+    );
+    CREATE TABLE global_context_message_sources (
+      entry_id TEXT NOT NULL REFERENCES global_context_entries(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      PRIMARY KEY(entry_id,message_id)
+    );
+    CREATE TABLE global_context_revisions (
+      entry_id TEXT NOT NULL REFERENCES global_context_entries(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL, content TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY(entry_id,version)
+    );
+    CREATE INDEX global_context_scope_visibility ON global_context_scope(visibility,visibility_conversation_id,entry_id);
+    CREATE INDEX global_context_scope_subject ON global_context_scope(subject_kind,person_id,space_id,conversation_id,entry_id);
+    CREATE TRIGGER global_context_source_removed AFTER DELETE ON global_context_message_sources BEGIN
+      UPDATE global_context_scope SET visibility='none',visibility_conversation_id=NULL,visibility_space_id=NULL WHERE entry_id=OLD.entry_id;
+    END;
+    CREATE TRIGGER global_context_scope_default AFTER INSERT ON global_context_entries BEGIN
+      INSERT INTO global_context_scope(entry_id,subject_kind,visibility) VALUES(NEW.id,'legacy',CASE WHEN NEW.owner='web:default' THEN 'web_local' ELSE 'none' END);
+    END;
+    INSERT OR IGNORE INTO global_context_scope(entry_id,subject_kind,visibility)
+      SELECT id,'legacy',CASE WHEN owner='web:default' THEN 'web_local' ELSE 'none' END FROM global_context_entries;
+    PRAGMA user_version=10;`);
+    db.exec("COMMIT");
+  } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+}
+
+/** The scope key captures the Core-approved creation scope, not the mutable current visibility. */
+export function migrateMemoryIdentity(db: DatabaseSync): void {
+  const version=Number(db.prepare("PRAGMA user_version").get()?.user_version);
+  if (version===11) return;
+  if (version!==10) throw new Error("UNSUPPORTED_SCHEMA");
+  const foreignKeys=Number(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys);
+  db.exec("PRAGMA foreign_keys=OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const lockedVersion=Number(db.prepare("PRAGMA user_version").get()?.user_version);
+    if (lockedVersion===11) { db.exec("COMMIT"); return; }
+    if (lockedVersion!==10) throw new Error("UNSUPPORTED_SCHEMA");
+    // Early schema-10 builds lacked space visibility. Upgrade that variant in
+    // the same transaction as v11, without changing any existing scope rows.
+    const scopeColumns=db.prepare("PRAGMA table_info(global_context_scope)").all();
+    if (!scopeColumns.some(column=>column.name==='visibility_space_id')) {
+      db.exec(`DROP TRIGGER global_context_source_removed;
+        DROP TRIGGER global_context_scope_default;
+        CREATE TABLE global_context_scope_v11 (
+          entry_id TEXT PRIMARY KEY REFERENCES global_context_entries(id) ON DELETE CASCADE,
+          subject_kind TEXT NOT NULL CHECK(subject_kind IN ('legacy','global','person','space','conversation')),
+          person_id TEXT REFERENCES people(id) ON DELETE RESTRICT, space_id TEXT REFERENCES spaces(id) ON DELETE RESTRICT,
+          conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+          visibility TEXT NOT NULL CHECK(visibility IN ('none','web_local','conversation','space')),
+          visibility_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+          visibility_space_id TEXT REFERENCES spaces(id) ON DELETE RESTRICT,
+          CHECK ((subject_kind IN ('legacy','global') AND person_id IS NULL AND space_id IS NULL AND conversation_id IS NULL)
+            OR (subject_kind='person' AND person_id IS NOT NULL AND space_id IS NULL AND conversation_id IS NULL)
+            OR (subject_kind='space' AND person_id IS NULL AND space_id IS NOT NULL AND conversation_id IS NULL)
+            OR (subject_kind='conversation' AND person_id IS NULL AND space_id IS NULL AND conversation_id IS NOT NULL)),
+          CHECK ((visibility='conversation') = (visibility_conversation_id IS NOT NULL)),
+          CHECK ((visibility='space') = (visibility_space_id IS NOT NULL))
+        );
+        INSERT INTO global_context_scope_v11(entry_id,subject_kind,person_id,space_id,conversation_id,visibility,visibility_conversation_id)
+          SELECT entry_id,subject_kind,person_id,space_id,conversation_id,visibility,visibility_conversation_id FROM global_context_scope;
+        DROP TABLE global_context_scope;
+        ALTER TABLE global_context_scope_v11 RENAME TO global_context_scope;
+        CREATE INDEX global_context_scope_visibility ON global_context_scope(visibility,visibility_conversation_id,entry_id);
+        CREATE INDEX global_context_scope_subject ON global_context_scope(subject_kind,person_id,space_id,conversation_id,entry_id);
+        CREATE TRIGGER global_context_source_removed AFTER DELETE ON global_context_message_sources BEGIN
+          UPDATE global_context_scope SET visibility='none',visibility_conversation_id=NULL,visibility_space_id=NULL WHERE entry_id=OLD.entry_id;
+        END;`);
+    }
+    db.exec(`CREATE TABLE global_context_entries_v11 (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, topic TEXT NOT NULL, content TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+        scope_key TEXT NOT NULL DEFAULT '' CHECK(scope_key='' OR (json_valid(scope_key) AND json_type(scope_key)='array' AND json_array_length(scope_key)=7 AND scope_key=json(scope_key))),
+        UNIQUE(owner,topic,scope_key)
+      );
+      INSERT INTO global_context_entries_v11(id,owner,topic,content,created_at,updated_at,version,scope_key)
+        SELECT e.id,e.owner,e.topic,e.content,e.created_at,e.updated_at,e.version,
+          CASE WHEN s.entry_id IS NULL THEN json_array('missing',NULL,NULL,NULL,'none',NULL,NULL)
+          ELSE json_array(s.subject_kind,s.person_id,s.space_id,s.conversation_id,s.visibility,s.visibility_conversation_id,s.visibility_space_id) END
+        FROM global_context_entries e LEFT JOIN global_context_scope s ON s.entry_id=e.id;
+      DROP TABLE global_context_entries;
+      ALTER TABLE global_context_entries_v11 RENAME TO global_context_entries;
+      CREATE TRIGGER global_context_scope_default AFTER INSERT ON global_context_entries BEGIN
+        INSERT INTO global_context_scope(entry_id,subject_kind,person_id,space_id,conversation_id,visibility,visibility_conversation_id,visibility_space_id)
+        VALUES(NEW.id,CASE WHEN NEW.scope_key='' THEN 'legacy' ELSE json_extract(NEW.scope_key,'$[0]') END,
+          CASE WHEN NEW.scope_key='' THEN NULL ELSE json_extract(NEW.scope_key,'$[1]') END,
+          CASE WHEN NEW.scope_key='' THEN NULL ELSE json_extract(NEW.scope_key,'$[2]') END,
+          CASE WHEN NEW.scope_key='' THEN NULL ELSE json_extract(NEW.scope_key,'$[3]') END,
+          CASE WHEN NEW.scope_key='' THEN CASE WHEN NEW.owner='web:default' THEN 'web_local' ELSE 'none' END ELSE json_extract(NEW.scope_key,'$[4]') END,
+          CASE WHEN NEW.scope_key='' THEN NULL ELSE json_extract(NEW.scope_key,'$[5]') END,
+          CASE WHEN NEW.scope_key='' THEN NULL ELSE json_extract(NEW.scope_key,'$[6]') END);
+        UPDATE global_context_entries SET scope_key=(SELECT json_array(subject_kind,person_id,space_id,conversation_id,visibility,visibility_conversation_id,visibility_space_id) FROM global_context_scope WHERE entry_id=NEW.id) WHERE id=NEW.id AND NEW.scope_key='';
+      END;
+      CREATE TRIGGER global_context_scope_key_immutable BEFORE UPDATE OF scope_key ON global_context_entries
+        WHEN OLD.scope_key!='' AND NEW.scope_key IS NOT OLD.scope_key BEGIN SELECT RAISE(ABORT,'IMMUTABLE_MEMORY_SCOPE'); END;
+      PRAGMA user_version=11;`);
+    if (db.prepare("PRAGMA foreign_key_check").all().length) throw new Error("FOREIGN_KEY_VIOLATION");
+    db.exec("COMMIT");
+  } catch(error) { try {db.exec("ROLLBACK");} catch {} throw error; }
+  finally { db.exec(`PRAGMA foreign_keys=${foreignKeys ? 'ON' : 'OFF'}`); }
+}
 
 export function migrateGlobalContext(db: DatabaseSync): void {
   db.exec(`BEGIN IMMEDIATE;
@@ -48,7 +177,7 @@ function validateOutput(text: string): Update[] {
   return normalized;
 }
 
-function relevantEntries(entries: Entry[], turn: string): { topic: string; content: string; updatedAt: string }[] {
+function relevantEntries(entries: Entry[], turn: string): { id:string; topic: string; content: string; updatedAt: string }[] {
   const terms = new Set<string>();
   for (const part of turn.toLowerCase().slice(0, 12_000).match(/[a-z0-9]{2,}|[\u3400-\u9fff]{2,}/g) ?? []) {
     if (/^[a-z0-9]/.test(part)) terms.add(part.slice(0, 64));
@@ -61,7 +190,7 @@ function relevantEntries(entries: Entry[], turn: string): { topic: string; conte
     for (const term of terms) if (haystack.includes(term)) score++;
     return { entry, index, score };
   }).sort((a, b) => b.score - a.score || a.index - b.index).slice(0, 12)
-    .map(({ entry: { topic, content, updatedAt } }) => ({ topic, content, updatedAt }));
+    .map(({ entry: { id, topic, content, updatedAt } }) => ({ id, topic, content, updatedAt }));
 }
 
 export class GlobalContextService {
@@ -82,15 +211,93 @@ export class GlobalContextService {
       WHERE j.owner = ? AND j.conversation_id = ? AND j.request_id = ? AND j.status = 'pending' AND c.channel_id = 'web' AND c.scope_id = j.owner AND m.status = 'complete'`);
     for (const item of evidence.slice(0, 30)) if (Number.isSafeInteger(item.sequence) && item.sequence > 0 && Number.isSafeInteger(item.start) && item.start >= 0) insert.run(item.start, item.sequence, owner, conversationId, requestId);
   }
-  entries(owner: string): (Entry & { sources: { conversationId: string; startSequence: number; endSequence: number }[] })[] {
-    const entries = this.db.prepare("SELECT id, owner, topic, content, created_at AS createdAt, updated_at AS updatedAt, version FROM global_context_entries WHERE owner = ? ORDER BY updated_at DESC, id LIMIT 200").all(owner) as unknown as Entry[];
+  entries(owner: string, request?: MemoryRequest): (Entry & { sources: { conversationId: string; startSequence: number; endSequence: number }[] })[] {
+    const entries = (request
+      ? this.db.prepare(`SELECT e.id, e.owner, e.topic, e.content, e.created_at AS createdAt, e.updated_at AS updatedAt, e.version, s.visibility, s.visibility_conversation_id AS visibilityConversationId,
+          (SELECT c.channel_id FROM conversations c WHERE c.id=s.visibility_conversation_id) AS visibilityChannelId,
+          CASE WHEN s.subject_kind='person' AND (SELECT count(DISTINCT i.person_id) FROM global_context_message_sources ms JOIN message_provenance p ON p.message_id=ms.message_id JOIN identities i ON i.id=p.identity_id WHERE ms.entry_id=e.id)>1 THEN 'needs_review' ELSE 'unchanged' END AS subjectStatus
+          FROM global_context_entries e JOIN global_context_scope s ON s.entry_id=e.id
+          WHERE e.owner=? AND ((s.visibility='web_local' AND e.owner='web:default' AND ?='web' AND ?='web:default') OR (s.visibility='conversation' AND s.visibility_conversation_id=? AND EXISTS (SELECT 1 FROM conversations c WHERE c.id=s.visibility_conversation_id AND c.channel_id=?)))
+          AND (s.subject_kind!='person' OR (SELECT count(DISTINCT i.person_id) FROM global_context_message_sources ms JOIN message_provenance p ON p.message_id=ms.message_id JOIN identities i ON i.id=p.identity_id WHERE ms.entry_id=e.id)<=1)
+          ORDER BY e.updated_at DESC,e.id LIMIT 200`).all(owner,request.channelId,request.scopeId ?? '',request.conversationId ?? '',request.channelId)
+      : this.db.prepare("SELECT id, owner, topic, content, created_at AS createdAt, updated_at AS updatedAt, version FROM global_context_entries WHERE owner = ? ORDER BY updated_at DESC, id LIMIT 200").all(owner)) as unknown as (Entry & {visibility:string;visibilityConversationId:string|null})[];
+    const allowed = request ? entries.filter(entry => new ContextAccessPolicy().evaluateMemory(request, entry) === "allow") : entries;
     const sources = this.db.prepare("SELECT conversation_id AS conversationId, start_sequence AS startSequence, end_sequence AS endSequence FROM global_context_sources WHERE entry_id = ? ORDER BY job_id DESC LIMIT 50");
     const retrievedSources = this.db.prepare(`SELECT m.conversation_id AS conversationId, m.sequence AS startSequence, m.sequence AS endSequence
       FROM global_context_sources s JOIN synthesis_jobs j ON j.id = s.job_id AND j.owner = ?
       JOIN synthesis_job_evidence ev ON ev.job_id = j.id JOIN messages m ON m.sequence = ev.message_sequence
       JOIN conversations c ON c.id = m.conversation_id AND c.scope_id = j.owner
       WHERE s.entry_id = ? ORDER BY s.job_id DESC, ev.rowid LIMIT 50`);
-    return entries.map((entry) => ({ ...entry, sources: [...sources.all(entry.id), ...retrievedSources.all(owner, entry.id)] as unknown as { conversationId: string; startSequence: number; endSequence: number }[] }));
+    const directSources = this.db.prepare(`SELECT m.conversation_id AS conversationId,m.sequence AS startSequence,m.sequence AS endSequence
+      FROM global_context_message_sources s JOIN messages m ON m.id=s.message_id WHERE s.entry_id=? ORDER BY m.sequence LIMIT 50`);
+    return allowed.map((entry) => ({ ...entry, sources: [...sources.all(entry.id), ...retrievedSources.all(owner, entry.id), ...directSources.all(entry.id)] as unknown as { conversationId: string; startSequence: number; endSequence: number }[] }));
+  }
+  memoryScope(entryId:string) {
+    return this.db.prepare(`SELECT s.subject_kind AS subjectKind,s.person_id AS personId,s.space_id AS spaceId,s.conversation_id AS conversationId,s.visibility,s.visibility_conversation_id AS visibilityConversationId,s.visibility_space_id AS visibilitySpaceId,
+      CASE WHEN s.subject_kind='person' AND (SELECT count(DISTINCT i.person_id) FROM global_context_message_sources ms JOIN message_provenance p ON p.message_id=ms.message_id JOIN identities i ON i.id=p.identity_id WHERE ms.entry_id=s.entry_id)>1 THEN 'needs_review' ELSE 'unchanged' END AS subjectStatus
+      FROM global_context_scope s WHERE s.entry_id=?`).get(entryId);
+  }
+  /** Internal administration query only. Its results are not authorization for model use. */
+  listBySubjectForAdministration(subject:MemorySubject, limit=100) {
+    if (!Number.isSafeInteger(limit) || limit<1 || limit>200) throw new Error("INVALID_INPUT");
+    const ref=subject.kind==='person' || subject.kind==='space' || subject.kind==='conversation' ? subject.id : null;
+    return this.db.prepare(`SELECT e.id,e.owner,e.topic,e.content,e.created_at AS createdAt,e.updated_at AS updatedAt,e.version
+      FROM global_context_entries e JOIN global_context_scope s ON s.entry_id=e.id WHERE s.subject_kind=?
+      AND CASE s.subject_kind WHEN 'person' THEN s.person_id WHEN 'space' THEN s.space_id WHEN 'conversation' THEN s.conversation_id ELSE NULL END IS ?
+      ORDER BY e.updated_at DESC,e.id LIMIT ?`).all(subject.kind,ref,limit);
+  }
+  /** Core-only creation API: model output never supplies subjects or visibility. */
+  createMemory(input: { owner:string; topic:string; content:string; subject:MemorySubject; visibility:MemoryVisibility; messageIds:string[] }): string {
+    if (!input.owner || !input.topic?.trim() || input.topic.length>80 || !input.content?.trim() || input.content.length>2000 || !Array.isArray(input.messageIds) || !input.messageIds.length || input.messageIds.length>50 || new Set(input.messageIds).size!==input.messageIds.length) throw new Error("INVALID_INPUT");
+    const id=randomUUID(), now=new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.checkMemorySources(input.owner,input.visibility,input.messageIds);
+      const scopeKey=this.db.prepare("SELECT json_array(?,?,?,?,?,?,?) AS key").get(input.subject.kind,input.subject.kind==='person'?input.subject.id:null,input.subject.kind==='space'?input.subject.id:null,input.subject.kind==='conversation'?input.subject.id:null,input.visibility.kind,input.visibility.kind==='conversation'?input.visibility.conversationId:null,input.visibility.kind==='space'?input.visibility.spaceId:null)?.key;
+      this.db.prepare("INSERT INTO global_context_entries(id,owner,topic,content,created_at,updated_at,version,scope_key) VALUES(?,?,?,?,?,?,1,?)").run(id,input.owner,input.topic.trim(),input.content.trim(),now,now,String(scopeKey));
+      const insert=this.db.prepare("INSERT INTO global_context_message_sources(entry_id,message_id) VALUES(?,?)");
+      for (const messageId of input.messageIds) insert.run(id,messageId);
+      this.db.exec("COMMIT"); return id;
+    } catch(error) { try {this.db.exec("ROLLBACK");} catch {} throw error; }
+  }
+  private checkMemorySources(owner:string, visibility:MemoryVisibility, messageIds:string[]):void {
+    const source=this.db.prepare(`SELECT m.conversation_id AS conversationId,c.channel_id AS channelId,c.scope_id AS scopeId,p.channel_id AS sourceChannel,p.provenance_kind AS provenanceKind,p.space_id AS spaceId
+      FROM messages m JOIN conversations c ON c.id=m.conversation_id LEFT JOIN message_provenance p ON p.message_id=m.id WHERE m.id=? AND m.status='complete'`);
+    for (const messageId of messageIds) {
+      const row=source.get(messageId);
+      if (!row) throw new Error("SOURCE_UNAVAILABLE");
+      if (visibility.kind==='web_local' && !(owner===WEB_CONTEXT_OWNER && row.channelId==='web' && row.scopeId===WEB_CONTEXT_OWNER && row.sourceChannel==='web-chat' && row.provenanceKind==='web_local')) throw new Error("MEMORY_SCOPE_DENIED");
+      if (visibility.kind==='conversation' && !(row.conversationId===visibility.conversationId && ((row.channelId==='web' && row.sourceChannel==='web-chat' && row.provenanceKind==='web_local') || (row.channelId==='qq-bot' && row.sourceChannel==='qq-bot' && row.provenanceKind==='trusted_channel')))) throw new Error("MEMORY_SCOPE_DENIED");
+      if (visibility.kind==='space' && !(row.channelId==='qq-bot' && row.sourceChannel==='qq-bot' && row.provenanceKind==='trusted_channel' && row.spaceId===visibility.spaceId)) throw new Error("MEMORY_SCOPE_DENIED");
+    }
+  }
+  /** Core administration: update one stable ID, retaining existing evidence and scope. */
+  updateMemory(owner:string,id:string,content:string,messageIds:string[]):void {
+    if (!owner || !id || typeof content!=='string' || !content.trim() || content.length>2000 || !Array.isArray(messageIds) || !messageIds.length || messageIds.length>50 || new Set(messageIds).size!==messageIds.length) throw new Error("INVALID_INPUT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row=this.db.prepare(`SELECT s.visibility,s.visibility_conversation_id AS conversationId,s.visibility_space_id AS spaceId FROM global_context_entries e JOIN global_context_scope s ON s.entry_id=e.id WHERE e.owner=? AND e.id=?`).get(owner,id);
+      if (!row) throw new Error("MEMORY_NOT_FOUND");
+      const visibility:MemoryVisibility=row.visibility==='conversation'?{kind:'conversation',conversationId:String(row.conversationId)}:row.visibility==='space'?{kind:'space',spaceId:String(row.spaceId)}:row.visibility==='web_local'?{kind:'web_local'}:{kind:'none'};
+      this.checkMemorySources(owner,visibility,messageIds);
+      this.db.prepare("INSERT INTO global_context_revisions(entry_id,version,content,updated_at) SELECT id,version,content,updated_at FROM global_context_entries WHERE owner=? AND id=?").run(owner,id);
+      this.db.prepare("UPDATE global_context_entries SET content=?,updated_at=?,version=version+1 WHERE owner=? AND id=?").run(content.trim(),new Date().toISOString(),owner,id);
+      const add=this.db.prepare("INSERT OR IGNORE INTO global_context_message_sources(entry_id,message_id) VALUES(?,?)");for(const messageId of messageIds)add.run(id,messageId);
+      this.db.exec("COMMIT");
+    } catch(error) { try {this.db.exec("ROLLBACK");} catch {} throw error; }
+  }
+  deleteMemory(owner:string,id:string):void {
+    if (!this.db.prepare("DELETE FROM global_context_entries WHERE owner=? AND id=?").run(owner,id).changes) throw new Error("MEMORY_NOT_FOUND");
+  }
+  /** Internal evidence: original author and provenance, never inferred from summary text. */
+  memorySources(entryId:string) {
+    return this.db.prepare(`SELECT m.id AS messageId,m.conversation_id AS conversationId,m.sequence,m.role,m.created_at AS createdAt,
+      p.channel_id AS channelId,p.conversation_type AS conversationType,p.author_kind AS authorKind,p.provenance_kind AS provenanceKind,p.identity_id AS identityId,p.space_id AS spaceId
+      FROM messages m LEFT JOIN message_provenance p ON p.message_id=m.id WHERE m.id IN (
+        SELECT message_id FROM global_context_message_sources WHERE entry_id=?
+        UNION SELECT m2.id FROM global_context_sources s JOIN messages m2 ON m2.conversation_id=s.conversation_id AND m2.sequence BETWEEN s.start_sequence AND s.end_sequence WHERE s.entry_id=?
+        UNION SELECT m3.id FROM global_context_sources s JOIN synthesis_job_evidence e ON e.job_id=s.job_id JOIN messages m3 ON m3.sequence=e.message_sequence WHERE s.entry_id=?
+      ) ORDER BY m.sequence LIMIT 200`).all(entryId,entryId,entryId);
   }
   jobs(owner: string): Job[] {
     return this.db.prepare("SELECT id, owner, conversation_id AS conversationId, request_id AS requestId, start_sequence AS startSequence, end_sequence AS endSequence, status, attempts, created_at AS createdAt, updated_at AS updatedAt, next_attempt_at AS nextAttemptAt, last_error AS lastError, outcome FROM synthesis_jobs WHERE owner = ? ORDER BY id DESC LIMIT 200").all(owner) as unknown as Job[];
@@ -149,9 +356,9 @@ export class GlobalContextService {
     this.db.prepare("UPDATE synthesis_jobs SET status = 'processing', attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'pending'").run(now, job.id);
     this.controller = new AbortController();
     try {
-      const turn = this.db.prepare("SELECT m.role, m.content, m.sequence, m.created_at AS createdAt FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ? AND c.scope_id = ? AND m.request_id = ? AND m.status = 'complete' ORDER BY m.sequence").all(job.conversationId, job.owner, job.requestId);
+      const turn = this.db.prepare("SELECT m.role, m.content, m.sequence, m.created_at AS createdAt FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.conversation_id = ? AND c.scope_id = ? AND (? != 'web:default' OR c.channel_id='web') AND c.channel_id != 'qq-bot' AND m.request_id = ? AND m.status = 'complete' ORDER BY m.sequence").all(job.conversationId, job.owner, job.owner, job.requestId);
       if (turn.length !== 2 || turn[0]?.role !== "user" || turn[1]?.role !== "assistant" || Number(turn[0]?.sequence) !== job.startSequence || Number(turn[1]?.sequence) !== job.endSequence) throw new Error("SOURCE_UNAVAILABLE");
-      const candidates = this.db.prepare("SELECT id, owner, topic, content, created_at AS createdAt, updated_at AS updatedAt, version FROM global_context_entries WHERE owner = ? ORDER BY updated_at DESC, id LIMIT 200").all(job.owner) as unknown as Entry[];
+      const candidates = this.db.prepare("SELECT e.id, e.owner, e.topic, e.content, e.created_at AS createdAt, e.updated_at AS updatedAt, e.version FROM global_context_entries e JOIN global_context_scope s ON s.entry_id=e.id WHERE e.owner = ? AND s.subject_kind='legacy' AND s.visibility=CASE WHEN e.owner='web:default' THEN 'web_local' ELSE 'none' END AND e.scope_key=json_array('legacy',NULL,NULL,NULL,CASE WHEN e.owner='web:default' THEN 'web_local' ELSE 'none' END,NULL,NULL) ORDER BY e.updated_at DESC, e.id LIMIT 200").all(job.owner) as unknown as Entry[];
       const existing = relevantEntries(candidates, String(turn[0]?.content ?? ""));
       const source = { conversationId: job.conversationId, startSequence: job.startSequence, endSequence: job.endSequence };
       const retrievedRows = this.db.prepare(`SELECT m.conversation_id AS conversationId, m.sequence, m.role, m.content, m.created_at AS createdAt, e.snippet_start AS snippetStart
@@ -164,14 +371,14 @@ export class GlobalContextService {
         JOIN synthesis_jobs j ON j.id = s.job_id AND j.owner = e.owner
         JOIN messages m ON m.conversation_id = s.conversation_id AND m.sequence BETWEEN s.start_sequence AND s.end_sequence
         JOIN conversations c ON c.id = m.conversation_id AND c.scope_id = e.owner
-        WHERE e.owner = ? AND e.topic = ? AND m.status = 'complete' ORDER BY s.job_id DESC, m.sequence LIMIT 4`);
+        WHERE e.owner = ? AND e.id = ? AND m.status = 'complete' ORDER BY s.job_id DESC, m.sequence LIMIT 4`);
       const oldRetrievedSources = this.db.prepare(`SELECT m.conversation_id AS conversationId, m.sequence, m.role, m.content, m.created_at AS createdAt, ev.snippet_start AS snippetStart
         FROM global_context_entries e JOIN global_context_sources s ON s.entry_id = e.id
         JOIN synthesis_jobs j ON j.id = s.job_id AND j.owner = e.owner JOIN synthesis_job_evidence ev ON ev.job_id = j.id
-        JOIN messages m ON m.sequence = ev.message_sequence JOIN conversations c ON c.id = m.conversation_id AND c.scope_id = e.owner WHERE e.owner = ? AND e.topic = ? AND m.status = 'complete'
+        JOIN messages m ON m.sequence = ev.message_sequence JOIN conversations c ON c.id = m.conversation_id AND c.scope_id = e.owner WHERE e.owner = ? AND e.id = ? AND m.status = 'complete'
         ORDER BY s.job_id DESC, ev.rowid LIMIT 4`);
       for (const entry of existing) {
-        for (const row of [...oldRetrievedSources.all(job.owner, entry.topic), ...oldSources.all(job.owner, entry.topic)]) {
+        for (const row of [...oldRetrievedSources.all(job.owner, entry.id), ...oldSources.all(job.owner, entry.id)]) {
           if (priorSources.length >= 8) break;
           if (priorSources.some((item) => item.topic === entry.topic && item.sequence === row.sequence)) continue;
           const start = Number(row.snippetStart ?? 0);
@@ -180,7 +387,7 @@ export class GlobalContextService {
         if (priorSources.length >= 8) break;
       }
       const currentTurn = turn.map(({ role, content, createdAt }) => ({ role, content, createdAt }));
-      const serialize = () => JSON.stringify({ existing, source, turn: currentTurn, retrievedHistory, priorSources });
+      const serialize = () => JSON.stringify({ existing:existing.map(({id:_id,...entry})=>entry), source, turn: currentTurn, retrievedHistory, priorSources });
       let input = serialize();
       while (Buffer.byteLength(input, "utf8") > 28_000 && (priorSources.length || existing.length || retrievedHistory.length)) {
         if (priorSources.length) priorSources.pop(); else if (existing.length) existing.pop(); else retrievedHistory.pop();
@@ -201,13 +408,27 @@ export class GlobalContextService {
           const sourcePresent = this.db.prepare("SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.sequence = ? AND m.status = 'complete' AND c.scope_id = ?");
           for (const item of [...turn, ...retrievedHistory, ...priorSources]) if (!sourcePresent.get(Number(item.sequence), job.owner)) throw new Error("EVIDENCE_CHANGED");
           const currentCount = Number(this.db.prepare("SELECT count(*) AS count FROM global_context_entries WHERE owner = ?").get(job.owner)?.count);
-          const newTopics = updates.filter((item) => !this.db.prepare("SELECT 1 FROM global_context_entries WHERE owner = ? AND topic = ?").get(job.owner, item.topic));
+          const newTopics = updates.filter((item) => !candidates.some(candidate=>candidate.topic===item.topic));
           if (currentCount + newTopics.length > 200) throw new Error("ENTRY_LIMIT");
           for (const update of updates) {
-            this.db.prepare(`INSERT INTO global_context_entries (id, owner, topic, content, created_at, updated_at, version) VALUES (?, ?, ?, ?, ?, ?, 1)
-              ON CONFLICT(owner, topic) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at, version = global_context_entries.version + 1`).run(randomUUID(), job.owner, update.topic, update.content, updated, updated);
-            const entry = this.db.prepare("SELECT id FROM global_context_entries WHERE owner = ? AND topic = ?").get(job.owner, update.topic);
-            this.db.prepare("INSERT OR IGNORE INTO global_context_sources (entry_id, job_id, conversation_id, start_sequence, end_sequence) VALUES (?, ?, ?, ?, ?)").run(String(entry?.id), job.id, job.conversationId, job.startSequence, job.endSequence);
+            const candidate=candidates.find(entry=>entry.topic===update.topic);
+            let entryId:string;
+            if(candidate) {
+              if(!existing.some(entry=>entry.id===candidate.id)) throw new Error("EVIDENCE_CHANGED");
+              const current=this.db.prepare(`SELECT e.id FROM global_context_entries e JOIN global_context_scope s ON s.entry_id=e.id
+                WHERE e.id=? AND e.owner=? AND e.topic=? AND e.version=? AND s.subject_kind='legacy' AND s.visibility=CASE WHEN e.owner='web:default' THEN 'web_local' ELSE 'none' END
+                AND e.scope_key=json_array('legacy',NULL,NULL,NULL,CASE WHEN e.owner='web:default' THEN 'web_local' ELSE 'none' END,NULL,NULL)`).get(candidate.id,job.owner,update.topic,candidate.version);
+              if(!current) throw new Error("EVIDENCE_CHANGED");
+              entryId=candidate.id;
+              this.db.prepare("INSERT INTO global_context_revisions(entry_id,version,content,updated_at) SELECT id,version,content,updated_at FROM global_context_entries WHERE id=? AND owner=?").run(entryId,job.owner);
+              this.db.prepare("UPDATE global_context_entries SET content=?,updated_at=?,version=version+1 WHERE id=? AND owner=?").run(update.content,updated,entryId,job.owner);
+            } else {
+              const duplicate=this.db.prepare("SELECT 1 FROM global_context_entries WHERE owner=? AND topic=? AND scope_key=json_array('legacy',NULL,NULL,NULL,CASE WHEN ?='web:default' THEN 'web_local' ELSE 'none' END,NULL,NULL)").get(job.owner,update.topic,job.owner);
+              if(duplicate) throw new Error("EVIDENCE_CHANGED");
+              entryId=randomUUID();
+              this.db.prepare("INSERT INTO global_context_entries(id,owner,topic,content,created_at,updated_at,version) VALUES(?,?,?,?,?,?,1)").run(entryId,job.owner,update.topic,update.content,updated,updated);
+            }
+            this.db.prepare("INSERT OR IGNORE INTO global_context_sources (entry_id, job_id, conversation_id, start_sequence, end_sequence) VALUES (?, ?, ?, ?, ?)").run(entryId, job.id, job.conversationId, job.startSequence, job.endSequence);
           }
           this.db.prepare("UPDATE synthesis_jobs SET status = 'done', updated_at = ?, last_error = NULL, outcome = ? WHERE id = ? AND owner = ?").run(updated, updates.length ? "updated" : "no_change", job.id, job.owner);
         }

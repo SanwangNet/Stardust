@@ -22,7 +22,7 @@ export function migratePeople(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 6 || version === 7 || version === 8 || version === 9) { db.exec("COMMIT"); return; }
+    if (version === 6 || version === 7 || version === 8 || version === 9 || version === 10 || version === 11) { db.exec("COMMIT"); return; }
     if (version !== 5) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`
       CREATE TABLE people (
@@ -82,7 +82,7 @@ export function migratePeopleManagement(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 7 || version === 8 || version === 9) { db.exec("COMMIT"); return; }
+    if (version === 7 || version === 8 || version === 9 || version === 10 || version === 11) { db.exec("COMMIT"); return; }
     if (version !== 6) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`ALTER TABLE people ADD COLUMN manual_name TEXT;
       ALTER TABLE people ADD COLUMN note TEXT;
@@ -109,7 +109,7 @@ export function migratePeopleMerge(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version === 8 || version === 9) { db.exec("COMMIT"); return; }
+    if (version === 8 || version === 9 || version === 10 || version === 11) { db.exec("COMMIT"); return; }
     if (version !== 7) throw new Error("UNSUPPORTED_SCHEMA");
     db.exec(`ALTER TABLE people ADD COLUMN merged_into_id TEXT REFERENCES people(id) ON DELETE RESTRICT CHECK(merged_into_id IS NULL OR merged_into_id != id);
       ALTER TABLE people ADD COLUMN merged_at TEXT;

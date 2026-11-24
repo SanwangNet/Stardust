@@ -97,12 +97,12 @@ export class ContextService {
         const metadata={scope:"CURRENT_CONVERSATION" as const,budget:{maxMessages:config.recentMessageLimit,maxBytes:useHistoryTool?Math.min(config.budgetBytes,36_000):config.budgetBytes}};
         if(graphEnabled) {
           return runWebContextFlow(options.flowDefinition ?? config.flowDefinition ?? builtInWebContextFlow(),{
-            recent:()=>{check();return this.store.readRecentContext(id);},global:()=>{check();return this.store.globalContext.entries(WEB_CONTEXT_OWNER);},
+            recent:()=>{check();return this.store.readRecentContext(id);},global:()=>{check();return this.store.globalContext.entries(WEB_CONTEXT_OWNER, {channelId:"web",scopeId:WEB_CONTEXT_OWNER,conversationId:id});},
           },{conversationId:id,current,instructions:useHistoryTool?this.store.agent.instructions():"",budgetBytes:config.budgetBytes,recentLimit:config.recentMessageLimit,useHistoryTool,signal:options.signal})
           .then(assembled=>({...assembled,...metadata,persisted:false,boundary:undefined as number|undefined}));
         }
         const history=this.store.readRecentContext(id);
-        const assembled=useHistoryTool ? assembleContext(history,current,id,this.store.globalContext.entries(WEB_CONTEXT_OWNER),Math.min(config.budgetBytes,36_000),config.recentMessageLimit,this.store.agent.instructions()) : undefined;
+        const assembled=useHistoryTool ? assembleContext(history,current,id,this.store.globalContext.entries(WEB_CONTEXT_OWNER, {channelId:"web",scopeId:WEB_CONTEXT_OWNER,conversationId:id}),Math.min(config.budgetBytes,36_000),config.recentMessageLimit,this.store.agent.instructions()) : undefined;
         return {messages:assembled?.messages ?? buildConversationContext(history.map(({role,content})=>({role,content})),current,config.budgetBytes,[],config.recentMessageLimit),selectedEntryIds:assembled?.selectedEntryIds ?? [],...metadata,persisted:false,boundary:undefined as number|undefined};
       },
       search:(input:unknown,onResult?:(evidence:HistoryEvidence)=>void)=>{check();return this.store.searchHistory(input,onResult);},

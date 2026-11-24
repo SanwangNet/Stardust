@@ -9,7 +9,7 @@ try {
   const db = new DatabaseSync(workerData.path as string, { readOnly: !workerData.mutation && !workerData.history });
   try {
     db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=250;");
-    if (Number(db.prepare("PRAGMA user_version").get()?.user_version) !== 9) throw new Error("UNSUPPORTED_SCHEMA");
+    if (Number(db.prepare("PRAGMA user_version").get()?.user_version) !== 11) throw new Error("UNSUPPORTED_SCHEMA");
     if (workerData.history) {
       const history = workerData.history as { message: ChannelMessage; reply?: string };
       recordQQ(db, history.message, history.reply); parentPort?.postMessage({ ok: true });

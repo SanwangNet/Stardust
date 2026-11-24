@@ -10,7 +10,7 @@ export function migrateHistoryProvenance(db: DatabaseSync): void {
  db.exec("BEGIN IMMEDIATE");
  try {
   const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-  if (version === 9) { db.exec("COMMIT"); return; }
+  if (version === 9 || version === 10 || version === 11) { db.exec("COMMIT"); return; }
   if (version !== 8) throw new Error("UNSUPPORTED_SCHEMA");
   db.exec(`CREATE TABLE message_provenance (
     message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,

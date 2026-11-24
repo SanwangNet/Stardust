@@ -1,5 +1,5 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 
@@ -8,8 +8,24 @@ export type ExtensionEnv =
   | { configured: false }
   | { configured: true; values: EnvValues };
 
-// This module lives in apps/server/src or apps/server/dist, not the caller's cwd.
-export const projectConfigRoot = fileURLToPath(new URL("../../../", import.meta.url));
+// Resolved once at module startup, independently of cwd and the storage .env.
+export const applicationRoot = fileURLToPath(new URL("../../../", import.meta.url));
+function storageRootAtStartup(): string {
+  const value = process.env.STARDUST_STORAGE_ROOT;
+  if (value === undefined) return applicationRoot;
+  if (!value.trim() || value !== value.trim() || !isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error("STARDUST_STORAGE_ROOT 必须是有效的绝对目录路径");
+  const root = resolve(value);
+  try {
+    const info = lstatSync(root);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error();
+    accessSync(root, constants.R_OK | constants.W_OK | constants.X_OK);
+    return realpathSync(root);
+  } catch { throw new Error("STARDUST_STORAGE_ROOT 不可访问、不可写或不是实际目录"); }
+}
+export const storageRoot = storageRootAtStartup();
+/** Compatibility name used by storage-backed services; not the application root. */
+export const projectConfigRoot = storageRoot;
+export const runtimePaths = Object.freeze({ applicationRoot, storageRoot, configPath:join(storageRoot,"config.toml"), rootEnvPath:join(storageRoot,".env"), extensionEnvRoot:join(storageRoot,"env"), dataRoot:join(storageRoot,"data"), conversationDatabasePath:join(storageRoot,"data","conversations.sqlite") });
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
