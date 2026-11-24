@@ -67,7 +67,8 @@ for (const supportsTools of [false, true]) test(`QQ through the real adapter use
   for (let i = 0; i < calls.length; i++) {
     const { messages, context } = calls[i];
     assert.deepEqual(f.entries[i].mode, { mode: "model-only" });
-    assert.deepEqual(messages.map(m => m.role), ["system", "user"]);
+    if (i === 1) { assert.deepEqual(messages.map(m => m.role), ["system", "user", "user", "user"]); assert.match(messages[1].content, /消息-ignored/); }
+    else assert.deepEqual(messages.map(m => m.role), ["system", "user"]);
     assert.match(messages[0].content, /用户配置的主身份/); assert.match(messages[0].content, /不可信输入/);
     assert.doesNotMatch(JSON.stringify(messages), /仅 Web 专用提示|绝密 Web 历史|可用消息渠道|send_message|openid/);
     assert.match(context.eventId, /^[0-9a-f-]{36}$/); assert.equal(context.eventId, f.entries[i].request.modelContext.eventId);

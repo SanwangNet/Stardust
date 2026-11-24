@@ -7,6 +7,7 @@ export function buildConversationContext(
   budgetBytes = 48_000,
   system: string[] = [],
   recentMessageLimit = 50,
+  mode: "turns" | "messages" = "turns",
 ): ConversationContextMessage[] {
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 1) throw new Error("INVALID_BUDGET");
   if (!Number.isSafeInteger(recentMessageLimit) || recentMessageLimit < 2) throw new Error("INVALID_RECENT_LIMIT");
@@ -16,8 +17,18 @@ export function buildConversationContext(
   let size = prefix.reduce((sum, message) => sum + cost(message), cost(currentMessage));
   if (size > budgetBytes) throw new Error("CONTEXT_TOO_LARGE");
   const selected: ConversationContextMessage[] = [];
-  // Only complete adjacent user/assistant pairs belong to previous turns.
   const first = Math.max(0, history.length - recentMessageLimit);
+  if (mode === "messages") {
+    for (let index = history.length - 1; index >= first; index--) {
+      const message = history[index]!;
+      if (message.role !== "user" && message.role !== "assistant") continue;
+      const messageSize = cost(message);
+      if (size + messageSize > budgetBytes) continue;
+      selected.unshift(message); size += messageSize;
+    }
+    return [...prefix, ...selected, currentMessage];
+  }
+  // Web preserves its existing complete adjacent user/assistant turns.
   for (let index = history.length - 1; index - 1 >= first; index -= 2) {
     const user = history[index - 1];
     const assistant = history[index];

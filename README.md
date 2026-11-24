@@ -40,7 +40,9 @@ Tool 审批出现在 Web 对话输入框上方，QQ 来源请求会标明私聊�
 
 QQ 的私聊、群聊 Tool 白名单均默认为空，运行和审批只保存在内存中，服务关闭或重启后不能恢复。生成结果与 QQ 投递独立记录，不会发送主动消息或复用过期的被动回复目标。
 
-QQ 生产 Tool Calling 默认关闭。要在可信本机环境显式启用，启动 Server 的进程环境需设置 `STARDUST_QQ_TOOL_CALLING=1` 及范围策略：`STARDUST_QQ_TOOL_PRIVATE_ALLOW`、`STARDUST_QQ_TOOL_PRIVATE_SENDERS` 分别列出私聊允许的 Tool 名称和发送者；群聊需同时设置 `STARDUST_QQ_TOOL_GROUP_ALLOW`、`STARDUST_QQ_TOOL_GROUPS` 和 `STARDUST_QQ_TOOL_GROUP_SENDERS`。各变量均为逗号分隔的精确值，空值拒绝授权；群号与发送者条件同时满足，仍须通过 QQ 入站验证、Core 和每次操作的 Web 审批。请将平台标识作为敏感配置保管，不要提交。缺少有效 Tool、可信本机监听或身份匹配时继续 model-only。
+QQ 生产 Tool Calling 默认关闭。要在可信本机环境显式启用，启动 Server 的进程环境需设置 `STARDUST_QQ_TOOL_CALLING=1` 及范围策略：`STARDUST_QQ_TOOL_PRIVATE_ALLOW`、`STARDUST_QQ_TOOL_PRIVATE_SENDERS` 分别列出私聊允许的 Tool 名称和发送者；群聊需同时设置 `STARDUST_QQ_TOOL_GROUP_ALLOW`、`STARDUST_QQ_TOOL_GROUPS` 和 `STARDUST_QQ_TOOL_GROUP_SENDERS`。各变量均为逗号分隔的精确值，空值拒绝授权；群号与发送者条件同时满足，仍须通过 QQ 入站验证和 Core 权限检查。扩展操作按现有策略进入 Web 审批。请将平台标识作为敏感配置保管，不要提交。缺少有效 Tool、可信本机监听或身份匹配时继续 model-only。
+
+需要在 QQ 使用按需历史检索时，在对应私聊或群聊的 `*_ALLOW` 列表中显式加入 `search_history`，并保持 Core 中该工具启用。它是只读的 Core 工具，不继承 `send_message` 权限，也不改变其他工具的审批；仅检索当前获准会话中已持久化且来源可信的记录。结果是不可信引用，QQ 记录可能不完整，Agent 回复进入回复流程不代表确认送达。Web 仍使用既有的 `web:default` 跨 Web 会话检索，不读取 QQ 历史。
 
 被授权的 QQ Tool 运行与接收队列分离；模型结果生成后只尝试原消息的被动回复一次。发送时同时检查原消息期限、现有四分钟队列安全窗口和连接状态；过期则保留结果并显示不可投递，不进行主动发送。平台拒绝、网络未知和取消不会被记为投递成功，也不会自动重试。当前验证使用 Mock，不代表 QQ 平台已批准或保证任何发送方式。
 

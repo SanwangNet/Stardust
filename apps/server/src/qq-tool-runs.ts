@@ -4,6 +4,7 @@ import type { AgentCore } from "./agent-core.js";
 import type { ChannelMessage, ChannelDeliver } from "./channel.js";
 import type { ExtensionManager } from "./extension-manager.js";
 import type { ToolRuns } from "./tool-runs.js";
+import { historyContext, type HistoryRunContext } from "./scoped-history-search.js";
 
 /** Server-owned allowlists. No entry is inferred from the Tool provider or QQ identity. */
 export type QQToolPolicy = { private?: readonly string[]; group?: readonly string[]; privateSenders?: readonly string[]; groups?: readonly string[]; groupSenders?: readonly string[] };
@@ -20,7 +21,7 @@ export class QQToolRuns {
   private readonly groupSenders: Set<string>;
   private readonly timer: ReturnType<typeof setInterval>;
   private closed = false;
-  constructor(private readonly runs: ToolRuns, private readonly extensions: ExtensionManager, private readonly core: () => Promise<AgentCore>, policy: QQToolPolicy = {}, private readonly timeoutMs = 10 * 60_000, private readonly retentionMs = 30 * 60_000, private readonly maxActive = 20) {
+  constructor(private readonly runs: ToolRuns, private readonly extensions: ExtensionManager, private readonly core: () => Promise<AgentCore>, policy: QQToolPolicy = {}, private readonly timeoutMs = 10 * 60_000, private readonly retentionMs = 30 * 60_000, private readonly maxActive = 20, private readonly searchHistory?: (context: HistoryRunContext, input: unknown, signal: AbortSignal) => Promise<unknown>) {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 100 || timeoutMs > 30 * 60_000) throw new Error("INVALID_RUN_TIMEOUT");
     if (!Number.isFinite(retentionMs) || retentionMs < 100 || retentionMs > 30 * 60_000) throw new Error("INVALID_RUN_RETENTION");
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 20) throw new Error("INVALID_RUN_LIMIT");
@@ -36,8 +37,8 @@ export class QQToolRuns {
       : message.conversationType === "group" && this.groups.has(message.conversationId) && this.groupSenders.has(message.senderId));
   }
   start(message: ChannelMessage, signal?: AbortSignal): Promise<string>;
-  start(message: ChannelMessage, signal: AbortSignal | undefined, production: { deliver: ChannelDeliver; personContext?: ConversationContextMessage }): Promise<string | undefined>;
-  async start(message: ChannelMessage, signal?: AbortSignal, production?: { deliver: ChannelDeliver; personContext?: ConversationContextMessage }): Promise<string | undefined> {
+  start(message: ChannelMessage, signal: AbortSignal | undefined, production: { deliver: ChannelDeliver; personContext?: ConversationContextMessage; contextMessages?: ConversationContextMessage[]; searchHistory?: (input:unknown,signal:AbortSignal)=>Promise<unknown> }): Promise<string | undefined>;
+  async start(message: ChannelMessage, signal?: AbortSignal, production?: { deliver: ChannelDeliver; personContext?: ConversationContextMessage; contextMessages?: ConversationContextMessage[]; searchHistory?: (input:unknown,signal:AbortSignal)=>Promise<unknown> }): Promise<string | undefined> {
     message = { ...message };
     if (this.closed || signal?.aborted || message.channelId !== "qq-bot" || !["private", "group"].includes(message.conversationType) || !message.conversationId || !message.senderId || !message.messageId || typeof message.content !== "string" || !message.content.trim() || Buffer.byteLength(message.content, "utf8") > 32000) throw new Error("INVALID_QQ_REQUEST");
     if (production && !this.productionAllowed(message)) return undefined;
@@ -54,7 +55,10 @@ export class QQToolRuns {
     const allow = (name: string) => !sourceLease.aborted && permitted.has(name) && core.toolAllowed(name) && (name !== "send_message" || !!message.targetRef);
     const snapshot = this.extensions.requestCapabilities({ channel: "qq", allowTool: allow, allowSkill: () => false });
     const tools = new Map(snapshot.visible.filter(item => item.kind === "tool").map(item => [item.name, item]));
-    if (production && (!this.productionAllowed(message) || tools.size === 0)) return undefined;
+    let historySource: HistoryRunContext | undefined;
+    if (!production && this.searchHistory && permitted.has("search_history")) { try { historySource = historyContext(message); } catch { /* An unverifiable source grants no capability. */ } }
+    const historyAllowed = () => (!!production?.searchHistory || (!!historySource && !!this.searchHistory)) && allow("search_history");
+    if (production && (!this.productionAllowed(message) || (tools.size === 0 && !historyAllowed()))) return undefined;
     if (this.entries.size >= 100) throw new Error("RUN_LIMIT");
     if (production) {
       let active = 0;
@@ -65,9 +69,9 @@ export class QQToolRuns {
     }
     const owner = `qq:${randomUUID()}`;
     const source = { starcoreId: "qq-bot", channelId: "qq-bot", conversationId: this.ref(scope, message.conversationId) };
-    const id = this.runs.start(owner, message.content, [{ role: "system", content: core.instructions("qq-bot") }, ...(production?.personContext ? [production.personContext] : []), { role: "user", content: message.content }], {
-      searchHistory: () => [], activity: () => {},
-      allowTool: name => name !== "search_history" && allow(name) && !!tools.get(name) && snapshot.isEligible(tools.get(name)!.id),
+    const id = this.runs.start(owner, message.content, [{ role: "system", content: core.instructions("qq-bot") }, ...(production?.personContext ? [production.personContext] : []), ...(production?.contextMessages ?? [{ role: "user" as const, content: message.content }])], {
+      searchHistory: (input, signal) => production?.searchHistory ? production.searchHistory(input,signal) : historySource && this.searchHistory ? this.searchHistory(historySource, input, signal) : Promise.reject(new Error("HISTORY_SOURCE_UNAVAILABLE")), scopedHistory: true, activity: () => {},
+      allowTool: name => name === "search_history" ? historyAllowed() : allow(name) && !!tools.get(name) && snapshot.isEligible(tools.get(name)!.id),
       targetRef: message.targetRef ?? "",
       allowInput: (name, input) => name !== "send_message" || (!!message.targetRef && input.channel === "qq-bot" && input.target === message.targetRef),
     }, source);

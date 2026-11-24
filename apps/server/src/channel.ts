@@ -30,6 +30,7 @@ export interface ManagementPage { pageId: string; title: string; description: st
 export interface ExtensionManifest { id: string; name: string; version: string; description: string; type: "channel" | "tool"; fields: ExtensionField[]; builtin?: boolean; managementPages?: ManagementPage[]; skills?: SkillDeclaration[] }
 export interface ChannelHost {
   message(message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver): Promise<ChannelResponse>;
+  observeMessage?(message: ChannelMessage, signal: AbortSignal): Promise<void>;
   observe?(observation: ChannelObservation, signal: AbortSignal): void;
   qqInputFlow?(request: QQInputRequest): Promise<"allow" | "skip">;
   status(state: ExtensionStatus, error?: string): void;

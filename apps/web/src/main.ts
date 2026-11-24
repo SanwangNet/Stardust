@@ -4,6 +4,8 @@ import { initializeConversationUI } from "./conversation-ui.js";
 import { initializePeopleUI } from "./people-ui.js";
 import { initializeGlobalContextUI } from "./global-context-ui.js";
 import { initializeFlowBoard } from "./flow-board.js";
+import { categoryForNavigation, deferredNavigationOrigin, usesRootPageTransition, waitsForExtensionRoutes } from "./navigation-transition.js";
+import { createNavigationDiagnostics } from "./navigation-diagnostics.js";
 
 interface HealthResponse {
   status: "ok";
@@ -55,6 +57,10 @@ const menu: MenuCategory[] = [
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
   { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }, { label: "星尘提示词", path: "/settings/agent" }] },
 ];
+// Resolve the owner by route, so inserting a navigation category cannot change
+// the transition between the starcore list and its dynamically registered pages.
+const extensionCategory = categoryForNavigation(menu, "/extensions/installed", false)!;
+const overviewCategory = categoryForNavigation(menu, "/overview/status", false)!;
 const pageDescriptions: Record<string, string> = {
   "/overview/status": "一览服务状态，从这里开始你的工作。",
   "/model/service": "配置、测试和使用你的模型服务。",
@@ -117,6 +123,16 @@ let pendingSidebarTarget: string | undefined;
 let pendingNavigationTitleSource: (MovingTitle & { path: string }) | undefined;
 let pendingNavigationCardBorder: { path: string; rect: DOMRect; borderWidth: string; borderColor: string } | undefined;
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const navigationDebug = createNavigationDiagnostics(
+  () => { try { return localStorage.getItem("stardust.navigation.debug") === "1"; } catch { return false; } },
+  (event, data) => console.info("[stardust-navigation]", event, data),
+  () => performance.now(),
+);
+function debugRect(rect: DOMRect) { return { x:rect.x, y:rect.y, width:rect.width, height:rect.height }; }
+function debugLayout(element: HTMLElement) {
+  const style=getComputedStyle(element);
+  return { rect:debugRect(element.getBoundingClientRect()), position:style.position, overflow:style.overflow, transform:style.transform, transformOrigin:style.transformOrigin, opacity:style.opacity, zIndex:style.zIndex, transition:style.transition };
+}
 // Shared titles, frames and surfaces finish together; only return stacks are staggered.
 const spaceMotion = {
   duration: 360, sidebar: 420, sibling: 300, stagger: 45, maxStagger: 180,
@@ -130,9 +146,9 @@ let rootFrameTransition: { element: HTMLElement; animation: Animation; card?: HT
 let rootPageMotion: { incoming: Animation; outgoing: Animation; snapshot: HTMLElement } | undefined;
 
 function captureRootPage(): HTMLElement | undefined {
-  if (reducedMotion.matches) return;
+  if (reducedMotion.matches) { navigationDebug.log("animation-skip",{name:"root-page",reason:"reduced-motion"}); return; }
   const rect = spaceOuter.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
+  if (!rect.width || !rect.height) { navigationDebug.log("animation-skip",{name:"root-page",reason:"empty-geometry",outer:debugRect(rect)}); return; }
   const snapshot = spaceOuter.cloneNode(true) as HTMLElement;
   snapshot.inert = true;
   snapshot.setAttribute("aria-hidden", "true");
@@ -150,8 +166,9 @@ function captureRootPage(): HTMLElement | undefined {
   document.body.append(snapshot);
   return snapshot;
 }
-function clearRootPageMotion(): void {
+function clearRootPageMotion(reason = "navigation"): void {
   if (!rootPageMotion) return;
+  navigationDebug.log("cleanup", { target:"root-page", reason });
   rootPageMotion.incoming.cancel();
   rootPageMotion.outgoing.cancel();
   rootPageMotion.snapshot.remove();
@@ -170,9 +187,11 @@ function animateRootPage(snapshot: HTMLElement, direction: number): void {
     { transform: "translateX(0)", opacity: snapshot.style.opacity },
     { transform: `translateX(${-distance}px)`, opacity: 0 },
   ], options);
+  navigationDebug.watch("root-page-in", incoming, { direction, distance },()=>({connected:spaceOuter.isConnected,layout:debugLayout(spaceOuter)}));
+  navigationDebug.watch("root-page-out", outgoing, { direction, distance },()=>({connected:snapshot.isConnected,layout:debugLayout(snapshot)}));
   rootPageMotion = { incoming, outgoing, snapshot };
   void incoming.finished.then(() => {
-    if (rootPageMotion?.incoming === incoming) clearRootPageMotion();
+    if (rootPageMotion?.incoming === incoming) clearRootPageMotion("finished");
   }, () => {});
 }
 
@@ -288,15 +307,16 @@ function renderTitleHierarchy(path: string, previousPath: string, previousTitle:
   }
   return { previous: moving, entered };
 }
-function clearTitleFlights(): void {
+function clearTitleFlights(reason = "navigation"): void {
   // Restore synchronously before the next route captures or reparents a title.
   for (const flight of titleFlights) {
+    navigationDebug.log("cleanup", { target:"title", reason });
     flight.animation.cancel();
     flight.restore();
   }
 }
 function animateTitle(moving: MovingTitle | undefined, returning = false): void {
-  if (!moving || reducedMotion.matches || moving.source.bottom <= 0 || moving.source.top >= window.innerHeight) return;
+  if (!moving || reducedMotion.matches || moving.source.bottom <= 0 || moving.source.top >= window.innerHeight) { navigationDebug.log("animation-skip", { name:"title", reason:!moving ? "no-source" : reducedMotion.matches ? "reduced-motion" : "source-offscreen", returning }); return; }
   const element = moving.element;
   const placeholder = moving.element.cloneNode(true) as HTMLElement;
   placeholder.classList.add("page-title-shared-placeholder");
@@ -304,6 +324,7 @@ function animateTitle(moving: MovingTitle | undefined, returning = false): void 
   moving.element.replaceWith(placeholder);
   const destination = placeholder.getBoundingClientRect();
   if (!destination.width || !destination.height || !moving.source.width || !moving.source.height) {
+    navigationDebug.log("animation-skip", { name:"title", reason:"empty-geometry", source:debugRect(moving.source), destination:debugRect(destination), returning });
     placeholder.replaceWith(moving.element);
     return;
   }
@@ -333,9 +354,11 @@ function animateTitle(moving: MovingTitle | undefined, returning = false): void 
     { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, transformOrigin: "top left", color: moving.color },
     { transform: "translate(0, 0) scale(1)", transformOrigin: "top left", color: targetStyle.color },
   ], { duration: spaceMotion.duration, easing: spaceMotion.easing });
+  navigationDebug.watch("title", expand, { returning, source:debugRect(moving.source), destination:debugRect(destination), dx, dy, scale },()=>({connected:element.isConnected,layout:debugLayout(element)}));
   const flight = { animation: expand, restore, scrollX: window.scrollX, scrollY: window.scrollY };
   function restore(): void {
     if (!titleFlights.delete(flight)) return;
+    navigationDebug.log("dom-restore", {target:"title",placeholderConnected:placeholder.isConnected,elementConnected:element.isConnected});
     element.classList.remove("page-title-shared-flight");
     if (originalStyle === null) element.removeAttribute("style");
     else element.setAttribute("style", originalStyle);
@@ -345,20 +368,23 @@ function animateTitle(moving: MovingTitle | undefined, returning = false): void 
   titleFlights.add(flight);
   void expand.finished.then(restore, restore);
 }
-function clearSpaceEnter(): void {
+function clearSpaceEnter(reason = "navigation"): void {
   if (!spaceEnterBorder) return;
+  navigationDebug.log("cleanup", { target:"card-enter", reason });
   spaceEnterBorder.animation.cancel();
   for (const animation of spaceEnterBorder.contentAnimations) animation.cancel();
   spaceEnterBorder.element.remove();
   spaceEnterBorder = undefined;
   spaceShell.classList.remove("is-entering");
 }
-function clearSidebarEnter(): void {
+function clearSidebarEnter(reason = "navigation"): void {
+  if (sidebarEnterAnimation) navigationDebug.log("cleanup", { target:"sidebar-enter", reason });
   sidebarEnterAnimation?.animation.cancel();
   sidebarEnterAnimation = undefined;
 }
-function clearRootFrameTransition(): void {
+function clearRootFrameTransition(reason = "navigation"): void {
   if (!rootFrameTransition) return;
+  navigationDebug.log("cleanup", { target:"root-frame", reason });
   const card = rootFrameTransition.card;
   if (card) {
     // Commit the real border immediately, without transitioning from transparent.
@@ -372,11 +398,11 @@ function clearRootFrameTransition(): void {
   rootFrameTransition = undefined;
 }
 function animateRootFrame(card: HTMLElement, entering: boolean): void {
-  if (reducedMotion.matches) return;
+  if (reducedMotion.matches) { navigationDebug.log("animation-skip", {name:"root-frame",reason:"reduced-motion",entering}); return; }
   const frame = card.querySelector<HTMLElement>(":scope > .space-ancestor-frame");
   const title = card.querySelector<HTMLElement>(":scope > .page-title-ancestor");
   const header = document.querySelector<HTMLElement>(".site-header");
-  if (!frame || !title || !header) return;
+  if (!frame || !title || !header) { navigationDebug.log("animation-skip", {name:"root-frame",reason:"missing-element",frame:!!frame,title:!!title,header:!!header,entering}); return; }
   const frameRect = frame.getBoundingClientRect();
   const titleRect = title.getBoundingClientRect();
   const sidebarRect = sidebar.getBoundingClientRect();
@@ -385,7 +411,7 @@ function animateRootFrame(card: HTMLElement, entering: boolean): void {
   const navLeft = entering ? (mobile ? 0 : sidebarRect.right) : (mobile ? -1 : sidebarRect.left);
   const navTop = entering ? (mobile ? Math.max(headerRect.bottom, sidebarRect.bottom) : headerRect.bottom) : headerRect.top;
   const targetTop = titleRect.top;
-  if (!frameRect.width || frameRect.bottom <= targetTop || targetTop >= window.innerHeight) return;
+  if (!frameRect.width || frameRect.bottom <= targetTop || targetTop >= window.innerHeight) { navigationDebug.log("animation-skip", {name:"root-frame",reason:"empty-or-offscreen",frame:debugRect(frameRect),title:debugRect(titleRect),entering}); return; }
   const target = {
     left: `${frameRect.left}px`, top: `${targetTop}px`,
     width: `${frameRect.width}px`, height: `${Math.max(0, frameRect.bottom - targetTop)}px`,
@@ -407,30 +433,32 @@ function animateRootFrame(card: HTMLElement, entering: boolean): void {
   const animation = overlay.animate(entering ? [start, target] : [target, start], {
     duration: spaceMotion.duration, easing: spaceMotion.easing, fill: "both",
   });
+  navigationDebug.watch("root-frame", animation, { entering, frame:debugRect(frameRect), title:debugRect(titleRect), start, target },()=>({connected:overlay.isConnected,layout:debugLayout(overlay)}));
   rootFrameTransition = { element: overlay, animation, card: entering ? card : undefined, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
-    if (rootFrameTransition?.animation === animation) clearRootFrameTransition();
+    if (rootFrameTransition?.animation === animation) clearRootFrameTransition("finished");
   });
 }
 function animateSidebarChild(sibling = false): void {
-  if (reducedMotion.matches) return;
+  if (reducedMotion.matches) { navigationDebug.log("animation-skip", {name:"sidebar-child",reason:"reduced-motion",sibling}); return; }
   const bounds = spaceShell.getBoundingClientRect();
-  if (!bounds.width || !bounds.height || bounds.top >= window.innerHeight) return;
+  if (!bounds.width || !bounds.height || bounds.top >= window.innerHeight) { navigationDebug.log("animation-skip", {name:"sidebar-child",reason:"empty-or-offscreen",bounds:debugRect(bounds),sibling}); return; }
   const distance = sibling ? 32 : window.innerHeight - bounds.top + 1;
   const animation = spaceShell.animate([
     { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
     { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
   ], { duration: sibling ? spaceMotion.sibling : spaceMotion.sidebar, easing: spaceMotion.easing });
+  navigationDebug.watch("sidebar-child", animation, { sibling, bounds:debugRect(bounds), distance },()=>({connected:spaceShell.isConnected,layout:debugLayout(spaceShell)}));
   sidebarEnterAnimation = { animation, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
     if (sidebarEnterAnimation?.animation === animation) sidebarEnterAnimation = undefined;
   });
 }
 function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCardBorder>): void {
-  if (reducedMotion.matches || source.rect.bottom <= 0 || source.rect.top >= window.innerHeight) return;
+  if (reducedMotion.matches || source.rect.bottom <= 0 || source.rect.top >= window.innerHeight) { navigationDebug.log("animation-skip", {name:"card-enter",reason:reducedMotion.matches?"reduced-motion":"source-offscreen",source:debugRect(source.rect)}); return; }
   const shell = spaceShell.getBoundingClientRect();
   const heading = pageHeading.getBoundingClientRect();
-  if (!source.rect.width || !source.rect.height || !shell.width || shell.bottom <= heading.top) return;
+  if (!source.rect.width || !source.rect.height || !shell.width || shell.bottom <= heading.top) { navigationDebug.log("animation-skip", {name:"card-enter",reason:"empty-geometry",source:debugRect(source.rect),shell:debugRect(shell),heading:debugRect(heading)}); return; }
 
   const shellStyle = getComputedStyle(spaceShell);
   const headingStyle = getComputedStyle(pageHeading);
@@ -453,6 +481,7 @@ function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCa
       borderWidth, borderColor,
     },
   ], { duration: spaceMotion.duration, easing: spaceMotion.easing, fill: "both" });
+  navigationDebug.watch("card-border", animation, { source:debugRect(source.rect), shell:debugRect(shell), heading:debugRect(heading), borderWidth, borderColor },()=>({connected:border.isConnected,layout:debugLayout(border)}));
   const contentAnimations: Animation[] = [];
   // Reveal the surface and its shadow from the source card, not just its content.
   const left = Math.max(0, Math.min(shell.width, source.rect.left - shell.left));
@@ -463,34 +492,40 @@ function animateEnteredCardBorder(source: NonNullable<typeof pendingNavigationCa
     { clipPath: `inset(${top}px ${shell.width - right}px ${shell.height - bottom}px ${left}px)`, boxShadow: "none" },
     { clipPath: "inset(-24px)", boxShadow: shellStyle.boxShadow },
   ], { duration: spaceMotion.duration, easing: spaceMotion.easing }));
+  navigationDebug.watch("card-surface", contentAnimations[0]!, { left,right,top,bottom },()=>({connected:spaceShell.isConnected,layout:debugLayout(spaceShell)}));
   const contentBounds = pageStage.getBoundingClientRect();
   if (contentBounds.width && contentBounds.height) {
-    contentAnimations.push(pageStage.animate([
+    const contentAnimation=pageStage.animate([
       { opacity: 0, transform: "translateY(8px)" },
       { opacity: 1, transform: "translateY(0)" },
-    ], { delay: 60, duration: spaceMotion.duration - 60, easing: spaceMotion.easing, fill: "both" }));
+    ], { delay: 60, duration: spaceMotion.duration - 60, easing: spaceMotion.easing, fill: "both" });
+    contentAnimations.push(contentAnimation);
+    navigationDebug.watch("card-content",contentAnimation,{bounds:debugRect(contentBounds)},()=>({connected:pageStage.isConnected,layout:debugLayout(pageStage)}));
   }
   if (!pageDescription.hidden) {
-    contentAnimations.push(pageDescription.animate([
+    const descriptionAnimation=pageDescription.animate([
       { opacity: 0, transform: "translateY(8px)" },
       { opacity: 0, offset: 0.2 },
       { opacity: 1, transform: "translateY(0)" },
-    ], { duration: spaceMotion.duration, easing: spaceMotion.easing }));
+    ], { duration: spaceMotion.duration, easing: spaceMotion.easing });
+    contentAnimations.push(descriptionAnimation);
+    navigationDebug.watch("card-description",descriptionAnimation,{},()=>({connected:pageDescription.isConnected,layout:debugLayout(pageDescription)}));
   }
   spaceEnterBorder = { element: border, animation, contentAnimations, scrollX: window.scrollX, scrollY: window.scrollY };
   void animation.finished.catch(() => {}).finally(() => {
-    if (spaceEnterBorder?.animation === animation) clearSpaceEnter();
+    if (spaceEnterBorder?.animation === animation) clearSpaceEnter("finished");
   });
 }
-function clearSpaceExit(): void {
+function clearSpaceExit(reason = "navigation"): void {
   if (!spaceExitLayer) return;
+  navigationDebug.log("cleanup", { target:"card-exit", reason });
   for (const animation of spaceExitLayer.getAnimations({ subtree: true })) animation.cancel();
   spaceExitLayer.remove();
   spaceExitLayer = undefined;
 }
 function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   clearSpaceExit();
-  if (!exitingPaths.length || reducedMotion.matches) return;
+  if (!exitingPaths.length || reducedMotion.matches) { navigationDebug.log("animation-skip", {name:"card-exit",reason:!exitingPaths.length?"no-exit-paths":"reduced-motion",exitingPaths,sibling}); return; }
 
   const layer = document.createElement("div");
   layer.className = "space-exit-layer";
@@ -557,23 +592,26 @@ function animateSpaceExit(exitingPaths: string[], sibling = false): void {
   }
 
   const cards = Array.from(layer.children).reverse();
-  if (!cards.length) return;
+  if (!cards.length) { navigationDebug.log("animation-skip", {name:"card-exit",reason:"no-matching-cards",exitingPaths,sibling}); return; }
   document.body.append(layer);
   for (const { element, top, left } of scrollPositions) element.scrollTo(left, top);
   spaceExitLayer = layer;
   const stagger = Math.min(spaceMotion.stagger, spaceMotion.maxStagger / Math.max(1, cards.length - 1));
   const viewportBottom = layer.getBoundingClientRect().bottom;
   const animations = cards.map((card, index) => {
-    const distance = sibling ? 32 : Math.max(0, viewportBottom - card.getBoundingClientRect().top + 1);
+    const bounds=card.getBoundingClientRect();
+    const distance = sibling ? 32 : Math.max(0, viewportBottom - bounds.top + 1);
     // A quadratic curve gives the card a slow start and increasing speed.
     const duration = sibling ? spaceMotion.sibling : Math.min(380, Math.max(260, Math.sqrt(distance) * 12));
-    return card.animate([
+    const animation=card.animate([
       { transform: "translateY(0)", ...(sibling ? { opacity: 1 } : {}) },
       { transform: `translateY(${distance}px)`, ...(sibling ? { opacity: 0 } : {}) },
     ], { duration, delay: index * stagger, easing: sibling ? spaceMotion.easing : spaceMotion.fallEasing, fill: "both" });
+    navigationDebug.watch("card-exit", animation, { index,sibling,distance,duration,delay:index*stagger,bounds:debugRect(bounds) },()=>({connected:card.isConnected,layout:debugLayout(card as HTMLElement)}));
+    return animation;
   });
   void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
-    if (spaceExitLayer === layer) clearSpaceExit();
+    if (spaceExitLayer === layer) clearSpaceExit("finished");
   });
 }
 function createExitCard(bounds: DOMRect, titleTop: number): { card: HTMLElement; surface: HTMLElement; clippedTop: number } {
@@ -606,11 +644,12 @@ function closeMenu(): void {
   menuToggle.setAttribute("aria-expanded", "false");
 }
 function markNavigationIntent(path: string, event: MouseEvent): void {
-  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) { navigationDebug.log("intent-skipped",{from:currentPath,to:path,reason:"modified-or-nonprimary-click"}); return; }
   pendingNavigationTitleSource = undefined;
   pendingNavigationCardBorder = undefined;
   pendingSidebarTarget = undefined;
   if (location.hash.slice(1) === path) {
+    navigationDebug.log("intent-skipped",{from:currentPath,to:path,reason:"same-path"});
     event.preventDefault();
     pageTitle.focus({ preventScroll: true });
     return;
@@ -633,6 +672,11 @@ function markNavigationIntent(path: string, event: MouseEvent): void {
       color: style.color,
       fontSize: parseFloat(style.fontSize),
     };
+  }
+  navigationDebug.log("intent", { from:currentPath,to:path,card:!!pendingNavigationCardBorder,sidebar:pendingSidebarTarget===path,source:pendingNavigationCardBorder?debugRect(pendingNavigationCardBorder.rect):undefined,title:!!pendingNavigationTitleSource,connected:link?.isConnected });
+  if (navigationDebug.enabled() && link) {
+    const section=link.closest<HTMLElement>(".nav-page"),icon=link.querySelector<HTMLElement>(".workspace-icon, .space-card-icon, .extension-icon-box");
+    navigationDebug.log("intent-layout",{from:currentPath,to:path,link:debugLayout(link),section:section?debugLayout(section):undefined,icon:icon?debugLayout(icon):undefined});
   }
 }
 function createPageLink(page: MenuPage, path: string, className: string): HTMLAnchorElement {
@@ -776,18 +820,19 @@ function restoreRouteState(path: string, origin: "click" | "history" | "programm
 function renderNavigation(origin: "click" | "history" | "programmatic" | "initial" = "history"): void {
   let path = location.hash.slice(1) || "/overview/status";
   const extensionPath = path.startsWith("/extensions/installed/");
-  if (extensionPath && !extensionsResolved) return;
+  if (waitsForExtensionRoutes(path, extensionsResolved)) { navigationDebug.log("navigation-deferred", {from:currentPath,to:path,origin}); return; }
   let dynamic = extensionRoutes.get(path);
-  let category = dynamic ? menu[2] : menu.find((item) => pages(item).some((page) => page.path === path));
+  let category = categoryForNavigation(menu, path, !!dynamic);
   if (!category) {
     path = extensionPath ? "/extensions/installed" : "/overview/status";
-    category = extensionPath ? menu[2]! : menu[0]!;
+    category = extensionPath ? extensionCategory : overviewCategory;
     dynamic = undefined;
     history.replaceState(null, "", `#${path}`);
   } else if (!location.hash) history.replaceState(null, "", `#${path}`);
   const page = dynamic?.page ?? pages(category).find((item) => item.path === path)!;
   const sidebarPath = dynamic ? "/extensions/installed" : path;
   if (currentPath === path && currentPath) {
+    navigationDebug.log("navigation-skip",{from:currentPath,to:path,origin,reason:"same-path"});
     if (origin === "programmatic") pageTitle.focus({ preventScroll: true });
     return;
   }
@@ -795,19 +840,23 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   const previousPath = currentPath;
   const previousTitle = currentTitle;
   const categoryChanged = activeCategory !== category;
-  const rootSwitch = Boolean(previousPath && categoryChanged);
+  const nextLevels = spaceLevels(path);
+  const enteringChild = nextLevels.length > 0 && (previousPath === "/overview/status" || nextLevels.at(-2) === previousPath);
+  const cardEntersChild = origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path;
+  const rootSwitch = usesRootPageTransition({ previousPath, categoryChanged, cardEntersChild });
   const direction = activeCategory && menu.indexOf(category) < menu.indexOf(activeCategory) ? -1 : 1;
   const rootSnapshot = rootSwitch ? captureRootPage() : undefined;
   clearRootPageMotion();
   const previousLevels = ["/overview/status", ...spaceLevels(previousPath)];
-  const nextLevels = spaceLevels(path);
   const returnLevel = previousLevels.indexOf(path);
   const returning = !rootSwitch && previousPath !== path && returnLevel !== -1;
+  navigationDebug.log("navigation-plan", { from:previousPath,to:path,origin,previousLevels,nextLevels,categoryChanged,rootSwitch,enteringChild,cardEntersChild,returning,sourceConnected:pendingNavigationTitleSource?.element.isConnected,source:pendingNavigationCardBorder?debugRect(pendingNavigationCardBorder.rect):undefined });
   clearTitleFlights();
   clearRootFrameTransition();
   const rootReturning = returning && nextLevels.length === 1 && previousLevels[1] === path;
   const oldRootCard = rootReturning ? spaceOuter.querySelector<HTMLElement>(":scope > .space-ancestor-card") : null;
   if (oldRootCard) animateRootFrame(oldRootCard, false);
+  else if (rootReturning) navigationDebug.log("animation-skip",{name:"root-frame",reason:"root-card-not-found",entering:false});
   const sidebarSibling = origin === "click" && pendingSidebarTarget === path &&
     activeCategory === category && nextLevels.length > 0 &&
     previousLevels.length === nextLevels.length + 1 &&
@@ -842,11 +891,11 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   for (const item of category.items) if ("children" in item && item.children.some((child) => child.path === path)) expanded.add(item.id);
   const clickedTitle = !rootSwitch && origin === "click" && pendingNavigationTitleSource?.path === path ? pendingNavigationTitleSource : undefined;
   pendingNavigationTitleSource = undefined;
-  const enteringChild = nextLevels.length > 0 && (previousPath === "/overview/status" || nextLevels.at(-2) === previousPath);
   const sidebarChild = origin === "click" && pendingSidebarTarget === path && nextLevels.at(-2) === previousPath;
   pendingSidebarTarget = undefined;
   const clickedBorder = !rootSwitch && origin === "click" && enteringChild && pendingNavigationCardBorder?.path === path ? pendingNavigationCardBorder : undefined;
   pendingNavigationCardBorder = undefined;
+  navigationDebug.log("dom-rebuild-start", {from:previousPath,to:path,clickedTitle:!!clickedTitle,clickedBorder:!!clickedBorder});
   const movingTitles = renderTitleHierarchy(path, previousPath, previousTitle, clickedTitle);
   if (returningTitle) {
     pageTitle.setAttribute("aria-label", currentTitle);
@@ -879,6 +928,7 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   movePrimaryIndicator();
   moveSecondaryIndicator();
   restoreRouteState(path, returning ? "history" : origin);
+  if (navigationDebug.enabled()) navigationDebug.log("dom-rebuild-complete", {from:previousPath,to:path,shell:debugLayout(spaceShell),heading:debugLayout(pageHeading),outer:debugLayout(spaceOuter),scrollX:window.scrollX,scrollY:window.scrollY});
   if (rootSnapshot) animateRootPage(rootSnapshot, direction);
   if (rootFrameTransition) {
     rootFrameTransition.scrollX = window.scrollX;
@@ -891,12 +941,15 @@ function renderNavigation(origin: "click" | "history" | "programmatic" | "initia
   if (previousLevels.length === 2 && nextLevels.length > 1 && nextLevels[0] === previousPath) {
     const rootCard = spaceOuter.querySelector<HTMLElement>(":scope > .space-ancestor-card");
     if (rootCard) animateRootFrame(rootCard, true);
+    else navigationDebug.log("animation-skip", {name:"root-frame",reason:"root-card-not-found",entering:true});
   }
   const section = navPages.find((item) => item.dataset.page === path);
   if (section && returning && origin === "click") {
     const target = cardFor(section, previousLevels[returnLevel + 1] ?? "");
     target?.focus({ preventScroll: true });
-  }
+    navigationDebug.log("return-target", {found:!!target,from:previousPath,to:path});
+  } else if (returning) navigationDebug.log("return-target",{found:false,reason:!section?"section-not-found":"not-click",from:previousPath,to:path});
+  if (navigationDebug.enabled()) requestAnimationFrame(() => navigationDebug.log("next-frame", {from:previousPath,to:path,currentPath,shell:debugLayout(spaceShell),heading:debugLayout(pageHeading),scrollX:window.scrollX,scrollY:window.scrollY}));
 }
 function setWebTitle(title: string): void {
   webTitle = title;
@@ -930,6 +983,8 @@ document.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("hashchange", () => {
+  const path = location.hash.slice(1) || "/overview/status";
+  if (waitsForExtensionRoutes(path, extensionsResolved)) { navigationDebug.log("navigation-deferred", {from:currentPath,to:path,origin:pendingNavigationOrigin ?? "history",stage:"hashchange"}); return; }
   const origin = pendingNavigationOrigin ?? "history";
   pendingNavigationOrigin = null;
   renderNavigation(origin);
@@ -943,10 +998,11 @@ document.addEventListener("focusin", (event) => {
   }
 });
 window.addEventListener("scroll", () => {
-  if (Array.from(titleFlights).some((flight) => flight.scrollX !== window.scrollX || flight.scrollY !== window.scrollY)) clearTitleFlights();
-  if (rootFrameTransition && (rootFrameTransition.scrollX !== window.scrollX || rootFrameTransition.scrollY !== window.scrollY)) clearRootFrameTransition();
-  if (sidebarEnterAnimation && (sidebarEnterAnimation.scrollX !== window.scrollX || sidebarEnterAnimation.scrollY !== window.scrollY)) clearSidebarEnter();
-  if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter();
+  if (navigationDebug.enabled() && (titleFlights.size || rootFrameTransition || sidebarEnterAnimation || spaceEnterBorder)) navigationDebug.log("scroll", {scrollX:window.scrollX,scrollY:window.scrollY,rootFrameAt:rootFrameTransition?{x:rootFrameTransition.scrollX,y:rootFrameTransition.scrollY}:undefined,cardEnterAt:spaceEnterBorder?{x:spaceEnterBorder.scrollX,y:spaceEnterBorder.scrollY}:undefined});
+  if (Array.from(titleFlights).some((flight) => flight.scrollX !== window.scrollX || flight.scrollY !== window.scrollY)) clearTitleFlights("scroll");
+  if (rootFrameTransition && (rootFrameTransition.scrollX !== window.scrollX || rootFrameTransition.scrollY !== window.scrollY)) clearRootFrameTransition("scroll");
+  if (sidebarEnterAnimation && (sidebarEnterAnimation.scrollX !== window.scrollX || sidebarEnterAnimation.scrollY !== window.scrollY)) clearSidebarEnter("scroll");
+  if (spaceEnterBorder && (spaceEnterBorder.scrollX !== window.scrollX || spaceEnterBorder.scrollY !== window.scrollY)) clearSpaceEnter("scroll");
   saveRouteState(currentPath);
 }, { passive: true });
 const indicatorResize = new ResizeObserver(() => {
@@ -957,11 +1013,12 @@ const indicatorResize = new ResizeObserver(() => {
 indicatorResize.observe(primaryNav);
 indicatorResize.observe(secondaryNav);
 window.addEventListener("resize", () => {
-  clearTitleFlights();
-  clearRootFrameTransition();
-  clearSidebarEnter();
-  clearSpaceEnter();
-  clearSpaceExit();
+  navigationDebug.log("resize", {width:window.innerWidth,height:window.innerHeight});
+  clearTitleFlights("resize");
+  clearRootFrameTransition("resize");
+  clearSidebarEnter("resize");
+  clearSpaceEnter("resize");
+  clearSpaceExit("resize");
   movePrimaryIndicator();
   moveSecondaryIndicator();
 });
@@ -1933,7 +1990,7 @@ async function refreshExtensions(): Promise<void> {
     for (const id of extensionPages.keys()) if (!data.extensions.some((item) => item.id === id && item.installed)) removeExtensionPages(id);
     for (const item of data.extensions) if (item.installed && !extensionPages.has(item.id)) registerExtensionPages(item);
     extensionsResolved = true;
-    if (!currentPath || (location.hash.slice(1).startsWith("/extensions/installed/") && currentPath !== location.hash.slice(1))) renderNavigation(currentPath ? "history" : "initial");
+    resumeResolvedExtensionNavigation();
     for (const item of data.extensions) {
       const status = extensionListStatuses.get(item.id); if (status) status.textContent = extensionStatus(item);
       const ui = extensionPages.get(item.id); if (!ui) continue;
@@ -1949,8 +2006,16 @@ async function refreshExtensions(): Promise<void> {
     extensionFeedback.textContent = error instanceof Error ? error.message : "无法读取扩展状态。";
     if (!Array.from(extensionList.querySelectorAll<HTMLAnchorElement>(".extension-card")).some((card) => card.hash.slice(1) === extensionPath(navigationTestStarId))) extensionList.append(buildNavigationTestCard());
     extensionsResolved = true;
-    if (!currentPath || (location.hash.slice(1).startsWith("/extensions/installed/") && currentPath !== location.hash.slice(1))) renderNavigation(currentPath ? "history" : "initial");
+    resumeResolvedExtensionNavigation();
   }
+}
+function resumeResolvedExtensionNavigation(): void {
+  const target=location.hash.slice(1);
+  if (currentPath && (!target.startsWith("/extensions/installed/") || currentPath === target)) return;
+  const origin=deferredNavigationOrigin(pendingNavigationOrigin,currentPath);
+  pendingNavigationOrigin=null;
+  navigationDebug.log("navigation-resumed", {from:currentPath,to:target,origin});
+  renderNavigation(origin);
 }
 function showExtensions(): void {
   if (extensionsLoaded) return;

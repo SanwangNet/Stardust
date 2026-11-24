@@ -1,4 +1,5 @@
 import { migrateHistoryProvenance, recordQQ } from "./history-provenance.js";
+import { ContextService, prepareQQContext, type WebContextHandle } from "./context-service.js";
 import { ContextAccessPolicy } from "./context-access-policy.js";
 import { resolveIdentity } from "./identity-resolver.js";
 import type { ChannelMessage } from "./channel.js";
@@ -10,13 +11,11 @@ import { projectConfigRoot } from "./env.js";
 import { buildConversationContext, type ConversationContextMessage } from "./conversation-context.js";
 import { ModelError } from "./model.js";
 import { GlobalContextService, migrateGlobalContext, migrateGlobalContextOutcome, migrateGlobalContextEvidence, WEB_CONTEXT_OWNER } from "./global-context.js";
-import { assembleContext } from "./context-assembler.js";
 import { searchHistory, type HistoryEvidence } from "./history-search.js";
 import type { HistoryToolModel, ModelActivity } from "./history-agent.js";
 import { logger } from "./logger.js";
 import { AgentCore, migrateAgentCore, WEB_CHANNEL_ID, WEB_SCOPE_ID, WEB_STARCORE_ID } from "./agent-core.js";
 import { migratePeople, migratePeopleManagement, migratePeopleMerge, PeopleRepository } from "./people.js";
-import { builtInWebContextFlow, runWebContextFlow } from "./web-context-flow.js";
 import type { ExecutableFlow } from "./executable-flow.js";
 
 export type Conversation = { id: string; title: string; source: string; starcoreId: string; channelId: string; scopeId: string; createdAt: string; updatedAt: string };
@@ -27,6 +26,8 @@ export interface ConversationModel {
   chatWithTools?: HistoryToolModel["chatWithTools"];
 }
 export type ConversationOptions = { contextFlow?: { enabled: boolean; definition?: ExecutableFlow } };
+export type WebSubmitExecute = (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>;
+export type WebSubmitOptions = { signal?: AbortSignal; flowDefinition?: ExecutableFlow; prepareSkills?: (context: ConversationContextMessage[], budgetBytes: number) => Promise<{ message?: ConversationContextMessage; assertAvailable: () => void }>; contextHandle?: WebContextHandle };
 
 /** Single-server conversation store. Request IDs are unique within a conversation. */
 export class ConversationService {
@@ -36,12 +37,14 @@ export class ConversationService {
   readonly globalContext: GlobalContextService;
   readonly agent: AgentCore;
   readonly people: PeopleRepository;
+  readonly context: ContextService;
   readonly databasePath: string;
 
   /** Read-only runtime configuration for the flow overview; no request data is exposed. */
   contextFlowConfiguration(): { enabled?: boolean; definition?: ExecutableFlow; historyToolSupported: boolean } {
     return { enabled: this.options.contextFlow?.enabled, definition: this.options.contextFlow?.definition && structuredClone(this.options.contextFlow.definition), historyToolSupported: typeof this.model.chatWithTools === "function" };
   }
+  webContextSettings() { return { flowEnabled:this.options.contextFlow?.enabled, flowDefinition:this.options.contextFlow?.definition, historyToolSupported:typeof this.model.chatWithTools === "function", budgetBytes:this.budgetBytes, recentMessageLimit:this.recentMessageLimit }; }
 
   constructor(private readonly model: ConversationModel, path = join(projectConfigRoot, "data", "conversations.sqlite"), private readonly budgetBytes = 48_000, private readonly recentMessageLimit = 50, private readonly options: ConversationOptions = {}) {
     this.databasePath = path;
@@ -64,10 +67,11 @@ export class ConversationService {
     if (version < 7) migratePeopleManagement(this.db);
     if (version < 8) migratePeopleMerge(this.db);
     if (version < 9) migrateHistoryProvenance(this.db);
-    this.db.prepare("UPDATE messages SET status = 'unknown' WHERE status = 'pending'").run();
+    this.db.prepare("UPDATE messages SET status = 'unknown' WHERE status = 'pending' AND conversation_id IN (SELECT id FROM conversations WHERE channel_id != 'qq-bot')").run();
     this.globalContext = new GlobalContextService(this.db, model.synthesizeGlobalContext ? { synthesizeGlobalContext: model.synthesizeGlobalContext.bind(model) } : undefined);
     this.agent = new AgentCore(this.db);
     this.people = new PeopleRepository(this.db);
+    this.context = new ContextService(this);
     } catch (error) { try { this.db.close(); } catch {} throw error; }
   }
 
@@ -92,7 +96,7 @@ export class ConversationService {
   private requestMessages(id: string, requestId: string): ConversationMessage[] {
     return this.db.prepare("SELECT sequence, id, conversation_id AS conversationId, role, content, created_at AS createdAt, status, request_id AS requestId FROM messages WHERE conversation_id = ? AND request_id = ? ORDER BY sequence ASC").all(id, requestId) as unknown as ConversationMessage[];
   }
-  private readRecentContext(id: string) {
+  readRecentContext(id: string) {
     return this.messages(id).filter((message) => message.status === "complete").map(({ role, content, sequence }) => ({ role, content, sequence }));
   }
   rename(id: string, title: string): Conversation {
@@ -112,7 +116,8 @@ export class ConversationService {
   getWeb(id: string): Conversation { const item = this.get(id); if (item.channelId !== WEB_CHANNEL_ID || item.scopeId !== WEB_SCOPE_ID) throw new Error("NOT_FOUND"); return item; }
   listWeb(): Conversation[] { return this.list().filter((item) => item.channelId === WEB_CHANNEL_ID && item.scopeId === WEB_SCOPE_ID); }
   /** Trusted Core ingress; this never exposes provenance to a model or public API. */
-  recordQQ(message: ChannelMessage, reply?: string): void { recordQQ(this.db, message, reply); }
+  recordQQ(message: ChannelMessage, reply?: string, status?: "pending" | "complete" | "failed" | "unknown"): void { recordQQ(this.db, message, reply, status); }
+  prepareQQContext(message: ChannelMessage) { return prepareQQContext(this.db,message); }
   /** Restricted to the caller's current conversation. Other dimensions require future policy. */
   historyProvenance(currentConversationId: string, requestedConversationId: string, after = 0, limit = 50) {
     const current = this.get(currentConversationId);
@@ -145,7 +150,7 @@ export class ConversationService {
   searchHistory(input: unknown, onResult?: (evidence: HistoryEvidence) => void) {
     return searchHistory(this.db, WEB_CONTEXT_OWNER, input, onResult);
   }
-  async submit(id: string, requestId: string, content: string, retry = false, execute?: (context: ConversationContextMessage[], activity: (activity: Omit<ModelActivity, "requestId">) => void, evidence: (item: HistoryEvidence) => void) => Promise<string>, options: { signal?: AbortSignal; flowDefinition?: ExecutableFlow; prepareSkills?: (context: ConversationContextMessage[], budgetBytes: number) => Promise<{ message?: ConversationContextMessage; assertAvailable: () => void }> } = {}): Promise<ConversationMessage[]> {
+  async submit(id: string, requestId: string, content: string, retry = false, execute?: WebSubmitExecute, options: WebSubmitOptions = {}): Promise<ConversationMessage[]> {
     const conversation = this.get(id);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) || typeof content !== "string" || !content.trim() || Buffer.byteLength(content, "utf8") > 32_000) throw new Error("INVALID_INPUT");
     const existing = this.requestMessages(id, requestId);
@@ -161,19 +166,18 @@ export class ConversationService {
     // The graph can await nodes, so reserve the conversation before the first await.
     this.running.add(id);
     try {
-      const useHistoryTool = conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID && Boolean(this.model.chatWithTools);
-      const graphEnabled = (this.options.contextFlow?.enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1") && conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID;
       let context: ConversationContextMessage[], selectedEntryIds: string[] = [];
-      if (graphEnabled) {
-        const assembled = await runWebContextFlow(options.flowDefinition ?? this.options.contextFlow?.definition ?? builtInWebContextFlow(), {
-          recent: () => this.readRecentContext(id), global: () => this.globalContext.entries(WEB_CONTEXT_OWNER),
-        }, { conversationId: id, current: content, instructions: useHistoryTool ? this.agent.instructions() : "", budgetBytes: this.budgetBytes, recentLimit: this.recentMessageLimit, useHistoryTool, signal: options.signal });
-        context = assembled.messages; selectedEntryIds = assembled.selectedEntryIds;
+      let webSnapshot: { persisted:boolean; boundary?:number } | undefined;
+      if (conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID) {
+        const handle=options.contextHandle ?? this.context.forWeb(id);
+        if (!this.context.ownsWebHandle(handle,id)) throw new Error("HISTORY_ACCESS_DENIED");
+        const prepared = handle.prepare(content, { signal: options.signal, flowDefinition: options.flowDefinition });
+        const snapshot = prepared instanceof Promise ? await prepared : prepared;
+        webSnapshot = snapshot;
+        context = snapshot.messages; selectedEntryIds = snapshot.selectedEntryIds;
       } else {
         const history = this.readRecentContext(id);
-        const assembled = useHistoryTool ? assembleContext(history, content, id, this.globalContext.entries(WEB_CONTEXT_OWNER), Math.min(this.budgetBytes, 36_000), this.recentMessageLimit, this.agent.instructions()) : undefined;
-        context = assembled?.messages ?? buildConversationContext(history.map(({ role, content: text }) => ({ role, content: text })), content, this.budgetBytes, [], this.recentMessageLimit);
-        selectedEntryIds = assembled?.selectedEntryIds ?? [];
+        context = buildConversationContext(history.map(({ role, content: text }) => ({ role, content: text })), content, this.budgetBytes, [], this.recentMessageLimit);
       }
       let assertSkills = () => {};
       if (options.prepareSkills && conversation.channelId === WEB_CHANNEL_ID && conversation.scopeId === WEB_SCOPE_ID) {
@@ -186,13 +190,15 @@ export class ConversationService {
       }
       for (const entryId of selectedEntryIds) logger.write("DEBUG", "context", "已选取全局上下文条目。", { requestId, code: entryId });
       const now = new Date().toISOString();
+      let currentSequence = existing[0]?.sequence;
       this.db.exec("BEGIN IMMEDIATE");
       try {
         if (retry) this.db.prepare("UPDATE messages SET status = 'pending' WHERE conversation_id = ? AND request_id = ? AND role = 'user'").run(id, requestId);
-        else this.db.prepare("INSERT INTO messages (id, conversation_id, role, content, created_at, status, request_id) VALUES (?, ?, 'user', ?, ?, 'pending', ?)").run(randomUUID(), id, content, now, requestId);
+        else currentSequence = Number(this.db.prepare("INSERT INTO messages (id, conversation_id, role, content, created_at, status, request_id) VALUES (?, ?, 'user', ?, ?, 'pending', ?)").run(randomUUID(), id, content, now, requestId).lastInsertRowid);
         this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, id);
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      if (webSnapshot) { webSnapshot.boundary=currentSequence; webSnapshot.persisted=true; }
       const evidenceEpoch = this.globalContext.epoch(WEB_CONTEXT_OWNER);
       const evidence = new Map<number, HistoryEvidence>();
       let reply: string;
@@ -230,6 +236,7 @@ export class ConversationService {
   close(): void {
     this.globalContext.stop();
     if (this.running.size) throw new Error("CONVERSATION_BUSY");
+    this.context.shutdown();
     this.db.close();
   }
 }

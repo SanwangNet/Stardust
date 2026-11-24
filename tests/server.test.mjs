@@ -46,7 +46,16 @@ test("WebUI 首页与静态脚本由同一进程提供", async () => {
   assert.doesNotMatch(page, /服务名称|setup-name/);
   const js = await fetch(`${origin}/main.js`);
   assert.equal(js.status, 200);
-  assert.match(await js.text(), /api\/health/);
+  const main = await js.text();
+  assert.match(main, /api\/health/);
+  const imports = [...main.matchAll(/\bimport\s+(?:[^;]*?\s+from\s+)?["']\.\/([^"']+\.js)["']/g)].map(match => match[1]);
+  assert.ok(imports.includes("navigation-transition.js"));
+  assert.ok(imports.includes("navigation-diagnostics.js"));
+  for (const module of imports) {
+    const response = await fetch(`${origin}/${module}`);
+    assert.equal(response.status, 200, `主脚本依赖 ${module} 必须可访问`);
+    assert.match(response.headers.get("content-type"), /javascript/);
+  }
   assert.match(page, /data-page="\/model\/flow"/);
   for (const module of ["flow-board.js", "flow-project-board.js", "flow-project.js", "flow-project-geometry.js", "flow-project-migration.js", "flow-project-repair.js", "flow-project-simplify.js", "flow-default-project.js"]) {
     const response = await fetch(`${origin}/${module}`);

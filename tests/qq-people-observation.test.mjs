@@ -63,14 +63,14 @@ test("real QQ ingress observes private and group senders in isolated scopes, ski
   assert.doesNotMatch(JSON.stringify(f.logs.read()), /same-mock-id|other-mock-id|mock-group-a|private text|mock-secret/);
 });
 
-test("filtered events and untrusted mention metadata never create records, including with QQ Input Flow", async t => {
+test("ordinary observed group events do not reply, while invalid events and untrusted mentions create no extra identities", async t => {
   const old = process.env.STARDUST_QQ_INPUT_FLOW; process.env.STARDUST_QQ_INPUT_FLOW = "1";
   t.after(() => { if (old === undefined) delete process.env.STARDUST_QQ_INPUT_FLOW; else process.env.STARDUST_QQ_INPUT_FLOW = old; });
   const f = await fixture(t);
   await f.bot.emit(message("group", "not-mentioned", "sender", "group", { rawEventType: "GROUP_MESSAGE_CREATE" }));
   await f.bot.emit(message("c2c", "bot", "bot", "target", { senderIsBot: true }));
   await f.bot.emit(message("group", "bad-target", "sender", "group", { replyTarget: { scope: "group", targetId: "other", msgId: "bad-target" } }));
-  await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(f.store.people.listPersons().length, 0);
+  await until(() => f.store.people.listPersons().length === 1); assert.equal(f.model.calls.length, 0); assert.equal(f.sent.length,0);
   await f.bot.emit(message("group", "allowed", "sender", "group", { mentions: [{ nickname: "只有名字" }, { member_openid: "untrusted-mention", username: "名字" }] }));
   const space = await until(() => f.store.people.listSpaces()[0]); await until(() => f.store.people.listSpaceMembers(space.id).length === 1);
   assert.equal(f.store.people.listPersons().length, 1); assert.equal(f.model.calls.length, 1);

@@ -29,6 +29,7 @@ export class ExtensionManager {
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
   private channelChat?: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>;
+  private channelContextObservation?: (message: ChannelMessage, signal: AbortSignal) => Promise<void>;
   private channelObserver?: (observation: ChannelObservation, signal: AbortSignal) => void;
   constructor(private readonly root = projectConfigRoot, private readonly model: Pick<ModelService, "chat"> = modelService, packages: ExtensionPackage[] = [], private readonly logs: LogService = logger, bindings: readonly SkillBinding[] = []) {
     if (!isAbsolute(root)) throw new Error("INVALID_ROOT");
@@ -261,6 +262,7 @@ export class ExtensionManager {
   }
   channelEnabled(id: string): boolean { const item = this.item(id); const entry = this.readInstalled()[id]; return item.manifest.type === "channel" && isInstalled(entry) && Boolean(entry?.enabled); }
   setChannelChat(handler: (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => Promise<ChannelResponse>): void { this.channelChat = handler; }
+  setChannelContextObservation(handler: (message: ChannelMessage, signal: AbortSignal) => Promise<void>): void { this.channelContextObservation = handler; }
   setChannelObserver(handler: (observation: ChannelObservation, signal: AbortSignal) => void): void { this.channelObserver = handler; }
   toolSignal(name: string): AbortSignal | undefined {
     const item = this.ownerOfTool(name);
@@ -439,6 +441,10 @@ export class ExtensionManager {
         } },
         log: (level, message, details) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) this.logs.write(level, id, message, details, item.manifest.fields.filter((field) => field.sensitive).map((field) => config[field.key] ?? "")); },
         reportError: (code) => { if (this.runtimes.get(id) === runtime && !controller.signal.aborted) runtime.error = code === "MODEL_FAILED" ? runtime.error ?? "模型请求失败，请检查模型配置和服务状态。" : "渠道发送失败，请检查平台权限和连接状态。"; },
+        ...(id === "qq-bot" && this.channelContextObservation ? { observeMessage: async (message:ChannelMessage, signal:AbortSignal) => {
+          if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
+          await this.channelContextObservation!({ ...message, identityAccountId:config.appId },AbortSignal.any([controller.signal,signal]));
+        } } : {}),
         message: async (message: ChannelMessage, signal: AbortSignal, deliver?: ChannelDeliver) => {
           if (controller.signal.aborted || signal.aborted || message.channelId !== id) throw new Error("STOPPED");
           runtime.error = undefined;

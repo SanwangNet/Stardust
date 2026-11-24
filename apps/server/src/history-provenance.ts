@@ -58,7 +58,7 @@ export function qqKeys(message: ChannelMessage) {
  return { conversationId: hash('qq',message.identityAccountId,message.conversationType,message.conversationId), eventKey: hash(message.conversationType,message.conversationId,message.messageId) };
 }
 /** Called only from Core after QQ channel admission. Idempotent, including after restart. */
-export function recordQQ(db: DatabaseSync, message: ChannelMessage, reply?: string): void {
+export function recordQQ(db: DatabaseSync, message: ChannelMessage, reply?: string, replyStatus: "pending" | "complete" | "failed" | "unknown" = "complete"): void {
  const keys = qqKeys(message), account = message.identityAccountId!, now = new Date().toISOString();
  const timestamp = Number.isFinite(Date.parse(message.timestamp)) ? new Date(Math.min(Date.parse(message.timestamp),Date.now())).toISOString() : now;
  const requestId = keys.eventKey;
@@ -81,10 +81,10 @@ export function recordQQ(db: DatabaseSync, message: ChannelMessage, reply?: stri
    const existing=db.prepare("SELECT content FROM messages WHERE conversation_id=? AND request_id=? AND role='assistant'").get(keys.conversationId,requestId);
    if (existing && existing.content !== reply) throw new Error('QQ_EVENT_CONFLICT');
    if (!existing) {
-    const mid=randomUUID(); db.prepare("INSERT INTO messages(id,conversation_id,role,content,created_at,status,request_id) VALUES(?,?,'assistant',?,?,'complete',?)").run(mid,keys.conversationId,reply,now,requestId);
+    const mid=randomUUID(); db.prepare("INSERT INTO messages(id,conversation_id,role,content,created_at,status,request_id) VALUES(?,?,'assistant',?,?,?,?)").run(mid,keys.conversationId,reply,now,replyStatus,requestId);
     db.prepare("UPDATE message_provenance SET channel_id='qq-bot',provider='qq',conversation_type=?,author_kind='agent',provenance_kind='trusted_channel',identity_state='not_applicable',space_state=?,account_key=?,space_key=?,observed_at=? WHERE message_id=?").run(message.conversationType,message.conversationType==='group'?'unknown':'not_applicable',account,message.conversationType==='group'?message.conversationId:null,now,mid);
     if (space) db.prepare("UPDATE message_provenance SET space_state='known',space_id=? WHERE message_id=?").run(space.id,mid);
-   }
+   } else db.prepare("UPDATE messages SET status=? WHERE conversation_id=? AND request_id=? AND role='assistant'").run(replyStatus,keys.conversationId,requestId);
   }
   db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(now,keys.conversationId); db.exec('COMMIT');
  } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; }

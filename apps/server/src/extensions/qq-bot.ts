@@ -52,10 +52,10 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
     let activeToolSend: Promise<unknown> | undefined;
     let connected = false;
     let pending = 0;
-    let queue: Promise<void> = Promise.resolve();
+    const queues = new Map<string, Promise<void>>();
     const sends = new Set<Promise<ChannelDeliveryResult>>();
     const platformSends = new Set<Promise<unknown>>();
-    let lastAccepted = 0;
+    let nextAccepted = 0;
     async function receive(message: QQBotInboundMessage): Promise<void> {
       // Keep the validated event stable while the queue and deferred delivery run.
       message = { ...message, ...(message.replyTarget && typeof message.replyTarget === "object" ? { replyTarget: { ...message.replyTarget } } : {}), ...(Array.isArray(message.mentions) ? { mentions: message.mentions.map(mention => mention && typeof mention === "object" ? { ...mention } : mention) } : {}) };
@@ -82,6 +82,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
       const getDiagnostic = () => diagnostic ??= makeDiagnostic();
       const logDiagnostic = () => host.log("DEBUG", "收到 QQ 消息事件。", getDiagnostic());
       const filtered = (reason: string): void => host.log("DEBUG", "QQ 消息已过滤。", { ...getDiagnostic(), reason });
+      const observeOnly = () => message.kind === "group" && getDiagnostic().mentionBranch === "no_self_mention";
       let now = 0, conversation = "", reserved = false;
       const digest = (content: string) => createHash("sha256").update(content.trim()).digest("hex");
       const filterMessage = (): boolean => {
@@ -92,7 +93,7 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           if (message.rawEventType !== "C2C_MESSAGE_CREATE") { filtered("private_unexpected_event_type"); return false; }
         } else if (message.kind === "group") {
           if (mentionBranch === "unsupported_group_event") { filtered("group_unsupported_event_type"); return false; }
-          if (mentionBranch === "no_self_mention") { filtered("group_no_self_mention"); return false; }
+          if (mentionBranch === "no_self_mention" && !host.observeMessage) { filtered("group_no_self_mention"); return false; }
           if (!hasGroupOpenid) { filtered("missing_group_openid"); return false; }
           if (message.replyTarget?.targetId !== message.groupOpenid) { filtered("group_reply_target_mismatch"); return false; }
         } else { filtered("unsupported_message_kind"); return false; }
@@ -158,15 +159,15 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
         sends.add(work); void work.finally(() => sends.delete(work)); return work;
       };
       const targetRef = randomUUID();
-      capabilityTargets.push({ id: targetRef, targetOpenid: message.replyTarget.targetId, messageId: message.messageId, scope: message.kind === "c2c" ? "private" : "group", receivedAt: new Date(now).toISOString(), replyExpiresAt: expiry === null ? null : new Date(expiry).toISOString() });
+      if (!observeOnly()) capabilityTargets.push({ id: targetRef, targetOpenid: message.replyTarget.targetId, messageId: message.messageId, scope: message.kind === "c2c" ? "private" : "group", receivedAt: new Date(now).toISOString(), replyExpiresAt: expiry === null ? null : new Date(expiry).toISOString() });
       if (capabilityTargets.length > 50) capabilityTargets.shift();
       host.log("INFO", "QQ 消息已接受。", getDiagnostic());
       const work = async (): Promise<void> => {
         try {
-          const wait = Math.max(0, 1000 - (Date.now() - lastAccepted));
+          const scheduledAt = Math.max(Date.now(), nextAccepted); nextAccepted = scheduledAt + 1000;
+          const wait = Math.max(0, scheduledAt - Date.now());
           if (wait) await delay(wait, undefined, { signal: controller.signal });
           if (stopped || Date.now() - now > 240_000) { filtered("expired_or_stopped"); return; }
-          lastAccepted = Date.now();
           // Only accepted SDK metadata is submitted; message text, raw events and mentions stay out.
           try {
             const at = new Date(Number.isFinite(messageTime) ? Math.min(messageTime, now) : now).toISOString();
@@ -181,6 +182,11 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
               membership: { ...(name ? { displayName: name } : {}), ...meta },
             } }, controller.signal);
           } catch { host.log("WARN", "人物观察提交失败。", { code: "OBSERVATION_FAILED" }); }
+          if (observeOnly()) {
+            try { await host.observeMessage?.({channelId:"qq-bot",eventId,messageId:message.messageId,senderId:message.senderId,conversationId:replyTarget.targetId,conversationType:"group",content:message.content.trim(),timestamp:message.timestamp},controller.signal); }
+            catch { host.log("WARN","QQ 普通群消息记录未完成。",{code:"CONTEXT_UNAVAILABLE"}); }
+            return;
+          }
           let reply: Awaited<ReturnType<typeof host.message>>;
           host.log("DEBUG", "QQ 消息开始调用模型。", { eventId, scope });
           try { reply = await host.message({ channelId: "qq-bot", eventId, messageId: message.messageId, senderId: message.senderId, conversationId: replyTarget.targetId, conversationType: message.kind === "c2c" ? "private" : "group", content: message.content.trim(), timestamp: message.timestamp, targetRef }, controller.signal, deliver); }
@@ -192,8 +198,9 @@ export function createQQBotExtension(factory: BotFactory = defaultFactory, diagn
           if (!stopped) host.reportError("MODEL_FAILED");
         } finally { pending--; }
       };
-      queue = queue.then(work, work);
-      await queue;
+      const previous = queues.get(conversation) ?? Promise.resolve();
+      const queued = previous.then(work, work); queues.set(conversation, queued);
+      try { await queued; } finally { if (queues.get(conversation) === queued) queues.delete(conversation); }
     }
     return {
       listMessageTargets() {

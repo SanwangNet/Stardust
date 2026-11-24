@@ -5,6 +5,10 @@ import type { ConversationContextMessage } from "./conversation-context.js";
 export type ContextCategory = "current_identity" | "other_space" | "history" | "manual_name" | "note" | "audit" | "identities" | "global_context";
 /** Same person is never itself an authorization to access another source. */
 export class ContextAccessPolicy {
+  /** The trusted local Web control plane retains its established Web-only search scope. */
+  evaluateWebHistory(request: { channelId?: string; scopeId?: string }): "allow" | "deny" {
+    return request.channelId === "web" && request.scopeId === "web:default" ? "allow" : "deny";
+  }
   /** This gate applies to the new internal history reader; legacy Web search retains its established owner scope. */
   evaluateHistory(request: { conversationId?: string; channelId?: string }, source: { conversationId?: string; channelId?: string }, scope: HistoryScope): "allow" | "deny" {
     return scope === "CURRENT_CONVERSATION" && !!request.conversationId && !!request.channelId && request.conversationId === source.conversationId && request.channelId === source.channelId ? "allow" : "deny";
