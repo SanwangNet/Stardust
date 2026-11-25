@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { access, mkdtemp, mkdir, writeFile, rm, cp, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
-import { createEnvLoader, projectConfigRoot } from "../apps/server/dist/env.js";
+import { createEnvLoader } from "../apps/server/dist/env.js";
 import { resolveListenConfig } from "../apps/server/dist/config.js";
 
 let root;
@@ -42,7 +42,6 @@ test("缺失扩展配置的读取不会创建目录或文件", async () => {
 });
 
 test("Core 配置从明确的根目录读取，默认值与进程变量优先级正确", async () => {
-  assert.equal(resolve(projectConfigRoot), resolve(fileURLToPath(new URL("..", import.meta.url))));
   assert.deepEqual(loader.loadCoreEnv(), {});
   assert.deepEqual(resolveListenConfig(loader.loadCoreEnv(), {}), { host: "127.0.0.1", port: 8347 });
   await writeFile(join(root, ".env"), 'STARDUST_HOST=127.0.0.2\nSTARDUST_PORT=9351\nCORE_VALUE="hello world"\n');
@@ -51,6 +50,29 @@ test("Core 配置从明确的根目录读取，默认值与进程变量优先级
   assert.deepEqual(resolveListenConfig(core, {}), { host: "127.0.0.2", port: 9351 });
   assert.deepEqual(resolveListenConfig(core, { STARDUST_PORT: "9352" }), { host: "127.0.0.2", port: 9352 });
   assert.throws(() => resolveListenConfig({ STARDUST_PORT: "secret-value" }, {}), (error) => !error.message.includes("secret-value"));
+});
+
+test("模块启动时分别解析默认和显式 Storage Root", async () => {
+  const storage = join(root, "explicit-storage");
+  await mkdir(storage);
+  const moduleUrl = new URL("../apps/server/dist/env.js", import.meta.url).href;
+  const code = `import(${JSON.stringify(moduleUrl)}).then(m=>console.log(JSON.stringify({projectConfigRoot:m.projectConfigRoot,...m.runtimePaths})))`;
+  const env = { ...process.env }; delete env.STARDUST_STORAGE_ROOT;
+  const run = vars => {
+    const result = spawnSync(process.execPath, ["-e", code], { env: vars, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
+  };
+  const app = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const defaults = run(env);
+  assert.equal(resolve(defaults.applicationRoot), app);
+  assert.equal(resolve(defaults.storageRoot), app);
+  assert.equal(resolve(defaults.projectConfigRoot), app);
+  const explicit = run({ ...env, STARDUST_STORAGE_ROOT: storage });
+  assert.equal(resolve(explicit.applicationRoot), app);
+  assert.equal(resolve(explicit.storageRoot), resolve(storage));
+  assert.equal(resolve(explicit.projectConfigRoot), resolve(storage));
+  assert.equal(resolve(explicit.configPath), join(resolve(storage), "config.toml"));
+  assert.equal(resolve(explicit.rootEnvPath), join(resolve(storage), ".env"));
 });
 
 test("扩展配置隔离，不修改进程环境；缺失返回未配置", async () => {
@@ -98,6 +120,7 @@ test("从其他工作目录启动时使用项目根 .env，缺失扩展配置不
   const env = { ...process.env };
   delete env.STARDUST_HOST;
   delete env.STARDUST_PORT;
+  delete env.STARDUST_STORAGE_ROOT;
   const child = spawn(process.execPath, [join(project, "apps", "server", "dist", "main.js")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", (data) => { output += data; });

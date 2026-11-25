@@ -10,17 +10,21 @@ import { createConfigStore } from "../apps/server/dist/config.js";
 import { SetupService } from "../apps/server/dist/setup.js";
 import { runSetupWizard } from "../apps/server/dist/setup-cli.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
+import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
+import { webChatExtension } from "../apps/server/dist/extensions/web-chat.js";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "stardust-flow-"));
   const setup = new SetupService(createConfigStore(root));
-  const server = createStardustServer({ setupService: setup });
+  const extensions = new ExtensionManager(root, undefined, [webChatExtension]);
+  const server = createStardustServer({ setupService: setup, extensionManager: extensions });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const origin = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((done, fail) => server.close((error) => error ? fail(error) : done()));
+    await extensions.shutdown();
     await rm(root, { recursive: true, force: true });
   });
   return { root, setup, origin };

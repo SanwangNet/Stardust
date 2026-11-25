@@ -5,11 +5,13 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {prepareCandidate as guardedPrepareCandidate,buildSystemdWorker,runCommand} from '../scripts/updater/prepare.mjs';
+import {recordWorkerEvent} from '../scripts/updater/diagnostics.mjs';
 
 // Exercise the private legacy implementation in an isolated test module. It is not an
 // exported production entry point and never invokes real npm or a remote repository.
 const legacySource=readFileSync(new URL('../scripts/updater/prepare-core.mjs',import.meta.url),'utf8')
  .replace("from './check.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/check.mjs',import.meta.url).href)}`)
+ .replace("from './diagnostics.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/diagnostics.mjs',import.meta.url).href)}`)
  + '\nexport { prepareCandidateCore as fixturePrepareCandidate, buildInStaging as fixtureBuildInStaging };\n';
 const {fixturePrepareCandidate:prepareCandidate,fixtureBuildInStaging:buildInStaging}=await import('data:text/javascript;base64,'+Buffer.from(legacySource).toString('base64'));
 
@@ -31,6 +33,7 @@ function adapter(f,{fail,wrongHead=false,missing=false}={}){const calls=[];retur
  return args[0]==='--version'?'11.0.0':'';}};}
 
 test('shared build steps retain a staged result without publishing a release',async t=>{const f=fixture(t),a=adapter(f),tmp=join(f.root,'staging');mkdirSync(tmp);const result=await buildInStaging({tmp,target:f.sha,branch:'main',timeout:900000,metadataStatus:'staged'},a);assert.equal(result.metadata.status,'staged');assert.equal(result.metadata.sha,f.sha);assert.equal(existsSync(join(f.deploy,'releases',f.sha)),false);assert.equal(existsSync(join(tmp,'source','.stardust-candidate.json')),true);assert.equal(a.calls.filter(x=>x.args[0]==='ci').length,1);});
+test('a real failing test command creates a task-local diagnostic and no candidate',async t=>{const f=fixture(t),a=adapter(f),tmp=join(f.root,'staging');mkdirSync(tmp);const previous=a.run;a.run=async(command,args,options)=>args.includes('--test')?runCommand(process.execPath,['-e',"console.error('fixture test failed');process.exit(9)"],options):previous(command,args,options);a.log=e=>recordWorkerEvent(tmp,e);await assert.rejects(buildInStaging({tmp,target:f.sha,branch:'main',timeout:10000,metadataStatus:'staged'},a),/test:FAILED/);const record=JSON.parse(readFileSync(join(tmp,'failure.json'),'utf8'));assert.equal(record.stage,'TEST');assert.equal(record.exitCode,9);assert.match(record.stderr,/fixture test failed/);assert.equal(existsSync(join(f.deploy,'releases',f.sha)),false);});
 
 test('real Git checkout pins the selected SHA, publishes only complete artifacts and reuses candidate',async t=>{const f=fixture(t),a=adapter(f);process.env.STARDUST_MODEL_API_KEY='must-not-leak';t.after(()=>delete process.env.STARDUST_MODEL_API_KEY);
  const result=await prepareCandidate({root:f.deploy},a);assert.equal(result.sha,f.sha);assert.equal(result.deployed,false);assert.equal(git(result.path,'rev-parse','HEAD'),f.sha);

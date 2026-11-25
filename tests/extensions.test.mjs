@@ -10,12 +10,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { createConfigStore } from "../apps/server/dist/config.js";
 import { createSecretStore } from "../apps/server/dist/model-secret.js";
-import { ModelService } from "../apps/server/dist/model.js";
+import { ModelService, modelService } from "../apps/server/dist/model.js";
 import { createEnvLoader } from "../apps/server/dist/env.js";
 import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { createQQBotExtension } from "../apps/server/dist/extensions/qq-bot.js";
 import { SetupService } from "../apps/server/dist/setup.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
+import { ConversationService } from "../apps/server/dist/conversation.js";
 import { LogService } from "../apps/server/dist/logger.js";
 import { dispatchEvent } from "@tencent-connect/qqbot-nodejs/protocol";
 
@@ -58,8 +59,10 @@ async function fixture(t, diagnosticFetch) {
   const extension = createQQBotExtension(async () => { const bot = mockBot(); bots.push(bot); return bot; }, diagnosticFetch);
   const logs = new LogService(100, () => {});
   const manager = new ExtensionManager(root, model, [extension], logs);
-  t.after(async () => { manager.shutdown(); await rm(root, { recursive: true, force: true }); });
-  return { root, model, manager, extension, bots, logs };
+  const servers = [];
+  const createServer = setup => { const conversations = new ConversationService(modelService, join(root, `http-${randomUUID()}.sqlite`)); const server = createStardustServer({ setupService: setup, extensionManager: manager, conversationService: conversations }); servers.push(server); return server; };
+  t.after(async () => { for (const server of servers) if (server.listening) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } await manager.shutdown(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+  return { root, model, manager, extension, bots, logs, createServer };
 }
 async function waitFor(predicate) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
@@ -262,9 +265,9 @@ test("disable waits for an already-started platform send", async (t) => {
 });
 
 test("extension HTTP management is initialization-gated, origin-checked and does not return secrets", async (t) => {
-  const { root, manager, bots } = await fixture(t);
+  const { root, manager, bots, createServer } = await fixture(t);
   const setup = new SetupService(createConfigStore(root));
-  const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  const server = createServer(setup);
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -305,9 +308,9 @@ test("capability targets contain only accepted real events and never expose iden
 });
 
 test("capability target API is initialization gated and has no send operation", async (t) => {
-  const { root, manager, model, bots } = await fixture(t);
+  const { root, manager, model, bots, createServer } = await fixture(t);
   const setup = new SetupService(createConfigStore(root));
-  const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  const server = createServer(setup);
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const url = `http://127.0.0.1:${server.address().port}/api/v1/extensions/qq-bot/capability-targets`;
@@ -588,14 +591,14 @@ test("local Markdown image upload failure stops before message send and exposes 
 });
 
 test("capability API accepts only two validated PNG parts for local Markdown uploads", async (t) => {
-  const requests = []; const { root, manager, model, bots } = await fixture(t, async (url, init) => {
+  const requests = []; const { root, manager, model, bots, createServer } = await fixture(t, async (url, init) => {
     const parsed = new URL(url); requests.push({ url, method: init.method });
     if (parsed.pathname === "/v2/media-images/prepare") return Response.json({ upload_id: `upload-${requests.length}`, presigned_url: "https://stardust.cos.ap-guangzhou.myqcloud.com/upload?sig=hidden" });
     if (init.method === "PUT") return new Response(null, { status: 200, headers: { ETag: `"${createHash("md5").update(init.body).digest("hex")}"` } });
     if (parsed.pathname === "/v2/media-images/complete") return Response.json({ image_id: `image-${requests.length}`, url: `qqbot-media://image/v1/private-token-${requests.length}` });
     return Response.json({ id: "local-message" }, { status: 201 });
   });
-  const setup = new SetupService(createConfigStore(root)); const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  const setup = new SetupService(createConfigStore(root)); const server = createServer(setup);
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const base = `http://127.0.0.1:${server.address().port}/api/v1/extensions/qq-bot`;
@@ -791,9 +794,9 @@ test("manual QQ platform rejections, network failures and expiration do not retr
 test("capability HTTP execution enforces origin, validated inputs, enabled state and request idempotency", async (t) => {
   let calls = 0;
   const requests = [];
-  const { root, manager, model, bots } = await fixture(t, async (url, init) => { calls++; requests.push({ url, body: JSON.parse(init.body) }); return Response.json({ id: "sent-by-platform" }, { status: 201 }); });
+  const { root, manager, model, bots, createServer } = await fixture(t, async (url, init) => { calls++; requests.push({ url, body: JSON.parse(init.body) }); return Response.json({ id: "sent-by-platform" }, { status: 201 }); });
   const setup = new SetupService(createConfigStore(root));
-  const server = createStardustServer({ setupService: setup, extensionManager: manager });
+  const server = createServer(setup);
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(async () => { if (server.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } });
   const base = `http://127.0.0.1:${server.address().port}/api/v1/extensions/qq-bot`;

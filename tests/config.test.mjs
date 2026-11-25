@@ -147,6 +147,7 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
   const env = { ...process.env };
   delete env.STARDUST_HOST;
   delete env.STARDUST_PORT;
+  delete env.STARDUST_STORAGE_ROOT;
   const firstPort = await availablePort();
   await startAndCheck(firstPort, { ...env, STARDUST_PORT: String(firstPort) });
   await assert.rejects(access(join(project, "config.toml")), { code: "ENOENT" });

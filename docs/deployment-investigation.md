@@ -51,7 +51,7 @@ node scripts/updater/prepare.mjs /已确认的部署根目录 main 40位完整SH
 
 候选版本如果修改了 `npm test` 脚本，准备流程会拒绝继续，等待更新器适配，避免漏跑新增检查。
 
-构建子进程只获得有限的系统环境、独立 HOME 和临时 `STARDUST_STORAGE_ROOT`，不会继承生产密钥或指向生产 shared；候选目录也不允许包含根目录的配置、env 或 data。环境清理不是沙箱：npm 生命周期脚本和仓库代码仍有构建用户的操作系统权限，因此必须使用非 root 用户，并确保该用户不能读取生产秘密。子进程输出不写入日志，阶段结果和超时会报告；每阶段默认超时 15 分钟。
+构建子进程只获得有限的系统环境、独立 HOME 和临时 `STARDUST_STORAGE_ROOT`，不会继承生产密钥或指向生产 shared；候选目录也不允许包含根目录的配置、env 或 data。环境清理不是沙箱：npm 生命周期脚本和仓库代码仍有构建用户的操作系统权限，因此必须使用非 root 用户，并确保该用户不能读取生产秘密。命令失败时的有界任务诊断见下文；每阶段默认超时 15 分钟。
 
 全部成功后在同一文件系统发布 `releases/<SHA>`，写入 `.stardust-candidate.json`，记录来源、分支、SHA、时间、版本、阶段和产物；它仅表示已准备，不表示已部署。已存在目录会检查元数据、Git HEAD、源码状态及必要文件；未知或损坏目录拒绝覆盖。失败只清理本次创建的临时目录，不自动删除历史版本。每个 SHA 使用独立准备占位目录阻止并发；进程被强制终止可能留下 `.staging/<SHA>.lock`，管理员应先确认没有更新进程再人工处理。该占位不替代 U1-C 的部署锁或崩溃恢复。Linux 发布使用 GNU mv 的 no-clobber；其他平台没有经过生产验收。
 
@@ -75,7 +75,7 @@ node scripts/updater/prepare.mjs /已确认的部署根目录 main 40位完整SH
 2. 相同服务属性下，运行 `setsid /bin/sleep 5 & exit 0`：主进程成功退出后，服务约 5.029 秒才成功结束，实测等待约 5.063 秒。
 3. 设置 `RuntimeMaxSec=5s`、`TimeoutStopSec=2s`、`SendSIGKILL=yes`，运行 `setsid /bin/sleep 120 & exit 0`：服务结果为 `timeout`，运行约 5.210 秒，实测等待约 5.243 秒；主进程退出码仍为 0。
 
-这些由用户提供的结果证明目标环境具备所测的基础能力，不证明 Updater 的锁竞争、任务关联、cgroup 排空、进程遗留保护或候选发布已通过验收。特别是测试三说明以后必须核验 systemd 的完整服务结果，而不能以 Worker 主进程退出码为成功依据。本仓库尚未在该环境运行真实 Stardust 候选构建。
+这些由用户提供的结果证明目标环境具备所测的基础能力，不证明 Updater 的锁竞争、任务关联、cgroup 排空、进程遗留保护或候选发布已通过验收。特别是测试三说明以后必须核验 systemd 的完整服务结果，而不能以 Worker 主进程退出码为成功依据。后续首次真实 Worker 构建的结果见下文，尚未通过。
 
 预检只做环境调查或独立的监督探测。Coordinator 现已接入 systemd Build Worker；公开的 `prepareCandidate()` 仍直接拒绝执行，不能绕过监督限制。真实 Worker 复用 Git、npm 和验证步骤，只构建 staging，不运行旧的发布代码；Windows 内部测试的 npm 和远程仓库仍使用适配器。
 
@@ -112,7 +112,11 @@ node --test tests/updater-systemd-linux.test.mjs
 
 以下是供管理员在独立测试根目录执行的验收命令，不连接或修改未来生产部署。真实 Worker 构建尚未通过 Linux 验收；不要根据 Windows 测试推断真实构建已通过。Coordinator 必须以 root 运行以管理系统 unit，构建 unit 使用独立、无登录、非 root 构建用户；Core 测试用户也须为不同的非 root 用户。构建用户不得具有 sudo、systemd 管理或生产 `shared` 访问权限，且启动前不得已有该 UID 的其他进程。环境检查不能替代管理员核查全部 ACL、账号及宿主策略。
 
-用户随后在 Debian 13.6 LXC、Node.js v24.22.1 上报告：主动预检为 `passed`，观察到脱离进程组的后代且 cgroup 排空，Worker UID 为 997，构建用户与 Core 用户不同；独立预检返回 24，符合契约。Linux 专项测试为 3 通过、1 失败、1 跳过：只读预检、强杀后内核锁释放和 systemd 后代监督通过；直接 prepare CLI 参与锁竞争的测试因 ESM 循环依赖中的顶层 await 未完成而退出 13，未达到预期的 `LOCK_BUSY`、退出码 11。现已将共享准备逻辑与 CLI 入口分离，保留该 Linux 测试及退出码断言；此修复和真实 Worker 构建仍须在 Debian 上复验，不构成生产验收通过。
+用户随后在 Debian 13.6 LXC、Node.js v24.22.1 上报告：主动预检为 `passed`，观察到脱离进程组的后代且 cgroup 排空，Worker UID 为 997，构建用户与 Core 用户不同；独立预检返回 24，符合契约。该轮 Linux 专项测试为 3 通过、1 失败、1 跳过：只读预检、强杀后内核锁释放和 systemd 后代监督通过；直接 prepare CLI 参与锁竞争的测试因 ESM 循环依赖中的顶层 await 未完成而退出 13，未达到预期的 `LOCK_BUSY`、退出码 11。共享准备逻辑与 CLI 入口随后已分离，并保留该 Linux 测试及退出码断言；用户报告的后续复验结果见下文。
+
+用户进一步报告：在 commit `b6b934f7416cffa0d971671e45c7a2b2246c02ab` 上，ESM 修复已在 Debian 复验，Linux 专项测试 4 通过、1 个 Windows 专属测试跳过、0 失败；真实 flock、直接 prepare CLI 互斥、强杀后锁释放和脱离进程组后代监督通过。首次真实受监督构建执行到测试阶段后以 `PREPARE_FAILED`（21）、`TEST`、`UNIT_FAILED` 结束；systemd `Result=exit-code`，主进程状态 1，cgroup 为空。约耗时 178 秒，内存峰值约 408.2 MiB；锁释放、退避持久化，未切换 current 或发布候选。
+
+用户在原 staging 以相同非 root 用户及近似隔离条件复跑测试，报告 390 项中 385 通过、3 失败、2 跳过，约 111.4 秒，内存峰值约 295.4 MiB、Swap 为 0。其中 `env.test.mjs` 的默认根目录断言与继承的 `STARDUST_STORAGE_ROOT` 直接冲突；另外两个临时应用启动测试也继承了该路径，其启动超时和提前退出是否完全由此导致，仍需修复后在 Debian 复验。测试现显式隔离临时应用的存储环境，并在独立进程验证默认和显式路径；初始化与扩展 HTTP 测试也各自使用临时扩展数据及会话数据库，避免多个夹具写入共同的默认根。没有改变 Worker 的临时 Storage Root 或 Core 路径契约。此次修复尚未经过 Debian 真实构建复验。
 
 Coordinator 首先检查 root 拥有且仅 root 可读写的 `updater/config.json`、root 拥有且不可由组或其他用户修改的独立 updater 代码路径及系统可执行文件，然后运行主动 systemd 探测。启动前先保存状态和 `updater/intent.json`，后者记录任务 ID、目标 SHA、由任务派生的 unit、boot ID、staging 相对标识和随后取得的 invocation ID。Worker 的 unit 请求 `Type=exec`、`ExitType=cgroup`、`KillMode=control-group`、`RuntimeMaxSec=5400`、`TimeoutStopSec=10`、`SendSIGKILL=yes`、`Delegate=no`、`Restart=no`、`NoNewPrivileges=yes`、`ProtectControlGroups=yes`、`ProtectHome=yes`、`PrivateTmp=yes`、空能力集，对 `releases` 设为只读并屏蔽 systemd 管理 socket、用户运行目录和已知 shared。Worker 还检查自己的实际 cgroup。根目录应位于 `/srv` 或 `/opt` 等不会被 `PrivateTmp` 或 `ProtectHome` 隐藏的真实目录。
 
@@ -165,6 +169,18 @@ systemctl show "$UNIT" -p Id -p InvocationID -p ActiveState -p SubState -p Resul
 journalctl --no-pager -u "$UNIT" -n 100
 cat /proc/sys/kernel/random/boot_id
 ```
+
+Worker 捕获到命令失败时，会尽力在 `build-work/<任务ID>/failure.json` 写入单个诊断文件，包含阶段、失败原因、退出码或信号及标准输出和标准错误尾部。每个流最多保留最后 16 KiB 的原始输入并输出末尾 4096 个字符，超过时标记 `truncated`；另外有最多 2048 个字符的失败标题、断言或测试摘要行，避免长堆栈挤掉这些线索。整个任务只有一个该诊断文件，最大 64 KiB。默认不向 journal 输出原始子进程内容，Coordinator 不读取该文件，也不会把其内容写入可信状态。标记为密钥、令牌、密码的常见字段、认证头、部分 URL 凭据及敏感环境变量值会尽力遮盖，但不能保证识别所有秘密；对外分享前仍须人工检查。
+
+确认该任务归属后，可用构建用户读取固定路径，避免以高权限跟随不可信链接。下例校验任务 ID、文件归属、类型、链接数和长度，使用 `O_NOFOLLOW`，并将 JSON 重新编码后输出；`TEST_ROOT` 和 `BUILD_USER` 须仍为上面的测试变量：
+
+```sh
+TASK_ID="$(node -p "JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')).taskId" "$TEST_ROOT/updater/intent.json")"
+printf '%s\n' "$TASK_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || { echo '任务 ID 无效'; exit 1; }
+runuser -u "$BUILD_USER" -- node -e 'const fs=require("node:fs");const f=fs.openSync(process.argv[1],fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);try{const s=fs.fstatSync(f);if(!s.isFile()||s.uid!==process.getuid()||s.nlink!==1||s.size>65536)throw Error("unsafe diagnostic");const b=Buffer.alloc(65537);const n=fs.readSync(f,b,0,b.length,0);if(n>65536)throw Error("diagnostic too large");console.log(JSON.stringify(JSON.parse(b.subarray(0,n).toString("utf8")),null,2).replace(/[\u202a-\u202e\u2066-\u2069]/g,""))}finally{fs.closeSync(f)}' "$TEST_ROOT/build-work/$TASK_ID/failure.json"
+```
+
+诊断为不可信的构建用户输出，只供排查，不作为候选成功依据。该文件在命令错误被 Worker 捕获后生成；如 Worker 被 SIGKILL、OOM 直接终止、日志路径遭占用或发生写入错误，文件可能不存在，此时仍需查看 unit 状态及 journal。旧版本 Worker 的历史 staging 不会自动补出诊断文件。
 
 清理前，管理员须将 intent 中的 boot ID、invocation ID 和派生的 unit 身份与 `systemctl show` 对照，确认测试 unit 已结束且其 cgroup 已排空或销毁，并确认没有遗留写入者。对于身份不明或仍在运行的任务，保留目录，不要照搬清理命令。确认后才停止该**已核实的测试 unit**并移除该次创建的测试目录和可信代码副本；如有失败的 probe，也要先按其报告的随机 unit 和目录核对。不要删除或覆盖未知目录，也不要删除已有账号。以下命令依赖上述核验，并要求原 shell 中的变量仍指向本次创建的路径：
 
