@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { buildSystemdWorker } from './prepare.mjs';
+import { buildSystemdWorker } from './prepare-core.mjs';
 
 const [root,taskId,sha,branch,unit,timeoutText,...extra]=process.argv.slice(2);
 try {

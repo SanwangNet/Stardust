@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildUnitName, assessBuildEvidence } from './systemd-evidence.mjs';
 import { preflight } from './preflight.mjs';
-import { inspectStagedArtifacts } from './prepare.mjs';
+import { inspectStagedArtifacts } from './prepare-core.mjs';
 import { REPOSITORY } from './check.mjs';
 
 const exec=promisify(execFile), pathEnv='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -43,12 +43,12 @@ export async function checkBuildEnvironment(root,dir) {
     const config=JSON.parse(await readSmall(configPath,0));if(!config||Object.keys(config).sort().join(',')!=='buildUser,coreUser'||!userPattern.test(config.buildUser??'')||!userPattern.test(config.coreUser??''))throw Error();
     const builder=await account(config.buildUser),core=await account(config.coreUser);if(!builder.uid||!core.uid||builder.uid===core.uid||!/(?:\/nologin|\/false)$/.test(builder.shell))throw Error();
     const codeDir=dirname(fileURLToPath(import.meta.url));if(!/^\/[a-zA-Z0-9_./-]+$/.test(codeDir)||!/^\/[a-zA-Z0-9_./-]+$/.test(await realpath(process.execPath)))throw Error();await trustedPath(codeDir);await trustedPath(await realpath(process.execPath));
-    for(const name of ['build-worker.mjs','prepare.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs'])await trustedPath(join(codeDir,name));
+    for(const name of ['build-worker.mjs','prepare.mjs','prepare-core.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs'])await trustedPath(join(codeDir,name));
     const tools={};for(const name of ['git','npm','systemctl','systemd-run','flock','runuser','node'])tools[name]=await executable(name);
     if(tools.node!==(await realpath(process.execPath)))throw Error();
     for(const name of ['node','git','npm'])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',tools[name]]);
     for(const path of [root,codeDir])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',path]);
-    for(const path of [join(codeDir,'build-worker.mjs'),join(codeDir,'prepare.mjs'),join(codeDir,'check.mjs')])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-r',path]);
+    for(const path of [join(codeDir,'build-worker.mjs'),join(codeDir,'prepare-core.mjs'),join(codeDir,'check.mjs')])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-r',path]);
     const base=join(root,'build-work');try{await mkdir(base,{mode:0o711});}catch(e){if(e.code!=='EEXIST')throw e;}const baseStat=await lstat(base);if(!baseStat.isDirectory()||baseStat.isSymbolicLink()||baseStat.uid!==0||(baseStat.mode&0o022)!==0||(await realpath(base))!==base)throw Error();
     await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',base]);
     const releases=join(root,'releases');try{const st=await lstat(releases);if(!st.isDirectory()||st.isSymbolicLink()||st.uid!==0||(st.mode&0o022)!==0||(await realpath(releases))!==releases)throw Error();}catch(e){if(e.code!=='ENOENT')throw e;}

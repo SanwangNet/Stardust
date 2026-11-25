@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkRemote } from './check.mjs';
-import { prepareCandidate } from './prepare.mjs';
+import { prepareCandidate } from './prepare-core.mjs';
 import { acquireLock } from './lock.mjs';
 import { updaterDirectory, readState, writeState } from './state.mjs';
 import { checkBuildEnvironment, runSystemdBuild } from './systemd-build.mjs';

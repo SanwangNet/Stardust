@@ -8,7 +8,7 @@ import {prepareCandidate as guardedPrepareCandidate,buildSystemdWorker,runComman
 
 // Exercise the private legacy implementation in an isolated test module. It is not an
 // exported production entry point and never invokes real npm or a remote repository.
-const legacySource=readFileSync(new URL('../scripts/updater/prepare.mjs',import.meta.url),'utf8')
+const legacySource=readFileSync(new URL('../scripts/updater/prepare-core.mjs',import.meta.url),'utf8')
  .replace("from './check.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/check.mjs',import.meta.url).href)}`)
  + '\nexport { prepareCandidateCore as fixturePrepareCandidate, buildInStaging as fixtureBuildInStaging };\n';
 const {fixturePrepareCandidate:prepareCandidate,fixtureBuildInStaging:buildInStaging}=await import('data:text/javascript;base64,'+Buffer.from(legacySource).toString('base64'));

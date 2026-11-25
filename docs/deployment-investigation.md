@@ -59,7 +59,7 @@ node scripts/updater/prepare.mjs /已确认的部署根目录 main 40位完整SH
 
 本节描述尚未通过生产验收的实现。统一入口在受信任配置、权限检查和主动监督探测均通过时，通过 systemd 启动真实非 root 构建；条件不足返回 `SUPERVISION_UNAVAILABLE`（退出码 24）。`prepare.mjs` CLI 转入同一入口。普通进程组不能证明所有 npm 后代进程已经退出，不能以锁释放或父进程退出作为清理、复用目录的证据。不要启用 timer，也不要在生产环境使用该实验性实现。
 
-`node scripts/updater/status.mjs /已确认的部署根目录` 输出 JSON，并只读观察状态、锁、`current` 和运行版本；运行版本目前始终为 `unknown`。`node scripts/updater/update.mjs /已确认的部署根目录 main` 是实验性统一入口，额外参数 `--force` 只跳过退避，不能跳过锁或安全检查。执行入口要求 Linux `flock`，Windows 没有生产锁实现。部署根和 `updater` 必须是真实目录，Linux 下后者由协调用户持有且不允许组及其他用户访问；锁文件必须是该用户持有的私有普通文件，锁文件存在不表示锁被持有。锁作用域为单个部署根，更新器尝试以非阻塞方式取得锁，正常释放时不删除锁文件。其实际 Linux 锁行为尚未在目标环境验证。
+`node scripts/updater/status.mjs /已确认的部署根目录` 输出 JSON，并只读观察状态、锁、`current` 和运行版本；运行版本目前始终为 `unknown`。`node scripts/updater/update.mjs /已确认的部署根目录 main` 是实验性统一入口，额外参数 `--force` 只跳过退避，不能跳过锁或安全检查。执行入口要求 Linux `flock`，Windows 没有生产锁实现。部署根和 `updater` 必须是真实目录，Linux 下后者由协调用户持有且不允许组及其他用户访问；锁文件必须是该用户持有的私有普通文件，锁文件存在不表示锁被持有。锁作用域为单个部署根，更新器尝试以非阻塞方式取得锁，正常释放时不删除锁文件。目标环境已验证强杀后锁释放，直接 prepare CLI 遇到锁竞争时的行为仍待修复后复验。
 
 状态位于 `updater/state.json`，版本为 1，包含任务 ID、阶段、触发方式、时间、远程和固定目标 SHA、已准备 SHA、失败信息以及分别针对远程检查和目标 SHA 的退避。`current` 是独立只读观察，不能据此判断生产进程版本。状态文件先写同目录私有临时文件并同步，再原子替换，Linux 再同步目录；内容损坏或版本未知不会自动重置。状态为 `CHECKING`、`PREPARING`、`VERIFYING` 时再次取得锁会记录 `INTERRUPTED` 并阻断后续任务，不自动删除临时目录、占位或恢复成功。管理员必须先确认所有原任务及后代已停止，再检查相关目录归属；当前没有自动解除中断状态的管理命令，不应手工随意删除文件。
 
@@ -110,7 +110,9 @@ node --test tests/updater-systemd-linux.test.mjs
 
 ## U1-C-Fix-2：隔离 Debian 验收
 
-以下是供管理员在独立测试根目录执行的验收命令，不连接或修改未来生产部署。当前实现尚未在 Linux 运行过；不要根据 Windows 测试推断真实构建已通过。Coordinator 必须以 root 运行以管理系统 unit，构建 unit 使用独立、无登录、非 root 构建用户；Core 测试用户也须为不同的非 root 用户。构建用户不得具有 sudo、systemd 管理或生产 `shared` 访问权限，且启动前不得已有该 UID 的其他进程。环境检查不能替代管理员核查全部 ACL、账号及宿主策略。
+以下是供管理员在独立测试根目录执行的验收命令，不连接或修改未来生产部署。真实 Worker 构建尚未通过 Linux 验收；不要根据 Windows 测试推断真实构建已通过。Coordinator 必须以 root 运行以管理系统 unit，构建 unit 使用独立、无登录、非 root 构建用户；Core 测试用户也须为不同的非 root 用户。构建用户不得具有 sudo、systemd 管理或生产 `shared` 访问权限，且启动前不得已有该 UID 的其他进程。环境检查不能替代管理员核查全部 ACL、账号及宿主策略。
+
+用户随后在 Debian 13.6 LXC、Node.js v24.22.1 上报告：主动预检为 `passed`，观察到脱离进程组的后代且 cgroup 排空，Worker UID 为 997，构建用户与 Core 用户不同；独立预检返回 24，符合契约。Linux 专项测试为 3 通过、1 失败、1 跳过：只读预检、强杀后内核锁释放和 systemd 后代监督通过；直接 prepare CLI 参与锁竞争的测试因 ESM 循环依赖中的顶层 await 未完成而退出 13，未达到预期的 `LOCK_BUSY`、退出码 11。现已将共享准备逻辑与 CLI 入口分离，保留该 Linux 测试及退出码断言；此修复和真实 Worker 构建仍须在 Debian 上复验，不构成生产验收通过。
 
 Coordinator 首先检查 root 拥有且仅 root 可读写的 `updater/config.json`、root 拥有且不可由组或其他用户修改的独立 updater 代码路径及系统可执行文件，然后运行主动 systemd 探测。启动前先保存状态和 `updater/intent.json`，后者记录任务 ID、目标 SHA、由任务派生的 unit、boot ID、staging 相对标识和随后取得的 invocation ID。Worker 的 unit 请求 `Type=exec`、`ExitType=cgroup`、`KillMode=control-group`、`RuntimeMaxSec=5400`、`TimeoutStopSec=10`、`SendSIGKILL=yes`、`Delegate=no`、`Restart=no`、`NoNewPrivileges=yes`、`ProtectControlGroups=yes`、`ProtectHome=yes`、`PrivateTmp=yes`、空能力集，对 `releases` 设为只读并屏蔽 systemd 管理 socket、用户运行目录和已知 shared。Worker 还检查自己的实际 cgroup。根目录应位于 `/srv` 或 `/opt` 等不会被 `PrivateTmp` 或 `ProtectHome` 隐藏的真实目录。
 
