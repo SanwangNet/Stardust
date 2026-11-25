@@ -40,11 +40,11 @@ export async function checkBuildEnvironment(root,dir) {
   try {
     if(process.platform!=='linux'||process.getuid?.()!==0||!/^\/[a-zA-Z0-9_./-]+$/.test(root))throw Error();
     const configPath=join(dir,'config.json'),s=await lstat(configPath);if(!s.isFile()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o077)!==0)throw Error();
-    const config=JSON.parse(await readSmall(configPath,0));if(!config||Object.keys(config).sort().join(',')!=='buildUser,coreUser'||!userPattern.test(config.buildUser??'')||!userPattern.test(config.coreUser??''))throw Error();
+    const config=JSON.parse(await readSmall(configPath,0));if(!config||!['buildUser,coreUser','buildUser,coreUser,healthPort'].includes(Object.keys(config).sort().join(','))||!userPattern.test(config.buildUser??'')||!userPattern.test(config.coreUser??'')||(config.healthPort!==undefined&&(!Number.isInteger(config.healthPort)||config.healthPort<1||config.healthPort>65535)))throw Error();
     const builder=await account(config.buildUser),core=await account(config.coreUser);if(!builder.uid||!core.uid||builder.uid===core.uid||!/(?:\/nologin|\/false)$/.test(builder.shell))throw Error();
     const codeDir=dirname(fileURLToPath(import.meta.url));if(!/^\/[a-zA-Z0-9_./-]+$/.test(codeDir)||!/^\/[a-zA-Z0-9_./-]+$/.test(await realpath(process.execPath)))throw Error();await trustedPath(codeDir);await trustedPath(await realpath(process.execPath));
-    for(const name of ['build-worker.mjs','prepare.mjs','prepare-core.mjs','diagnostics.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs'])await trustedPath(join(codeDir,name));
-    const tools={};for(const name of ['git','npm','systemctl','systemd-run','flock','runuser','node'])tools[name]=await executable(name);
+    for(const name of ['build-worker.mjs','prepare.mjs','prepare-core.mjs','diagnostics.mjs','deploy.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs'])await trustedPath(join(codeDir,name));
+    const tools={};for(const name of ['git','npm','systemctl','systemd-run','flock','runuser','node','tar','fuser','chown','chmod','mv'])tools[name]=await executable(name);
     if(tools.node!==(await realpath(process.execPath)))throw Error();
     for(const name of ['node','git','npm'])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',tools[name]]);
     for(const path of [root,codeDir])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',path]);

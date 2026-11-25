@@ -1,6 +1,7 @@
 import { IdentityResolver, type IdentityInput } from "./identity-resolver.js";
 import { scopedPersonContext } from "./context-access-policy.js";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -29,6 +30,17 @@ import { FlowPublication, resolvePublishedGraphs } from "./flow-publication.js";
 import { webContextDeclaration } from "./starcore-flow.js";
 import { builtInSkillFlow, runSkillFlow, SkillFlowError } from "./skill-flow.js";
 import { buildFlowOverview } from "./flow-overview.js";
+import { applicationRoot } from "./env.js";
+
+// Resolve once when this process starts: changing current cannot change its identity.
+export function readRunningCommit(root: string = applicationRoot): string {
+  try {
+    const metadata: unknown = JSON.parse(readFileSync(join(root, ".stardust-candidate.json"), "utf8"));
+    if (metadata && typeof metadata === "object" && "sha" in metadata && typeof metadata.sha === "string" && /^[a-f0-9]{40}$/.test(metadata.sha) && "status" in metadata && metadata.status === "prepared") return metadata.sha;
+  } catch { /* Development checkout or unavailable metadata. */ }
+  return "development";
+}
+const runningSha = readRunningCommit();
 
 export interface AppOptions {
   version?: string;
@@ -947,6 +959,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         status: "ok",
         service: "Stardust",
         version,
+        runningSha,
         startedAt: startedAt.toISOString(),
         uptimeMs: Math.max(0, Date.now() - startedAt.getTime()),
         checkedAt: new Date().toISOString(),

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { once } from "node:events";
-import { createStardustServer } from "../apps/server/dist/app.js";
+import { createStardustServer, readRunningCommit } from "../apps/server/dist/app.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const server = createStardustServer({ version: "test-version" });
 let origin;
@@ -27,6 +30,7 @@ test("/api/health 返回真实的 TypeScript Server 状态", async () => {
   assert.equal(body.status, "ok");
   assert.equal(body.service, "Stardust");
   assert.equal(body.version, "test-version");
+  assert.match(body.runningSha, /^(development|[a-f0-9]{40})$/);
   assert.ok(body.uptimeMs >= 0);
   assert.ok(Number.isFinite(Date.parse(body.checkedAt)));
   assert.equal(response.headers.get("cache-control"), "no-store");
@@ -36,6 +40,20 @@ test("不支持在健康检查接口上写入", async () => {
   const response = await fetch(`${origin}/api/health`, { method: "POST" });
   assert.equal(response.status, 405);
   assert.equal((await response.json()).error, "METHOD_NOT_ALLOWED");
+});
+
+test("运行版本只接受已发布的完整 SHA 元数据", () => {
+  const root = mkdtempSync(join(tmpdir(), "stardust-version-"));
+  try {
+    const marker = join(root, ".stardust-candidate.json"), sha = "a".repeat(40);
+    assert.equal(readRunningCommit(root), "development");
+    writeFileSync(marker, JSON.stringify({status:"staged", sha}));
+    assert.equal(readRunningCommit(root), "development");
+    writeFileSync(marker, JSON.stringify({status:"prepared", sha}));
+    assert.equal(readRunningCommit(root), sha);
+    writeFileSync(marker, JSON.stringify({status:"prepared", sha:"invalid"}));
+    assert.equal(readRunningCommit(root), "development");
+  } finally { rmSync(root, {recursive:true, force:true}); }
 });
 
 test("WebUI 首页与静态脚本由同一进程提供", async () => {

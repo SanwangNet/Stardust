@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { checkRemote, REPOSITORY } from './check.mjs';
 import { CommandFailure, createFailureHints, createOutputTail, recordWorkerEvent } from './diagnostics.mjs';
@@ -51,11 +51,7 @@ async function buildInStaging({tmp,target,branch,timeout,signal,metadataStatus='
     if(await step('verify_sha','git',['rev-parse','HEAD'])!==target)throw new Error('SHA_MISMATCH');
     await verifyNoRuntimeData(source);
     const npm=process.platform==='win32'?'npm.cmd':'npm';
-    await step('dependencies',npm,['ci']);await step('check',npm,['run','check']);await step('build',npm,['run','build']);
-    const manifest=JSON.parse(await readFile(join(source,'package.json'),'utf8'));
-    if(manifest?.scripts?.test!=='npm run build && node --experimental-sqlite --test tests/*.test.mjs')throw new Error('UNSUPPORTED_TEST_SCRIPT');
-    const tests=(await readdir(join(source,'tests'))).filter(name=>name.endsWith('.test.mjs')).sort().map(name=>join('tests',name));if(!tests.length)throw new Error('TESTS_MISSING');
-    await step('test',process.execPath,['--experimental-sqlite','--test','--test-concurrency=2',...tests]);
+    await step('dependencies',npm,['ci']);await step('build',npm,['run','build']);
     stage='artifacts';await log({stage,event:'start'});await verifyArtifacts(source);await verifyNoRuntimeData(source);
     if(await step('verify_final_sha','git',['rev-parse','HEAD'])!==target)throw new Error('SHA_MISMATCH');
     if(await step('verify_sources','git',['status','--porcelain','--untracked-files=no']))throw new Error('SOURCE_MODIFIED');

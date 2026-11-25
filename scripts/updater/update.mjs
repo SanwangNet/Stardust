@@ -7,6 +7,7 @@ import { prepareCandidate } from './prepare-core.mjs';
 import { acquireLock } from './lock.mjs';
 import { updaterDirectory, readState, writeState } from './state.mjs';
 import { checkBuildEnvironment, runSystemdBuild } from './systemd-build.mjs';
+import { deployStaged, publishStaged, inspectInstalled } from './deploy.mjs';
 
 const delays=[60,120,300,600,1800];
 const active=new Set(['CHECKING','PREPARING','VERIFYING']);
@@ -16,7 +17,7 @@ const errorCode=e=>{const found=String(e?.message??'').match(/(?:^|:)(TIMEOUT|CA
 const stageCode=value=>String(value).toUpperCase().replace(/[^A-Z0-9_]/g,'_').slice(0,80);
 
 /** Adapters are trusted in-process test seams, not CLI configuration. */
-export async function executeUpdate({root,branch='main',sha,timeout=900000,force=false,signal},adapter={}) {
+export async function executeUpdate({root,branch='main',sha,timeout=900000,force=false,prepareOnly=false,signal},adapter={}) {
   const storage=process.env.STARDUST_STORAGE_ROOT;
   if(storage!==undefined){if(!isAbsolute(storage))throw new Error('STORAGE_OVERLAP');const production=resolve(storage);for(const path of [join(root,'updater'),join(root,'releases')]){const a=relative(production,path),b=relative(path,production);const within=x=>x==='' || x!=='..' && !x.startsWith('..'+sep) && !isAbsolute(x);if(within(a)||within(b))throw new Error('STORAGE_OVERLAP');}}
   const dir=await updaterDirectory(root,true), lock=await (adapter.acquireLock??acquireLock)(dir);
@@ -42,14 +43,20 @@ export async function executeUpdate({root,branch='main',sha,timeout=900000,force
     if(state.buildFailureSha && state.buildFailureSha!==remote.target){state.buildFailures=0;state.buildFailureSha=null;state.buildNextAt=null;}
     if(!force && state.buildNextAt && Date.parse(state.buildNextAt)>clock()){state.status='IDLE';state.phase=null;state.lastResult='BACKOFF';await save();return {result:'BACKOFF',state};}
     if(!adapter.processTreeSupervised){
-      let environment;try{environment=await checkBuildEnvironment(root,dir);}catch{state.status='FAILED';state.phase=null;state.failureStage='PROCESS_SUPERVISION';state.failureReason='SUPERVISION_UNAVAILABLE';state.lastResult='SUPERVISION_UNAVAILABLE';await save();return {result:'SUPERVISION_UNAVAILABLE',state};}
+      let environment;try{environment=await (adapter.checkBuildEnvironment??checkBuildEnvironment)(root,dir);}catch{state.status='FAILED';state.phase=null;state.failureStage='PROCESS_SUPERVISION';state.failureReason='SUPERVISION_UNAVAILABLE';state.lastResult='SUPERVISION_UNAVAILABLE';await save();return {result:'SUPERVISION_UNAVAILABLE',state};}
+      if(!prepareOnly){try{if(await (adapter.inspectInstalled??inspectInstalled)(root,remote.target,branch,environment.config)){state.status='IDLE';state.phase=null;state.failureStage=null;state.failureReason=null;state.lastResult='UP_TO_DATE';await save();return {result:'UP_TO_DATE',state};}}catch{state.status='FAILED';state.phase=null;state.failureStage='INSTALLATION_CHECK';state.failureReason='INSTALLATION_UNHEALTHY';state.lastResult='INSTALLATION_UNHEALTHY';await save();return {result:'INSTALLATION_UNHEALTHY',state};}}
       if(controller.signal.aborted){state.status='INTERRUPTED';state.interruptedPhase=state.phase;state.lastResult='INTERRUPTED';await save();return {result:'MANUAL_INTERVENTION',state};}
       state.status='PREPARING';state.phase='SYSTEMD_START';await save();
       try {
         const result=await runSystemdBuild({root,dir,state,branch,timeout,signal:controller.signal,environment,onPhase:async value=>{phase=value;state.phase=value;await save();}});
         if(!lock.alive||controller.signal.aborted)throw new Error('MANUAL_INTERVENTION');
         if(result.status==='failed'){state.status='FAILED';state.failureStage=result.phase;state.failureReason=result.reason;state.buildFailures=Math.min(1000,state.buildFailures+1);state.buildFailureSha=remote.target;state.buildNextAt=nowIso(clock()+boundedDelay(state.buildFailures));state.lastResult='PREPARE_FAILED';await save();return {result:'PREPARE_FAILED',state};}
-        state.status='IDLE';state.phase=null;state.buildFailures=0;state.buildFailureSha=null;state.buildNextAt=null;state.failureStage=null;state.failureReason=null;state.lastResult='STAGED_NOT_PUBLISHED';await save();return {result:'STAGED_NOT_PUBLISHED',state};
+        state.buildFailures=0;state.buildFailureSha=null;state.buildNextAt=null;
+        const deployInput={root,state,branch,environment,signal:controller.signal,onPhase:async value=>{phase=value;state.phase=value;await save();}};
+        const deployed=await (prepareOnly?publishStaged(deployInput):deployStaged(deployInput));
+        if(persistenceFailed||!lock.alive)throw new Error('LOCK_LOST');
+        if(deployed.status!=='updated'&&deployed.status!=='prepared'){state.status='FAILED';state.failureStage=deployed.phase;state.failureReason=deployed.reason;state.lastResult=deployed.switched?'UPDATE_FAILED_SWITCHED':deployed.restored?'UPDATE_FAILED_RESTORED':'UPDATE_FAILED';await save();return {result:'UPDATE_FAILED',state,restored:deployed.restored,switched:deployed.switched};}
+        state.status='READY';state.phase=null;state.preparedSha=remote.target;state.preparedAt=nowIso(clock());state.failureStage=null;state.failureReason=null;state.lastResult=prepareOnly?'PREPARED':'UPDATED';await save();return {result:state.lastResult,state};
       }catch(e){if(persistenceFailed||!lock.alive)throw e;state.interruptedPhase=state.phase;state.status='INTERRUPTED';state.failureStage=state.phase;state.failureReason='MANUAL_INTERVENTION';state.lastResult='INTERRUPTED';await save();return {result:'MANUAL_INTERVENTION',state};}
     }
     state.status='PREPARING';state.phase='SOURCE_FETCH';await save();
@@ -72,8 +79,8 @@ export async function main(args,{legacyPrepare=false}={}) {
     if(legacyPrepare){if(rest.length>2)throw new Error('USAGE');[sha]=rest;if(rest[1]!==undefined)timeout=Number(rest[1]);}
     else {if(rest.length>1 || rest.length===1 && rest[0]!=='--force')throw new Error('USAGE');force=rest[0]==='--force';}
     if(!root)throw new Error('USAGE');
-    const output=await executeUpdate({root,branch,sha,timeout,force,signal:controller.signal});console.log(JSON.stringify({result:output.result,state:output.state},null,2));
-    process.exitCode=({PREPARED:0,ALREADY_PREPARED:0,STAGED_NOT_PUBLISHED:0,BACKOFF:10,MANUAL_INTERVENTION:23,CHECK_FAILED:20,PREPARE_FAILED:21,SUPERVISION_UNAVAILABLE:24})[output.result]??22;
+    const output=await executeUpdate({root,branch,sha,timeout,force,prepareOnly:legacyPrepare,signal:controller.signal});console.log(JSON.stringify(output,null,2));
+    process.exitCode=({PREPARED:0,ALREADY_PREPARED:0,UPDATED:0,UP_TO_DATE:0,BACKOFF:10,MANUAL_INTERVENTION:23,CHECK_FAILED:20,PREPARE_FAILED:21,UPDATE_FAILED:21,INSTALLATION_UNHEALTHY:21,SUPERVISION_UNAVAILABLE:24})[output.result]??22;
   } catch(e){const known=['LOCK_BUSY','USAGE','STATE_INVALID','STATE_UNSAFE','STATE_VERSION_UNSUPPORTED','UPDATER_DIRECTORY_UNSAFE','LOCK_FILE_UNSAFE','LOCK_LOST','LOCK_HELPER_FAILED','LOCK_HELPER_TIMEOUT','LINUX_FLOCK_REQUIRED','INVALID_ROOT','STORAGE_OVERLAP'];const message=['EACCES','EPERM'].includes(e?.code)?'PERMISSION_DENIED':known.includes(e?.message)?e.message:'UPDATER_ERROR';console.error(message);process.exitCode=message==='LOCK_BUSY'?11:22;}
   finally{process.removeListener('SIGINT',abort);process.removeListener('SIGTERM',abort);}
 }
