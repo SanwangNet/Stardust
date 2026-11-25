@@ -4,7 +4,17 @@ import {cpSync,mkdtempSync,mkdirSync,readFileSync,renameSync,writeFileSync,exist
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {prepareCandidate,runCommand} from '../scripts/updater/prepare.mjs';
+import {prepareCandidate as guardedPrepareCandidate,buildSystemdWorker,runCommand} from '../scripts/updater/prepare.mjs';
+
+// Exercise the private legacy implementation in an isolated test module. It is not an
+// exported production entry point and never invokes real npm or a remote repository.
+const legacySource=readFileSync(new URL('../scripts/updater/prepare.mjs',import.meta.url),'utf8')
+ .replace("from './check.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/check.mjs',import.meta.url).href)}`)
+ + '\nexport { prepareCandidateCore as fixturePrepareCandidate, buildInStaging as fixtureBuildInStaging };\n';
+const {fixturePrepareCandidate:prepareCandidate,fixtureBuildInStaging:buildInStaging}=await import('data:text/javascript;base64,'+Buffer.from(legacySource).toString('base64'));
+
+test('direct prepareCandidate cannot bypass process supervision',async()=>{let called=false;await assert.rejects(guardedPrepareCandidate({root:process.cwd()},{uid:1000,remote:()=>({target:'a'.repeat(40)}),run:()=>{called=true;}}),/SUPERVISION_UNAVAILABLE/);assert.equal(called,false);});
+test('worker rejects a direct invocation outside its expected systemd unit',async()=>{await assert.rejects(buildSystemdWorker({root:process.cwd(),taskId:'00000000-1111-4222-8333-444444444444',sha:'a'.repeat(40),branch:'main',unit:'sshd.service',timeout:900000}),/WORKER_FORBIDDEN/);});
 
 function git(cwd,...args){return execFileSync('git',args,{cwd,encoding:'utf8',env:{...process.env,GIT_AUTHOR_NAME:'Test',GIT_AUTHOR_EMAIL:'test@example.invalid',GIT_COMMITTER_NAME:'Test',GIT_COMMITTER_EMAIL:'test@example.invalid'}}).trim();}
 function fixture(t){const root=mkdtempSync(join(tmpdir(),'updater-build-')),repo=join(root,'repo'),deploy=join(root,'deploy');mkdirSync(repo);mkdirSync(deploy);git(repo,'init','--quiet');
@@ -19,6 +29,8 @@ function adapter(f,{fail,wrongHead=false,missing=false}={}){const calls=[];retur
  if(args[0]==='run'&&args[1]==='build')for(const path of artifacts){if(missing&&path==='apps/web/dist/index.html')continue;const file=join(options.cwd,path);mkdirSync(dirname(file),{recursive:true});writeFileSync(file,'test');}
  if(args[0]==='run'&&args[1]==='build')writeFileSync(join(options.cwd,'package.json'),JSON.stringify({scripts:{test:'npm run build && node --experimental-sqlite --test tests/*.test.mjs'}}));
  return args[0]==='--version'?'11.0.0':'';}};}
+
+test('shared build steps retain a staged result without publishing a release',async t=>{const f=fixture(t),a=adapter(f),tmp=join(f.root,'staging');mkdirSync(tmp);const result=await buildInStaging({tmp,target:f.sha,branch:'main',timeout:900000,metadataStatus:'staged'},a);assert.equal(result.metadata.status,'staged');assert.equal(result.metadata.sha,f.sha);assert.equal(existsSync(join(f.deploy,'releases',f.sha)),false);assert.equal(existsSync(join(tmp,'source','.stardust-candidate.json')),true);assert.equal(a.calls.filter(x=>x.args[0]==='ci').length,1);});
 
 test('real Git checkout pins the selected SHA, publishes only complete artifacts and reuses candidate',async t=>{const f=fixture(t),a=adapter(f);process.env.STARDUST_MODEL_API_KEY='must-not-leak';t.after(()=>delete process.env.STARDUST_MODEL_API_KEY);
  const result=await prepareCandidate({root:f.deploy},a);assert.equal(result.sha,f.sha);assert.equal(result.deployed,false);assert.equal(git(result.path,'rev-parse','HEAD'),f.sha);
