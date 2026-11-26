@@ -43,7 +43,7 @@ test("缺失扩展配置的读取不会创建目录或文件", async () => {
 
 test("Core 配置从明确的根目录读取，默认值与进程变量优先级正确", async () => {
   assert.deepEqual(loader.loadCoreEnv(), {});
-  assert.deepEqual(resolveListenConfig(loader.loadCoreEnv(), {}), { host: "127.0.0.1", port: 8347 });
+  assert.deepEqual(resolveListenConfig(loader.loadCoreEnv(), {}), { host: "0.0.0.0", port: 80 });
   await writeFile(join(root, ".env"), 'STARDUST_HOST=127.0.0.2\nSTARDUST_PORT=9351\nCORE_VALUE="hello world"\n');
   const core = loader.loadCoreEnv();
   assert.equal(core.CORE_VALUE, "hello world");

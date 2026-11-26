@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { AlreadyInitializedError, ConfigValidationError, validateConfigUpdate, type ConfigUpdate } from "./config.js";
+import { loadCoreEnv } from "./env.js";
 import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
@@ -90,7 +91,10 @@ function isSameOrigin(request: IncomingMessage): boolean {
   if (!origin) return true; // Non-browser clients may omit Origin; JSON is still required.
   if (!request.headers.host) return false;
   try {
-    return new URL(origin).origin === new URL(`http://${request.headers.host}`).origin && origin !== "null";
+    const localProxy = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress ?? "");
+    const protocol = localProxy && request.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+    const parsed = new URL(origin);
+    return parsed.href === `${parsed.origin}/` && parsed.origin === new URL(`${protocol}://${request.headers.host}`).origin && origin !== "null";
   } catch {
     return false;
   }
@@ -324,7 +328,10 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(value), Buffer.from(controlToken));
     };
     if (pathname.startsWith("/api/v1/") && !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
-      if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN" }); return; }
+      const browserSettings = (pathname === "/api/v1/setup/complete" || pathname === "/api/v1/server/settings")
+        && request.method === "POST" && !!request.headers.origin && isSameOrigin(request)
+        && /^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "");
+      if (!trusted(false) && !browserSettings) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN", message: "请求未通过本机或同源访问校验。" }); return; }
     }
     if (pathname === "/api/v1/control-session") {
       response.setHeader("Cache-Control", "no-store");
@@ -800,6 +807,26 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
+    if (pathname === "/api/v1/server/settings") {
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED", message: "请先完成初始化。" }); return; }
+        if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN", message: "请求来源无效。" }); return; }
+        const portOverridden = process.env.STARDUST_PORT !== undefined || loadCoreEnv().STARDUST_PORT !== undefined;
+        if (request.method === "POST") {
+          if (!/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) throw new ConfigValidationError("请求必须使用 JSON。");
+          const input = await readSetupBody(request);
+          if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).join(",") !== "port") throw new ConfigValidationError("请提供端口号。");
+          setup.savePort((input as { port: unknown }).port);
+        } else if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+        const address = server.address();
+        sendJson(response, 200, { savedPort: setup.getSetupConfig().server.port, runningPort: address && typeof address !== "string" ? address.port : null, portOverridden });
+      } catch (error) {
+        const validation = error instanceof ConfigValidationError;
+        sendJson(response, validation ? 400 : 500, { error: validation ? "INVALID_INPUT" : "SAVE_FAILED", message: error instanceof Error && (validation || error.message.startsWith("无法保存 config.toml")) ? error.message : "无法读取或保存服务设置，请检查服务日志。" });
+      }
+      return;
+    }
+
     if (pathname === "/api/v1/setup/state") {
       if (request.method !== "GET") {
         response.setHeader("Allow", "GET");
@@ -845,7 +872,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         sendJson(response, 200, { initialized: true });
       } catch (error) {
         if (error instanceof AlreadyInitializedError) sendJson(response, 409, { error: "ALREADY_INITIALIZED" });
-        else sendJson(response, 500, { error: "SETUP_FAILED" });
+        else sendJson(response, 500, { error: "SETUP_FAILED", message: error instanceof Error && error.message.startsWith("无法保存 config.toml") ? error.message : "初始化保存失败，请检查服务日志和配置文件权限。" });
       }
       return;
     }

@@ -32,7 +32,7 @@ function defaults(): StardustConfig {
   return {
     initialized: false,
     service: { description: "" },
-    server: { host: "127.0.0.1", port: 8347 },
+    server: { host: "0.0.0.0", port: 80 },
     web: { title: "Stardust" },
     model: { baseUrl: "", modelId: "", timeoutMs: 30000, stream: false },
   };
@@ -149,8 +149,9 @@ export function createConfigStore(configRoot: string = projectConfigRoot) {
       fd = undefined;
       fs.renameSync(temporaryPath, configPath);
       temporaryCreated = false;
-    } catch {
-      throw new Error("无法保存 config.toml");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      throw new Error(code === "EACCES" || code === "EPERM" ? "无法保存 config.toml：服务用户没有配置目录或文件的写入权限" : code === "ENOSPC" || code === "EDQUOT" ? "无法保存 config.toml：存储空间或配额不足" : code === "EROFS" ? "无法保存 config.toml：文件系统为只读" : `无法保存 config.toml：写入或替换文件失败${code ? `（${code}）` : ""}`);
     } finally {
       if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* preserve the original error */ } }
       if (temporaryCreated) { try { fs.unlinkSync(temporaryPath); } catch { /* best-effort cleanup */ } }

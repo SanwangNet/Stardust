@@ -13,12 +13,12 @@ import { createStardustServer } from "../apps/server/dist/app.js";
 import { ExtensionManager } from "../apps/server/dist/extension-manager.js";
 import { webChatExtension } from "../apps/server/dist/extensions/web-chat.js";
 
-async function fixture(t) {
+async function fixture(t, host = "127.0.0.1") {
   const root = await mkdtemp(join(tmpdir(), "stardust-flow-"));
   const setup = new SetupService(createConfigStore(root));
   const extensions = new ExtensionManager(root, undefined, [webChatExtension]);
   const server = createStardustServer({ setupService: setup, extensionManager: extensions });
-  server.listen(0, "127.0.0.1");
+  server.listen(0, host);
   await once(server, "listening");
   const origin = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
@@ -90,7 +90,6 @@ test("终端向导可使用默认值完成且不关闭服务", async (t) => {
   const cli = await cliDriver(setup);
   await cli.send("", "服务描述");
   await cli.send("CLI", "WebUI 标题");
-  await cli.send("", "修改监听地址");
   await cli.send("", "确认完成初始化");
   await cli.send("");
   await cli.done;
@@ -107,10 +106,7 @@ test("终端输入非法时可重试，取消不会初始化", async (t) => {
   await cli.send("", "服务描述");
   await cli.send("", "WebUI 标题");
   await cli.send(" ", "web.title 必须是非空字符串");
-  await cli.send("CLI", "修改监听地址");
-  await cli.send("y", "监听地址 [");
-  await cli.send("", "端口 [");
-  await cli.send("0", "server.port 必须是 1–65535 之间的整数");
+  await cli.send("CLI", "确认完成初始化");
   await cli.send(":q");
   await cli.done;
   assert.match(cli.text(), /已取消初始化/);
@@ -132,11 +128,53 @@ test("CLI 与 HTTP 同时提交时只有一个入口成功", async (t) => {
   const cli = await cliDriver(setup);
   await cli.send("", "服务描述");
   await cli.send("CLI", "WebUI 标题");
-  await cli.send("", "修改监听地址");
   await cli.send("", "确认完成初始化");
   const [response] = await Promise.all([post(origin, { service: { description: "Web" } }), cli.send("")]);
   await cli.done;
   assert.ok(response.status === 200 || response.status === 409);
   assert.equal(setup.getSetupConfig().service.description, response.status === 200 ? "Web" : "CLI");
   assert.match(cli.text(), response.status === 200 ? /初始化已由其他入口完成/ : /初始化完成/);
+});
+
+
+test("HTTPS 反向代理同源初始化，拒绝跨域请求并持久化", async t => {
+  const { root, origin } = await fixture(t);
+  const headers = { Origin: origin.replace("http:", "https:"), "X-Forwarded-Proto": "https", "Sec-Fetch-Site": "same-origin" };
+  assert.equal((await post(origin, {}, { ...headers, Origin: "https://evil.example" })).status, 403);
+  assert.equal((await post(origin, {}, { ...headers, "Sec-Fetch-Site": "cross-site" })).status, 403);
+  assert.equal((await post(origin, { web: { title: "代理" } }, headers)).status, 200);
+  assert.equal(new SetupService(createConfigStore(root)).getInitializationState().initialized, true);
+  assert.equal((await (await fetch(origin + "/api/v1/setup/state")).json()).webTitle, "代理");
+});
+
+test("端口设置区分运行值和保存值，写入失败不改变配置", async t => {
+  const { root, origin } = await fixture(t);
+  assert.equal((await post(origin, {})).status, 200);
+  const url = origin + "/api/v1/server/settings";
+  const save = port => fetch(url, { method: "POST", headers: { origin, "Content-Type": "application/json" }, body: JSON.stringify({ port }) });
+  const current = Number(new URL(origin).port);
+  let response = await save(8080); assert.equal(response.status, 200);
+  let data = await response.json(); assert.equal(data.runningPort, current); assert.equal(data.savedPort, 8080);
+  assert.equal(createConfigStore(root).loadConfig().server.port, 8080);
+  assert.equal((await fetch(origin + "/api/health")).status, 200);
+  assert.equal((await save(0)).status, 400);
+  const rename = t.mock.method(fs, "renameSync", () => { const e = new Error("private"); e.code = "EACCES"; throw e; });
+  response = await save(9090); assert.equal(response.status, 500); data = await response.json(); assert.match(data.message, /权限/);
+  rename.mock.restore(); assert.equal(createConfigStore(root).loadConfig().server.port, 8080);
+});
+
+test("初始化写入权限错误可见且不会标记成功", async t => {
+  const { origin, setup } = await fixture(t);
+  const rename = t.mock.method(fs, "renameSync", () => { const e = new Error("private"); e.code = "EACCES"; throw e; });
+  const response = await post(origin, {}); assert.equal(response.status, 500);
+  const data = await response.json(); assert.match(data.message, /权限/); assert.equal(setup.getInitializationState().initialized, false);
+  rename.mock.restore();
+});
+
+
+test("通配监听允许同源初始化，其他管理写入仍拒绝", async t => {
+  const { origin } = await fixture(t, "0.0.0.0");
+  assert.equal((await post(origin, {}, { Origin: origin })).status, 200);
+  const response = await fetch(origin + "/api/v1/flow-publication/save", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: "{}" });
+  assert.equal(response.status, 403);
 });

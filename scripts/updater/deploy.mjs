@@ -1,3 +1,4 @@
+import { runningEndpoints } from './running-port.mjs';
 import { constants, createReadStream } from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, stat, statfs, symlink, unlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -91,13 +92,13 @@ async function backup(root,taskId,oldSha){
   await rename(tmp,archive);const d=await open(dir,constants.O_RDONLY);try{await d.sync();}finally{await d.close();}return archive;
 }
 async function switchCurrent(root,sha,taskId){const temporary=join(root,`.current-${taskId}`);await symlink(join('releases',sha),temporary);try{await rename(temporary,join(root,'current'));const d=await open(root,constants.O_RDONLY);try{await d.sync();}finally{await d.close();}}finally{try{await unlink(temporary);}catch(e){if(e.code!=='ENOENT')throw e;}}}
-async function health(port,expectedSha){const deadline=Date.now()+30000;while(Date.now()<deadline){try{const p=await serviceProperties();if(p.ActiveState!=='active')throw Error();const response=await fetch(`http://127.0.0.1:${port}/api/health`,{signal:AbortSignal.timeout(2000),redirect:'error'});if(response.ok){let size=0;const chunks=[];for await(const chunk of response.body){size+=chunk.length;if(size>65536)throw Error();chunks.push(chunk);}const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(body?.status==='ok'&&body?.service==='Stardust'&&(!expectedSha||body.runningSha===expectedSha))return;}}catch{}await new Promise(r=>setTimeout(r,1000));}throw new Error('HEALTH_CHECK_FAILED');}
+async function health(port,expectedSha){const deadline=Date.now()+30000;while(Date.now()<deadline){try{const p=await serviceProperties();if(p.ActiveState!=='active')throw Error();for(const endpoint of port == null ? await runningEndpoints() : [{host:"127.0.0.1",port}]) {try{const response=await fetch(`http://${endpoint.host}:${endpoint.port}/api/health`,{signal:AbortSignal.timeout(2000),redirect:'error'});if(response.ok){let size=0;const chunks=[];for await(const chunk of response.body){size+=chunk.length;if(size>65536)throw Error();chunks.push(chunk);}const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(body?.status==='ok'&&body?.service==='Stardust'&&(!expectedSha||body.runningSha===expectedSha))return;}}catch{}}}catch{}await new Promise(r=>setTimeout(r,1000));}throw new Error('HEALTH_CHECK_FAILED');}
 
 export async function inspectInstalled(root,target,branch,config){
   const sha=await currentRelease(root);if(sha!==target)return false;
   const release=join(root,'releases',sha);await inspectTree(release,0);await stagedMetadata(release,sha,branch,'prepared');await inspectStagedArtifacts(release);
   const head=join(release,'.git','HEAD'),s=await lstat(head);if(!s.isFile()||s.isSymbolicLink()||s.size>128||(await readFile(head,'utf8')).trim()!==sha)throw new Error('INVALID_CANDIDATE');
-  await assertService(root,config.coreUser);await health(config.healthPort??8347,sha);return true;
+  await assertService(root,config.coreUser);await health(null,sha);return true;
 }
 
 /** Only called by the coordinator after the supervised build has fully stopped. */
@@ -118,10 +119,10 @@ export async function deployStaged({root,state,branch,environment,onPhase,signal
     await step('STOP',()=>ops.stop());serviceStopped=true;
     await step('BACKUP',()=>ops.backup(root,state.taskId,oldSha));
     await step('SWITCH',()=>{switched=true;return ops.switchCurrent(root,state.targetSha,state.taskId);});
-    await step('START',()=>ops.start());await step('HEALTH',()=>ops.health(environment.config.healthPort??8347,state.targetSha));
+    await step('START',()=>ops.start());await step('HEALTH',()=>ops.health(adapter.health ? (environment.config.healthPort??80) : null,state.targetSha));
     return {status:'updated',phase:'HEALTH'};
   } catch(e){
-    let restored=false;if(serviceStopped&&!switched&&!signal?.aborted&&e?.message!=='LOCK_LOST'){try{await ops.start();await ops.health(environment.config.healthPort??8347);restored=true;}catch{}}
+    let restored=false;if(serviceStopped&&!switched&&!signal?.aborted&&e?.message!=='LOCK_LOST'){try{await ops.start();await ops.health(adapter.health ? (environment.config.healthPort??80) : null);restored=true;}catch{}}
     const allowed=['INVALID_TASK','INVALID_CANDIDATE','CANDIDATE_CONFLICT','UNSAFE_DIRECTORY','UNSAFE_RELEASE','RELEASE_TOO_LARGE','RELEASE_FILESYSTEM_MISMATCH','BUILD_STILL_RUNNING','CURRENT_INVALID','SERVICE_CONFIGURATION_INVALID','SERVICE_STILL_RUNNING','SERVICE_STOP_UNCONFIRMED','DATABASE_IN_USE','DATABASE_UNSAFE','FUSER_UNAVAILABLE','SHARED_INVALID','BACKUP_INVALID','HEALTH_CHECK_FAILED','CANCELLED'];
     return {status:'failed',phase,reason:allowed.includes(e?.message)?e.message:'UPDATE_FAILED',restored,switched};
   }

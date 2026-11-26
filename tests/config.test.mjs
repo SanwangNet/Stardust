@@ -14,7 +14,7 @@ let store;
 const expectedDefaults = {
   initialized: false,
   service: { description: "" },
-  server: { host: "127.0.0.1", port: 8347 },
+  server: { host: "0.0.0.0", port: 80 },
   web: { title: "Stardust" },
   model: { baseUrl: "", modelId: "", timeoutMs: 30000, stream: false },
 };
@@ -29,7 +29,7 @@ test("文件缺失时返回默认值而不创建文件，部分字段使用默�
   await assert.rejects(access(join(root, "config.toml")), { code: "ENOENT" });
   await writeFile(join(root, "config.toml"), '[service]\ndescription = "Example"\n[server]\nport = 9001\n');
   assert.deepEqual(store.loadConfig(), {
-    ...expectedDefaults, service: { description: "Example" }, server: { host: "127.0.0.1", port: 9001 },
+    ...expectedDefaults, service: { description: "Example" }, server: { host: "0.0.0.0", port: 9001 },
   });
 });
 
@@ -50,7 +50,7 @@ test("旧的 service.name 被忽略并在下一次保存时移除", async () => 
   const legacy = 'initialized = true\n[service]\nname = "Old Name"\ndescription = "Keep"\n[server]\nport = 9001\n[web]\ntitle = "Keep Title"\n';
   await writeFile(path, legacy);
   const config = store.loadConfig();
-  assert.deepEqual(config, { initialized: true, service: { description: "Keep" }, server: { host: "127.0.0.1", port: 9001 }, web: { title: "Keep Title" }, model: expectedDefaults.model });
+  assert.deepEqual(config, { initialized: true, service: { description: "Keep" }, server: { host: "0.0.0.0", port: 9001 }, web: { title: "Keep Title" }, model: expectedDefaults.model });
   assert.equal(await readFile(path, "utf8"), legacy);
   store.saveConfig(config);
   assert.doesNotMatch(await readFile(path, "utf8"), /\bname\s*=/);
@@ -120,13 +120,13 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
     await new Promise((done, fail) => probe.close((error) => error ? fail(error) : done()));
     return port;
   }
-  async function startAndCheck(port, env, initialize = false, expectedInitialized = false) {
+  async function startAndCheck(port, env, initialize = false, expectedInitialized = false, nextPort) {
     const child = spawn(process.execPath, [join(project, "apps", "server", "dist", "main.js")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
     try {
       let output = "";
       await new Promise((ready, reject) => {
         const timer = setTimeout(() => reject(new Error("服务启动超时")), 5000);
-        child.stdout.on("data", (data) => { output += data; if (output.includes(`WebUI: http://127.0.0.1:${port}`)) { clearTimeout(timer); ready(); } });
+        child.stdout.on("data", (data) => { output += data; if ((output.includes(`WebUI: http://127.0.0.1:${port}`) || output.includes(`WebUI: http://0.0.0.0:${port}`))) { clearTimeout(timer); ready(); } });
         child.once("exit", () => { clearTimeout(timer); reject(new Error("服务提前退出")); });
       });
       assert.doesNotMatch(output, /按下 Enter/);
@@ -138,6 +138,13 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
       if (initialize) {
         const response = await fetch(`http://127.0.0.1:${port}/api/v1/setup/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
         assert.equal(response.status, 200);
+      }
+      if (nextPort) {
+        const origin = `http://127.0.0.1:${port}`;
+        const response = await fetch(`${origin}/api/v1/server/settings`, { method: "POST", headers: { origin, "Content-Type": "application/json" }, body: JSON.stringify({ port: nextPort }) });
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).runningPort, port);
+        assert.equal((await fetch(`${origin}/api/health`)).status, 200);
       }
     } finally {
       child.kill();
@@ -153,7 +160,8 @@ test("从其他工作目录启动时读取项目根 TOML，无配置文件也能
   await assert.rejects(access(join(project, "config.toml")), { code: "ENOENT" });
   const secondPort = await availablePort();
   await writeFile(join(project, "config.toml"), `[service]\nname = "Legacy Product"\ndescription = "Keep"\n[server]\nhost = "127.0.0.1"\nport = ${secondPort}\n`);
-  await startAndCheck(secondPort, env, true);
+  const thirdPort = await availablePort();
+  await startAndCheck(secondPort, env, true, false, thirdPort);
   assert.doesNotMatch(await readFile(join(project, "config.toml"), "utf8"), /\bname\s*=/);
-  await startAndCheck(secondPort, env, false, true);
+  await startAndCheck(thirdPort, env, false, true);
 });

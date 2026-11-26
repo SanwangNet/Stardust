@@ -57,23 +57,15 @@ export async function runSetupWizard(setup: SetupService, input: Readable, outpu
     output.write("\n欢迎使用 Stardust。（输入 :q 或按 Ctrl+C 取消）\n");
     const description = await field("服务描述", initial.service.description, (value) => ({ service: { description: value } }));
     const title = await field("WebUI 标题", initial.web.title, (value) => ({ web: { title: value } }));
-    let host = initial.server.host;
-    let port = initial.server.port;
-    if (await yesNo("修改监听地址和端口？[y/N]：", false)) {
-      host = await field("监听地址", host, (value) => ({ server: { host: value } }));
-      const portValue = await field("端口", String(port), (value) => ({ server: { port: /^\d+$/.test(value) ? Number(value) : NaN } }));
-      port = Number(portValue);
-      output.write("监听地址和端口的更改将在重启后生效。\n");
-    }
-    output.write(`\n服务描述：${description}\nWebUI 标题：${title}\n监听地址：${host}\n端口：${port}\n`);
+    output.write(`\n服务描述：${description}\nWebUI 标题：${title}\n`);
     while (await yesNo("确认完成初始化？[Y/n]：", true)) {
       try {
-        await setup.completeInitialization({ service: { description }, server: { host, port }, web: { title } });
+        await setup.completeInitialization({ service: { description }, web: { title } });
         output.write("初始化完成，服务继续运行。\n");
         return;
       } catch (error) {
         if (error instanceof AlreadyInitializedError) { output.write("初始化已由其他入口完成。\n"); return; }
-        output.write("初始化保存失败，请重试或取消。\n");
+        output.write(`${error instanceof Error ? error.message : "初始化保存失败"}，请重试或取消。\n`);
       }
     }
     output.write("已取消初始化。\n");

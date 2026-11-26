@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runningEndpoints } from './running-port.mjs';
 import { constants } from 'node:fs';
 import { lstat, open, readlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -21,10 +22,10 @@ async function observeRunning(dir){
   let file;try{
     file=await open(join(dir,'config.json'),constants.O_RDONLY|(constants.O_NOFOLLOW??0));const s=await file.stat();
     if(!s.isFile()||s.nlink!==1||s.size>4096||(process.platform!=='win32'&&(s.uid!==process.getuid()||(s.mode&0o077)!==0)))return 'unknown';
-    const config=JSON.parse(await file.readFile('utf8')),port=config.healthPort??8347;if(!Number.isInteger(port)||port<1||port>65535)return 'unknown';
-    const response=await fetch(`http://127.0.0.1:${port}/api/health`,{signal:AbortSignal.timeout(1500),redirect:'error'});if(!response.ok)return 'unknown';
+    const config=JSON.parse(await file.readFile('utf8'));let ports;try{ports=await runningEndpoints();}catch{ports=Number.isInteger(config.healthPort)&&config.healthPort>0&&config.healthPort<=65535?[{host:"127.0.0.1",port:config.healthPort}]:[];}
+    for(const endpoint of ports){try{const response=await fetch(`http://${endpoint.host}:${endpoint.port}/api/health`,{signal:AbortSignal.timeout(1500),redirect:'error'});if(!response.ok)continue;
     let size=0;const chunks=[];for await(const chunk of response.body){size+=chunk.length;if(size>65536)return 'unknown';chunks.push(chunk);}
-    const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));return body?.status==='ok'&&body?.service==='Stardust'&&/^[a-f0-9]{40}$/.test(body.runningSha??'')?body.runningSha:'unknown';
+    const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(body?.status==='ok'&&body?.service==='Stardust'&&/^[a-f0-9]{40}$/.test(body.runningSha??''))return body.runningSha;}catch{}}return 'unknown';
   }catch{return 'unknown';}finally{await file?.close();}
 }
 export async function getStatus(root) {

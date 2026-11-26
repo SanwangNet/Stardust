@@ -1030,7 +1030,7 @@ reducedMotion.addEventListener("change", () => {
   clearSpaceEnter();
   clearSpaceExit();
 });
-getElement<HTMLElement>("settings-access-url").textContent = location.origin;
+
 createPrimaryNavigation();
 renderNavigation("initial");
 
@@ -1147,9 +1147,6 @@ const setupDialog = getElement<HTMLDialogElement>("setup-dialog");
 const setupForm = getElement<HTMLFormElement>("setup-form");
 const setupDescription = getElement<HTMLTextAreaElement>("setup-description");
 const setupTitle = getElement<HTMLInputElement>("setup-title");
-const setupHost = getElement<HTMLInputElement>("setup-host");
-const setupPort = getElement<HTMLInputElement>("setup-port");
-const setupDefaults = getElement<HTMLInputElement>("setup-defaults");
 const setupBack = getElement<HTMLButtonElement>("setup-back");
 const setupNext = getElement<HTMLButtonElement>("setup-next");
 const setupSubmit = getElement<HTMLButtonElement>("setup-submit");
@@ -1160,7 +1157,6 @@ let setupStep = 0;
 let setupFinished = false;
 let setupLoaded = false;
 let setupBusy = false;
-let previousServer = { host: "127.0.0.1", port: "8347" };
 
 function setSetupError(message: string): void {
   setupError.textContent = message;
@@ -1175,8 +1171,8 @@ function showSetupStep(step: number): void {
     else item.removeAttribute("aria-current");
   });
   setupBack.hidden = step === 0;
-  setupNext.hidden = step === 3;
-  setupSubmit.hidden = step !== 3;
+  setupNext.hidden = step === 2;
+  setupSubmit.hidden = step !== 2;
   const heading = setupSteps[step]?.querySelector("h2");
   if (heading) {
     heading.id ||= `setup-step-heading-${step}`;
@@ -1184,15 +1180,13 @@ function showSetupStep(step: number): void {
     heading.tabIndex = -1;
     if (setupDialog.open) heading.focus();
   }
-  if (step === 3) {
+  if (step === 2) {
     getElement<HTMLElement>("summary-description").textContent = setupDescription.value || "—";
     getElement<HTMLElement>("summary-title").textContent = setupTitle.value;
-    getElement<HTMLElement>("summary-host").textContent = setupHost.value;
-    getElement<HTMLElement>("summary-port").textContent = setupPort.value;
   }
 }
 function validateSetupStep(): boolean {
-  const fields = setupStep === 1 ? [setupTitle] : setupStep === 2 ? [setupHost, setupPort] : [];
+  const fields = setupStep === 1 ? [setupTitle] : [];
   for (const field of fields) {
     field.setCustomValidity(field.type !== "number" && !field.value.trim() ? "此项不能为空。" : "");
     if (!field.reportValidity()) return false;
@@ -1217,8 +1211,6 @@ async function refreshSetupState(): Promise<void> {
     } else if (!setupLoaded && state.config) {
       setupDescription.value = state.config.service.description;
       setupTitle.value = state.config.web.title;
-      setupHost.value = state.config.server.host;
-      setupPort.value = String(state.config.server.port);
       setupLoaded = true;
       showSetupStep(0);
       setupDialog.showModal();
@@ -1228,24 +1220,12 @@ async function refreshSetupState(): Promise<void> {
   }
 }
 setupDialog.addEventListener("cancel", (event) => event.preventDefault());
-setupDefaults.addEventListener("change", () => {
-  if (setupDefaults.checked) {
-    previousServer = { host: setupHost.value, port: setupPort.value };
-    setupHost.value = "127.0.0.1";
-    setupPort.value = "8347";
-  } else {
-    setupHost.value = previousServer.host;
-    setupPort.value = previousServer.port;
-  }
-  setupHost.disabled = setupDefaults.checked;
-  setupPort.disabled = setupDefaults.checked;
-});
 setupNext.addEventListener("click", () => { if (validateSetupStep()) showSetupStep(setupStep + 1); });
 setupBack.addEventListener("click", () => showSetupStep(setupStep - 1));
 getElement<HTMLButtonElement>("setup-retry").addEventListener("click", () => void refreshSetupState());
 setupForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (setupBusy || setupStep !== 3) return;
+  if (setupBusy || setupStep !== 2) return;
   setupBusy = true;
   setupSubmit.disabled = true;
   setupBack.disabled = true;
@@ -1254,20 +1234,17 @@ setupForm.addEventListener("submit", (event) => {
     try {
       const response = await fetch("/api/v1/setup/complete", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ service: { description: setupDescription.value }, server: { host: setupHost.value, port: Number(setupPort.value) }, web: { title: setupTitle.value } }),
+        body: JSON.stringify({ service: { description: setupDescription.value }, web: { title: setupTitle.value } }),
         signal: AbortSignal.timeout(10000),
       });
       if (response.status === 409) {
         await refreshSetupState();
-        setupFinished = true;
-        if (setupDialog.open) setupDialog.close();
-        goToOverview();
-        showModel();
+        if (!setupFinished) throw new Error("初始化状态无法确认，请重试。");
         return;
       }
       if (!response.ok) {
-        const data = await response.json() as { message?: string };
-        throw new Error(response.status === 400 ? data.message || "请检查填写的配置。" : "保存失败，请重试。");
+        const data = await response.json() as { message?: string; error?: string };
+        throw new Error(data.message || (data.error === "INVALID_ORIGIN" ? "请求来源校验失败，请检查反向代理配置。" : `保存失败（${data.error || response.status}）。`));
       }
       setupFinished = true;
       setWebTitle(setupTitle.value);
@@ -1286,6 +1263,26 @@ setupForm.addEventListener("submit", (event) => {
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshSetupState(); });
 void refreshSetupState();
 setInterval(() => { if (!document.hidden) void refreshSetupState(); }, 3000);
+
+const serverSettingsForm = getElement<HTMLFormElement>("server-settings-form");
+const serverPortInput = getElement<HTMLInputElement>("server-settings-port");
+const serverSettingsFeedback = getElement<HTMLElement>("server-settings-feedback");
+async function loadServerSettings(body?: { port: number }): Promise<void> {
+  const response = await fetch("/api/v1/server/settings", body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : { cache: "no-store" });
+  const data = await response.json() as { savedPort?: number; runningPort?: number; portOverridden?: boolean; message?: string; error?: string };
+  if (!response.ok) throw new Error(data.message || data.error || `请求失败（${response.status}）`);
+  serverPortInput.value = String(data.savedPort);
+  getElement<HTMLElement>("server-running-port").textContent = String(data.runningPort ?? "未知");
+  if (data.portOverridden) serverSettingsFeedback.textContent = "STARDUST_PORT 环境配置覆盖了保存的端口；移除覆盖后保存的端口才能生效。";
+}
+serverSettingsForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (!serverPortInput.reportValidity()) return;
+  serverSettingsFeedback.textContent = "";
+  void loadServerSettings({ port: Number(serverPortInput.value) }).then(() => { serverSettingsFeedback.textContent ||= "已保存，端口修改将在下次服务重启后生效。"; }).catch(error => { serverSettingsFeedback.textContent = error instanceof Error ? error.message : "保存失败"; });
+});
+window.addEventListener("hashchange", () => { if (location.hash === "#/settings/server") void loadServerSettings().catch(error => { serverSettingsFeedback.textContent = error.message; }); });
+void loadServerSettings().catch(() => {});
 
 type ModelView = { baseUrl: string; modelId: string; timeoutMs: number; stream: boolean; keyConfigured: boolean; keySource: "process" | "file" | "none"; fileKeyConfigured: boolean; processOverride: boolean };
 const modelForm = getElement<HTMLFormElement>("model-form");

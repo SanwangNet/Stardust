@@ -18,21 +18,33 @@ sudo bash scripts/install.sh
 
 ## 打开和管理服务
 
-WebUI 默认只监听服务器本机 `http://127.0.0.1:8347`。从自己的电脑访问，先建立 SSH 隧道：
+全新安装默认监听所有 IPv4 接口的 80 端口，可在可信网络通过 `http://服务器IP/` 打开初始化界面。当前没有统一账号认证，请不要直接暴露到公网；安装器不会修改防火墙。服务以独立的非 root 用户运行，systemd 只为该服务授予 `CAP_NET_BIND_SERVICE`。80 被 Caddy 等服务占用时，必须为其中一个服务选择其他端口。
 
-```sh
-ssh -L 8347:127.0.0.1:8347 用户@服务器
-```
+Web 服务设置只提供端口号，保存写入 `shared/config.toml`，当前进程不换端口、不自动重启；页面同时显示运行端口。重启后新端口生效。进程环境或 shared/.env 中的 `STARDUST_PORT` 优先于保存值；界面会提示覆盖。旧配置的 `server.host` 保留且仍生效，旧端口和环境覆盖也保持原值；没有旧值时才使用新默认值。`STARDUST_HOST` 仍可用于部署或开发覆盖。
 
-然后在自己电脑的浏览器打开 `http://127.0.0.1:8347`，在现有初始化界面完成配置。尚无统一账号认证，不应将 WebUI 直接暴露到公网。可在 `shared/config.toml` 的 `[server]` 中配置监听地址和端口，但局域网访问必须自行确保入口可信、受网络边界保护；更改端口后还需同步修改 `/opt/stardust/updater/config.json` 的 `healthPort`，并重启服务。
+Caddy 使用 HTTPS 时保留原始 Host 并设置 `X-Forwarded-Proto`（Caddy 的 reverse_proxy 默认如此），同源校验仍生效；其他只允许本机的管理操作仍受原有限制。shared 目录须由服务用户读写，保存错误会在初始化界面显示。
 
 ```sh
 sudo systemctl status stardust.service
-sudo systemctl start stardust.service
-sudo systemctl stop stardust.service
 sudo journalctl -u stardust.service -e
-curl http://127.0.0.1:8347/api/health
+curl http://127.0.0.1:80/api/health  # 根据实际运行端口调整
 ```
+
+## 已安装实例迁移
+
+先检查当前运行端口、Caddy 端口占用和 `/opt/stardust/shared/config.toml`、`/opt/stardust/shared/.env`。已有明确设置原样保留；若旧实例依赖原先隐含的 8347 默认值而需要继续使用它，请在更新前将 `[server]` 下的 `port = 8347` 写入配置（不要重复创建已有表）。修改配置前先备份。配置原先有 `host = "127.0.0.1"` 时会继续仅监听本机。新默认 80 与 Caddy 冲突时不能同时绑定同一地址和端口。
+
+在包含本次修改的可信源码目录中执行以下命令，安装新版 updater 和 systemd drop-in，然后运行更新器。它不重新安装，也不覆盖 shared。更新器会重启服务：
+
+```sh
+sudo install -d -m 0755 /etc/systemd/system/stardust.service.d
+printf '[Service]\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n' | sudo tee /etc/systemd/system/stardust.service.d/bind-port.conf >/dev/null
+sudo systemctl daemon-reload
+sudo install -o root -g root -m 0644 scripts/updater/*.mjs /usr/local/lib/stardust-updater/
+sudo node /usr/local/lib/stardust-updater/update.mjs /opt/stardust main
+```
+
+若更新器报告同版本跳过，运行 `sudo systemctl restart stardust.service` 使 drop-in 生效。检查 `systemctl status stardust.service` 和实际端口的健康接口。当前更新器通过 systemd 主进程的监听 socket 查找实际端口并核对健康响应的运行 SHA，同版本检查和部署检查不依赖旧的 `healthPort`；服务重启前后均检查当前进程。状态命令在无法读取 systemd 进程时会尝试旧的 `healthPort`，否则报告 `unknown`。
 
 健康接口中的 `runningSha` 是进程启动时读取的版本标识；开发环境缺少正式元数据时为 `development`。状态命令会通过本机健康接口观察运行 SHA，无法确认时显示 `unknown`。它与 `current` 的指向分别观察，避免只凭链接推断实际运行版本。
 
@@ -51,6 +63,6 @@ sudo node /usr/local/lib/stardust-updater/status.mjs /opt/stardust
 
 ## 联合验收
 
-在干净的隔离 Debian 容器运行首次安装，并通过 SSH 隧道完成初始化。记下健康接口的 `runningSha`，再执行一次手动更新：应返回 `UP_TO_DATE`，不产生备份。远程 `main` 出现新版本后再次更新，核对新 `runningSha`、持久数据以及新建的备份和校验清单。首次安装、真实更新、服务管理与备份路径均需实机验证；本项目不会连接或操作服务器。
+在干净的隔离 Debian 容器运行首次安装，并通过可信网络完成初始化。记下健康接口的 `runningSha`，再执行一次手动更新：应返回 `UP_TO_DATE`，不产生备份。远程 `main` 出现新版本后再次更新，核对新 `runningSha`、持久数据以及新建的备份和校验清单。首次安装、真实更新、服务管理与备份路径均需实机验证；本项目不会连接或操作服务器。
 
 WebUI 更新与备份页面、备份恢复、自动更新 timer 和 updater 自更新尚未实现。旧阶段的技术调查与用户提供的 Debian 基础测试记录保留在 [历史部署调查](deployment-investigation.md)。

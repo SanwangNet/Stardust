@@ -31,7 +31,7 @@ test("初始化合并已有配置，持久化后重新读取，并拒绝第二�
   assert.deepEqual(result, {
     initialized: true,
     service: { description: "Keep" },
-    server: { host: "127.0.0.1", port: 9001 },
+    server: { host: "0.0.0.0", port: 9001 },
     web: { title: "Updated" },
     model: { baseUrl: "", modelId: "", timeoutMs: 30000, stream: false },
   });

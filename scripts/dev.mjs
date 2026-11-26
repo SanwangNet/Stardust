@@ -8,7 +8,7 @@ const children = new Set();
 const devProxyProof = randomBytes(32).toString("base64url");
 let stopping = false;
 function start(script, args = [], nodeArgs = []) {
-  const child = spawn(process.execPath, [...nodeArgs, script, ...args], { cwd: root, stdio: "inherit", env: { ...process.env, STARDUST_DEV_PROXY_PROOF: devProxyProof } });
+  const child = spawn(process.execPath, [...nodeArgs, script, ...args], { cwd: root, stdio: "inherit", env: { ...process.env, STARDUST_DEV_PROXY_PROOF: devProxyProof, STARDUST_HOST: process.env.STARDUST_HOST ?? "127.0.0.1", STARDUST_PORT: process.env.STARDUST_PORT ?? "8347" } });
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);

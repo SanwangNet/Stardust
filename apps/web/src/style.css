@@ -753,13 +753,10 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .setup-kicker { color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .18em; }
 .setup-step h2 { margin: 0 0 24px; font-size: clamp(25px, 4vw, 32px); line-height: 1.25; }
 .setup-step p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
-.setup-step > label:not(.setup-check) { display: grid; gap: 8px; margin: 0 0 18px; color: var(--text); font-size: 13px; font-weight: 650; }
+.setup-step > label { display: grid; gap: 8px; margin: 0 0 18px; color: var(--text); font-size: 13px; font-weight: 650; }
 .setup-step input:not([type="checkbox"]), .setup-step textarea { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 0; background: var(--background); color: var(--text); font: inherit; }
 .setup-step input:focus-visible, .setup-step textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .setup-step textarea { resize: vertical; }
-.setup-step input:disabled { background: var(--surface); color: var(--muted); }
-.setup-check { display: flex; gap: 9px; align-items: center; margin: 0 0 22px; font-size: 13px; }
-.setup-check input { width: 17px; height: 17px; accent-color: var(--accent); }
 .setup-summary { margin: 0; border-top: 1px solid var(--line); }
 .setup-summary div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .setup-summary dt { color: var(--muted); }
@@ -896,7 +893,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .85; f
 .setup-secondary:hover { color: var(--accent); background: var(--accent-soft); }
 .setup-primary > span { margin-left: 14px; }
 .setup-dialog { border-top: 3px solid var(--accent); background: var(--panel); }
-.setup-progress { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-bottom: 36px; }
+.setup-progress { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-bottom: 36px; }
 .setup-progress span { border-top: 2px solid var(--line); padding-top: 9px; color: var(--muted); font-size: 10px; }
 .setup-progress span[aria-current="step"] { border-color: var(--accent); color: var(--accent); }
 .tool-admin p { font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }

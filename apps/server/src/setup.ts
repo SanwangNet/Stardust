@@ -12,6 +12,11 @@ export class SetupService {
     return { service, server, web };
   }
 
+  savePort(port: unknown): void {
+    const config = this.store.loadConfig();
+    this.store.saveConfig({ ...config, server: { ...config.server, port: port as number } });
+  }
+
   async completeInitialization(input: ConfigUpdate): Promise<StardustConfig> {
     // initializeConfig performs the full read/check/write synchronously, before this promise settles.
     return this.store.initializeConfig(input);

@@ -39,7 +39,7 @@ install -d -o root -g root -m 0755 "$ROOT/releases" "$CODE"
 install -d -o root -g root -m 0700 "$ROOT/updater" "$ROOT/backups"
 install -d -o "$CORE_USER" -g "$CORE_USER" -m 0700 "$ROOT/shared"
 install -o root -g root -m 0644 "$SCRIPT_DIR"/updater/*.mjs "$CODE/"
-printf '{"buildUser":"%s","coreUser":"%s","healthPort":8347}\n' "$BUILD_USER" "$CORE_USER" > "$ROOT/updater/config.json"
+printf '{"buildUser":"%s","coreUser":"%s","healthPort":80}\n' "$BUILD_USER" "$CORE_USER" > "$ROOT/updater/config.json"
 chmod 0600 "$ROOT/updater/config.json"
 printf '正在通过受监督的非 root Worker 构建初始版本……\n'
 "$NODE" "$CODE/prepare.mjs" "$ROOT" main
@@ -56,6 +56,8 @@ Type=simple
 User=$CORE_USER
 WorkingDirectory=$ROOT/current
 Environment=STARDUST_STORAGE_ROOT=$ROOT/shared
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=$NODE --experimental-sqlite apps/server/dist/main.js
 KillMode=control-group
 Delegate=no
@@ -73,14 +75,14 @@ const expected = process.argv[2];
 const until = Date.now() + 30000;
 while (Date.now() < until) {
   try {
-    const response = await fetch('http://127.0.0.1:8347/api/health', {signal: AbortSignal.timeout(2000), redirect: 'error'});
+    const response = await fetch('http://127.0.0.1:80/api/health', {signal: AbortSignal.timeout(2000), redirect: 'error'});
     if (response.ok) { const value = await response.json(); if (value.status === 'ok' && value.service === 'Stardust' && value.runningSha === expected) process.exit(0); }
   } catch {}
   await new Promise(resolve => setTimeout(resolve, 1000));
 }
 console.error('服务未就绪或运行版本不匹配，请查看 journalctl -u stardust.service'); process.exit(1);
 JS
-printf '\n安装完成。WebUI 默认仅监听服务器本机：http://127.0.0.1:8347\n'
-printf '远程访问可使用 SSH 隧道：ssh -L 8347:127.0.0.1:8347 用户@服务器\n'
+printf '\n安装完成。WebUI 默认监听 0.0.0.0:80，可通过 http://服务器IP/ 访问。\n'
+printf '当前没有统一账号认证，请仅在可信网络中访问。\n'
 printf '状态：systemctl status stardust.service\n日志：journalctl -u stardust.service -e\n'
 printf '更新：sudo %s %s/update.mjs %s main\n' "$NODE" "$CODE" "$ROOT"
