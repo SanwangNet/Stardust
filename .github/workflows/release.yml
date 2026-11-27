@@ -21,8 +21,16 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npm test
+      - name: Verify Linux installer tests actually run
+        run: |
+          node --test --test-reporter=tap tests/installer-linux.test.mjs | tee "$RUNNER_TEMP/installer-test.tap"
+          grep -Eq '^ok [0-9]+ - Linux fresh install defaults to management and repeated install preserves data$' "$RUNNER_TEMP/installer-test.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/installer-test.tap"
       - name: Verify lifecycle with isolated Linux files
-        run: sudo "$(command -v node)" --experimental-sqlite --test --test-name-pattern="real Linux files|atomic JSON" tests/lifecycle.test.mjs
+        run: |
+          sudo "$(command -v node)" --experimental-sqlite --test --test-reporter=tap --test-name-pattern="real Linux files|atomic JSON" tests/lifecycle.test.mjs | tee "$RUNNER_TEMP/lifecycle-test.tap"
+          grep -Eq '^ok [0-9]+ - real Linux files: failed manager preparation or exchange keeps the active manager$' "$RUNNER_TEMP/lifecycle-test.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/lifecycle-test.tap"
       - name: Package production files
         run: |
           stage="$RUNNER_TEMP/stardust-package"

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readlink, realpath, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, realpath, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -204,12 +204,29 @@ test('real Linux files: local release validates installer identity, size and con
 test('real Linux files: failed manager preparation or exchange keeps the active manager', {skip:process.platform!=='linux'||process.getuid()!==0}, async t=>{
   const root=await temp(t),source=join(root,'source'),active=join(root,'active');
   await mkdir(source);await mkdir(active);await writeFile(join(active,'marker'),'running');
-  for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py'])await copyFile(new URL('../scripts/lifecycle/'+name,import.meta.url),join(source,name));
+  const names=['manage.mjs','files.mjs','running-port.mjs','archive.py'];
+  for(const name of names)await writeFile(join(source,name),await readFile(new URL('../scripts/lifecycle/'+name,import.meta.url)));
+  const assertSafeFixtures=async()=>{
+    for(const name of names){
+      const info=await lstat(join(source,name));
+      assert.equal(info.isFile(),true,`${name}: not a regular file`);
+      assert.equal(info.uid,0,`${name}: owner must be root`);
+      assert.equal(info.gid,process.getgid(),`${name}: unexpected group`);
+      assert.equal(info.nlink,1,`${name}: unexpected link count`);
+      assert.ok(info.size>0&&info.size<=1024*1024,`${name}: invalid size ${info.size}`);
+    }
+  };
+  await assertSafeFixtures();
+  await chown(join(source,'manage.mjs'),65534,65534);
+  await assert.rejects(prepareManager(source,active),/UNSAFE_FILE/);
+  await chown(join(source,'manage.mjs'),0,process.getgid());
+  await assertSafeFixtures();
   await writeFile(join(source,'files.mjs'),'export {');
-  await assert.rejects(prepareManager(source,active));
+  await assert.rejects(prepareManager(source,active),error=>{assert.match(error.stderr,/SyntaxError/);return true;});
   assert.equal(await readFile(join(active,'marker'),'utf8'),'running');
   assert.deepEqual((await readdir(root)).sort(),['active','source']);
-  await copyFile(new URL('../scripts/lifecycle/files.mjs',import.meta.url),join(source,'files.mjs'));
+  await writeFile(join(source,'files.mjs'),await readFile(new URL('../scripts/lifecycle/files.mjs',import.meta.url)));
+  await assertSafeFixtures();
   const stage=await prepareManager(source,active);
   await assert.rejects(exchangeManager(stage,join(root,'missing')));
   assert.equal(await readFile(join(active,'marker'),'utf8'),'running');
