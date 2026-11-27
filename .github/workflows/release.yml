@@ -1,0 +1,75 @@
+name: Publish Stardust Linux package
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm test
+      - name: Verify lifecycle with isolated Linux files
+        run: sudo "$(command -v node)" --experimental-sqlite --test --test-name-pattern="real Linux files" tests/lifecycle.test.mjs
+      - name: Package production files
+        run: |
+          stage="$RUNNER_TEMP/stardust-package"
+          mkdir -p "$stage/apps/server" "$stage/apps/web"
+          cp -a apps/server/dist "$stage/apps/server/"
+          cp -a apps/web/dist "$stage/apps/web/"
+          cp package.json package-lock.json "$stage/"
+          npm ci --prefix "$stage" --omit=dev
+          node scripts/package-release.mjs "$stage" "$RUNNER_TEMP/stardust-publish"
+      - name: Verify the unpacked package
+        run: |
+          output="$RUNNER_TEMP/stardust-publish"
+          (cd "$output" && sha256sum -c SHA256SUMS && bash -n install.sh)
+          unpacked=$(mktemp -d)
+          python3 -I scripts/lifecycle/archive.py extract "$output/stardust-linux-x64.tar.gz" "$unpacked" package
+          node --experimental-sqlite scripts/smoke-release.mjs "$unpacked"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: ${{ runner.temp }}/stardust-publish/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: stardust-main-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: release
+      - name: Publish only after all assets have uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="main-${GITHUB_RUN_NUMBER}-${GITHUB_SHA}"
+          if draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = true ]; then
+              echo "An incomplete draft exists for $tag. Inspect and remove the draft before retrying."
+              exit 1
+            fi
+            echo "Release identity already exists. Existing assets are preserved."
+            exit 0
+          fi
+          gh release create "$tag" release/install.sh release/stardust-linux-x64.tar.gz release/stardust-release.json release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "Stardust $tag" --notes "Linux x86_64 · Node.js 24 · $GITHUB_SHA"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false

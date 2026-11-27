@@ -3,14 +3,12 @@ import { readdir, readFile, readlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { createOutputTail } from './diagnostics.mjs';
 
 // Inspect the systemd main process's listening sockets, not the next-start config.
 // Only the local health endpoint for the expected Stardust process is accepted.
 export async function runningEndpoints() {
   const exec=promisify(execFile),env={ PATH:'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', LANG:'C' };
-  const run=async(file,args,options)=>{try{return await exec(file,args,options);}catch(e){const tail=createOutputTail(4096);tail.push(String(e.stderr??''));e.diagnostic={command:file+' <args>',exitCode:Number.isInteger(e.code)?e.code:null,signal:e.signal??null,stderr:tail.snapshot(env).text.replace(/(?:\/[^\s:]+)+/g,'<path>').slice(-2048)};throw e;}};
-  const {stdout}=await run('systemctl',['show','stardust.service','--property=MainPID,User'],{timeout:3000,env});
+  const {stdout}=await exec('/usr/bin/systemctl',['show','stardust.service','--property=MainPID,User'],{timeout:3000,env});
   const fields=Object.fromEntries(stdout.trim().split(/\r?\n/).map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
   const pid=Number(fields.MainPID),user=fields.User;
   if(!Number.isSafeInteger(pid)||pid<1)throw new Error('SERVICE_NOT_RUNNING');
@@ -18,7 +16,7 @@ export async function runningEndpoints() {
     if(!['EACCES','EPERM'].includes(e.code)||process.getuid?.()!==0||!user||! /^[a-z_][a-z0-9_-]{0,31}$/.test(user)||user==='root')throw e;
     // A container root may lack CAP_SYS_PTRACE. Read the same process as its
     // dedicated service user rather than requesting additional capabilities.
-    const result=await run('runuser',['-u',user,'--',process.execPath,fileURLToPath(import.meta.url),'--pid',String(pid)],{timeout:5000,maxBuffer:16384,env});
+    const result=await exec('/usr/sbin/runuser',['-u',user,'--',process.execPath,fileURLToPath(import.meta.url),'--pid',String(pid)],{timeout:5000,maxBuffer:16384,env});
     const value=JSON.parse(result.stdout);
     if(!Array.isArray(value)||value.length>256||value.some(x=>!x||typeof x.host!=='string'||!/^(?:[0-9.]+|\[[0-9a-f:]+\])$/.test(x.host)||!Number.isInteger(x.port)||x.port<1||x.port>65535))throw new Error('SERVICE_ENDPOINT_INVALID');
     return value;

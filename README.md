@@ -57,6 +57,10 @@ QQ 生产 Tool Calling 默认关闭。要在可信网络环境显式启用，启
 
 生产运行请先执行 `npm run build`，再执行 `npm start`，通过后端显示的地址访问 WebUI；生产服务不依赖 Vite。`npm run dev` 启动前会编译后端，按 Ctrl+C 停止开发服务。
 
+## 生产安装
+
+从 GitHub Releases 下载安装入口。Debian 服务器直接运行发布包，可按需启用 WebUI 更新、备份和回滚。安装与旧实例迁移步骤见 [部署文档](docs/deployment.md)。
+
 ## 运行约束
 
 - 生产默认绑定 `0.0.0.0`，端口 `80`，**没有登录认证，不能直接开放到不可信网络**。独立反向代理需按[部署文档](docs/deployment.md)配置可信代理 IP。

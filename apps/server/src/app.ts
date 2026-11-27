@@ -13,8 +13,8 @@ import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { isWebAccess, isTrustedLocalAccess, parseTrustedProxies } from "./local-access.js";
-import { checkSoftwareUpdate } from "./software-update.js";
-import { createWebUpdateControl } from "./web-update-control.js";
+import { backupId, createManagement, managementRequest } from "./management.js";
+import { pipeline } from "node:stream/promises";
 import { ToolRuns } from "./tool-runs.js";
 import { ScopedHistorySearch } from "./scoped-history-search.js";
 import { ContextService, deliveryStatus } from "./context-service.js";
@@ -37,6 +37,10 @@ import { applicationRoot } from "./env.js";
 
 // Resolve once when this process starts: changing current cannot change its identity.
 export function readRunningCommit(root: string = applicationRoot): string {
+  try {
+    const published = JSON.parse(readFileSync(join(root, "version.json"), "utf8"));
+    if (published.format === 1 && typeof published.sha === "string" && /^[a-f0-9]{40}$/.test(published.sha)) return published.sha;
+  } catch { /* Source installations use their existing release marker. */ }
   try {
     const metadata: unknown = JSON.parse(readFileSync(join(root, ".stardust-candidate.json"), "utf8"));
     if (metadata && typeof metadata === "object" && "sha" in metadata && typeof metadata.sha === "string" && /^[a-f0-9]{40}$/.test(metadata.sha) && "status" in metadata && metadata.status === "prepared") return metadata.sha;
@@ -71,9 +75,7 @@ export interface AppOptions {
   qqToolAdapter?: { policy?: QQToolPolicy; register(start: QQToolStarter): void; runTimeoutMs?: number; retentionMs?: number };
   qqApprovalToken?: string;
   /** In-process test seam; never configured by browser requests. */
-  webUpdateControl?: ReturnType<typeof createWebUpdateControl>;
-  runningShaForTest?: string;
-  updateCheckForTest?: typeof checkSoftwareUpdate;
+  management?: ReturnType<typeof createManagement>;
   qqToolCalling?: { enabled: boolean; policy: QQToolPolicy; maxActive?: number };
 }
 
@@ -157,6 +159,7 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
   "/": { filename: "index.html", contentType: "text/html; charset=utf-8" },
   "/index.html": { filename: "index.html", contentType: "text/html; charset=utf-8" },
   "/main.js": { filename: "main.js", contentType: "text/javascript; charset=utf-8" },
+  "/management-ui.js": { filename: "management-ui.js", contentType: "text/javascript; charset=utf-8" },
   "/navigation-transition.js": { filename: "navigation-transition.js", contentType: "text/javascript; charset=utf-8" },
   "/navigation-diagnostics.js": { filename: "navigation-diagnostics.js", contentType: "text/javascript; charset=utf-8" },
   "/model-errors.js": { filename: "model-errors.js", contentType: "text/javascript; charset=utf-8" },
@@ -179,8 +182,7 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
 };
 
 export function createStardustServer(options: AppOptions = {}): Server {
-  const webUpdate = options.webUpdateControl ?? createWebUpdateControl(process.env.STARDUST_WEB_UPDATE_ENABLED === "1");
-  const activeSha = options.runningShaForTest ?? runningSha;
+  const management = options.management ?? createManagement(process.env.STARDUST_MANAGEMENT_ENABLED === "1");
   const startedAt = options.startedAt ?? new Date();
   const version = options.version ?? readRunningVersion();
   const staticDir = options.staticDir ?? defaultStaticDir;
@@ -806,32 +808,47 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
-    if (pathname === "/api/v1/software-update/status") {
-      if (request.method !== "GET") { sendJson(response,405,{error:"METHOD_NOT_ALLOWED"}); return; }
-      try { if (!setup.getInitializationState().initialized) { sendJson(response,403,{error:"SETUP_REQUIRED"}); return; } sendJson(response,200,{enabled:webUpdate.enabled,job:await webUpdate.status(),runningSha:activeSha}); }
-      catch { sendJson(response,503,{error:"UPDATE_STATUS_UNAVAILABLE",message:"无法读取更新状态。"}); }
-      return;
-    }
-    if (pathname === "/api/v1/software-update/install") {
-      if (request.method !== "POST") { sendJson(response,405,{error:"METHOD_NOT_ALLOWED"}); return; }
-      if (!request.headers.origin || !trusted(true) || !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response,403,{error:"INVALID_ORIGIN"}); return; }
+    if (pathname.startsWith("/api/v1/management/")) {
+      const action = pathname.slice("/api/v1/management/".length);
+      const reading = request.method === "GET";
       try {
-        if (!setup.getInitializationState().initialized || !webUpdate.enabled) { sendJson(response,403,{error:"UPDATE_DISABLED",message:"WebUI 更新未启用。"}); return; }
-        const body=await readSetupBody(request,1024);
-        if (!body || typeof body!=="object" || Array.isArray(body) || Object.keys(body).length) { sendJson(response,400,{error:"INVALID_INPUT"}); return; }
-        const previous=await webUpdate.status();
-        if (previous?.running) { sendJson(response,409,{error:"UPDATE_IN_PROGRESS",message:"更新正在进行。"}); return; }
-        await webUpdate.start(); sendJson(response,202,{accepted:true,previousJobId:previous?.jobId ?? null});
-      } catch (error) { sendJson(response,503,{error:"UPDATE_START_FAILED",message:error instanceof Error ? error.message : "无法启动更新服务。"}); }
-      return;
-    }
-
-    if (pathname === "/api/v1/software-update/check") {
-      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
-      try {
-        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        sendJson(response, 200, await (options.updateCheckForTest ?? checkSoftwareUpdate)(version));
-      } catch (error) { sendJson(response, 502, { error: "UPDATE_CHECK_FAILED", message: error instanceof Error && /^远程版本/.test(error.message) ? error.message : "无法连接更新来源，请稍后重试。" }); }
+        if (!setup.getInitializationState().initialized) { sendJson(response,403,{error:"SETUP_REQUIRED"}); return; }
+        if (reading && action === "status") {
+          sendJson(response,200,{...await management.status(),runningSha,version});
+          return;
+        }
+        if (!management.enabled) { sendJson(response,403,{error:"MANAGEMENT_DISABLED"}); return; }
+        if (reading && action.startsWith("backups/")) {
+          const id = action.slice("backups/".length);
+          if (!backupId.test(id)) { sendJson(response,404,{error:"NOT_FOUND"}); return; }
+          const download = await management.download(id);
+          response.writeHead(200,{
+            ...securityHeaders,
+            "Content-Type":"application/gzip",
+            "Content-Disposition":'attachment; filename="stardust-'+id+'.tar.gz"',
+            "Content-Length":download.size,
+            "Cache-Control":"no-store",
+          });
+          await pipeline(download.stream,response);
+          return;
+        }
+        if (request.method !== "POST") { sendJson(response,405,{error:"METHOD_NOT_ALLOWED"}); return; }
+        if (!request.headers.origin || !trusted(true)) { sendJson(response,403,{error:"INVALID_ORIGIN"}); return; }
+        const type = request.headers["content-type"] ?? "";
+        let id: string;
+        if (action === "upload" && type === "application/gzip") id = await management.submit({operation:"upload"},request);
+        else if (action === "request" && /^application\/json(?:\s*;|\s*$)/i.test(type)) {
+          let body: unknown;
+          try { body = await readSetupBody(request,2048); } catch { throw new Error("INVALID_REQUEST"); }
+          id = await management.submit(managementRequest(body));
+        } else { sendJson(response,415,{error:"INVALID_CONTENT_TYPE"}); return; }
+        sendJson(response,202,{id});
+      } catch (error) {
+        if (response.destroyed || response.headersSent) return;
+        const code = (error as NodeJS.ErrnoException).code === "ENOENT" && action.startsWith("backups/") ? "NOT_FOUND" : error instanceof Error ? error.message : "";
+        const known: Record<string,number> = { INVALID_REQUEST:400, MANAGEMENT_BUSY:409, MANAGEMENT_DISABLED:403, UPLOAD_TOO_LARGE:413, NOT_FOUND:404 };
+        sendJson(response,known[code] ?? 503,{error:Object.hasOwn(known,code)?code:"MANAGEMENT_UNAVAILABLE"});
+      }
       return;
     }
 
@@ -1014,7 +1031,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         status: "ok",
         service: "Stardust",
         version,
-        runningSha: activeSha,
+        runningSha,
         startedAt: startedAt.toISOString(),
         uptimeMs: Math.max(0, Date.now() - startedAt.getTime()),
         checkedAt: new Date().toISOString(),

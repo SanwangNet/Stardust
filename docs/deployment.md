@@ -1,111 +1,75 @@
-# 安装、运行和更新
+# 安装、更新与备份
 
-当前安装与更新功能尚待在 Debian 13 的隔离环境中完整验收。请先在可丢弃的测试容器中按下面的命令验证，不要直接用于已有生产服务。需要 systemd、cgroup v2、Node.js 24、npm、Git、flock、tar、gzip 和 psmisc 提供的 fuser；脚本检查依赖，不自动安装系统软件包。
-
-## 首次安装
-
-从可信仓库取得已经包含本安装脚本的版本，然后执行：
+Stardust 发布包面向 Debian 13、Linux x86_64 和 Node.js 24。生产机器还需要 Python 3、systemd 和 util-linux。可以先安装 Debian 依赖，再通过可信的软件源安装 Node.js 24：
 
 ```sh
-git clone https://github.com/SanwangNet/Stardust.git
-cd Stardust
-sudo bash scripts/install.sh
+sudo apt update
+sudo apt install python3 systemd util-linux passwd coreutils ca-certificates
+node --version
 ```
 
-脚本创建 `stardust` 服务用户和独立的 `stardust-build` 构建用户，安装独立 updater，并通过 systemd 监督非 root 构建。首次安装从固定 GitHub 仓库的 `main` 获取并固定版本，执行 `npm ci`、`npm run build` 和运行产物检查，再发布、启动并核对健康接口中的运行 SHA。它不会要求输入模型或 QQ 凭据。系统工具和 Node 必须位于 root 管理的可信路径；用户目录中的 Node 安装通常不满足此要求。
-
-若 `/opt/stardust`、相应用户、updater 目录或同名服务已存在，安装会停止并保留现场，不清空已有数据或备份。失败时查看屏幕输出、`sudo cat /opt/stardust/updater/state.json` 和 `sudo journalctl -u stardust.service -e`。构建失败的有界诊断位于 `/opt/stardust/build-work/<任务ID>/failure.json`；日志可能包含敏感信息，只供管理员查看。安装中断后的目录和账号不会自动删除，重新尝试前需要管理员检查。
-
-## 打开和管理服务
-
-全新安装默认监听所有 IPv4 接口的 80 端口，可在可信网络通过 `http://服务器IP/` 打开初始化界面。当前没有统一账号认证，请不要直接暴露到公网；安装器不会修改防火墙。服务以独立的非 root 用户运行，systemd 只为该服务授予 `CAP_NET_BIND_SERVICE`。80 被 Caddy 等服务占用时，必须为其中一个服务选择其他端口。
-
-Web 服务设置只提供端口号，保存写入 `shared/config.toml`，当前进程不换端口、不自动重启；页面同时显示运行端口。重启后新端口生效。进程环境或 shared/.env 中的 `STARDUST_PORT` 优先于保存值；界面会提示覆盖。旧配置的 `server.host` 保留且仍生效，旧端口和环境覆盖也保持原值；没有旧值时才使用新默认值。`STARDUST_HOST` 仍可用于部署或开发覆盖。
-
-Caddy 使用 HTTPS 时保留原始 Host 并设置 `X-Forwarded-Proto`（Caddy 的 reverse_proxy 默认如此），同源校验仍生效；其他只允许本机的管理操作仍受原有限制。shared 目录须由服务用户读写，保存错误会在初始化界面显示。
+在 [GitHub Releases](https://github.com/SanwangNet/Stardust/releases) 下载已发布版本的 `install.sh`，核对仓库来源并审核后执行：
 
 ```sh
-sudo systemctl status stardust.service
-sudo journalctl -u stardust.service -e
-curl http://127.0.0.1:80/api/health  # 根据实际运行端口调整
+sudo bash install.sh
 ```
 
-## 已安装实例迁移
+若希望首次安装同时启用 WebUI 软件管理，使用 `sudo bash install.sh --enable-management`。使用新架构安装后，也可以用同一个脚本和选项启用。安装器会获取最新完整发布，校验软件包 SHA256，解压到 `/opt/stardust/releases/<SHA>`，并启动独立非 root 用户的服务。Core 默认在 `0.0.0.0:80` 监听，低端口绑定权限仍由它的 systemd 单元提供。通过可信网络打开服务器 IP 完成初始化。已有端口覆盖优先，页面保存的端口在下次重启时生效。
 
-先检查当前运行端口、Caddy 端口占用和 `/opt/stardust/shared/config.toml`、`/opt/stardust/shared/.env`。已有明确设置原样保留；若旧实例依赖原先隐含的 8347 默认值而需要继续使用它，请在更新前将 `[server]` 下的 `port = 8347` 写入配置（不要重复创建已有表）。修改配置前先备份。配置原先有 `host = "127.0.0.1"` 时会继续仅监听本机。新默认 80 与 Caddy 冲突时不能同时绑定同一地址和端口。
+私有仓库需要先用有权访问该仓库的账号下载安装入口。若服务器也需要凭据，请将只读、仅该仓库的 GitHub Contents 凭据以 root 所有、`0600` 权限保存在 `/etc/stardust/github-token`。例如先执行 `sudo install -d -m 0700 /etc/stardust`，再执行 `sudo install -m 0600 /dev/null /etc/stardust/github-token` 并使用 `sudoedit` 填写。公开仓库无需凭据。凭据由管理器读取，不进入 Core、浏览器或软件包。下载重定向不携带凭据。
 
-在包含本次修改的可信源码目录中执行以下命令，安装新版 updater 和 systemd drop-in，然后运行更新器。它不重新安装，也不覆盖 shared。更新器会重启服务：
+## WebUI 与可信代理
+
+软件管理默认关闭。启用后，所有能够访问该 WebUI 的用户都能更新、下载包含凭据和私人历史的备份，以及恢复或删除数据。请仅在受控网络中启用。Host、Origin、跨站检查和可信代理配置继续生效，这些检查不识别用户身份。
+
+独立 Caddy 需要保留原始 Host 并发送 `X-Forwarded-Proto`。若 Caddy 到 Core 的实际 TCP 源地址为 `192.168.30.23`，可以通过已有服务 drop-in 配置：
+
+```ini
+[Service]
+Environment=STARDUST_TRUSTED_PROXIES=192.168.30.23
+```
+
+执行 `sudo systemctl daemon-reload && sudo systemctl restart stardust.service` 生效。已有可信代理设置会原样保留。Caddy 与 Stardust 部署在不同主机时可以分别监听各自的 80 端口。
+
+## 现有 Debian 实例迁移
+
+在 [GitHub Releases](https://github.com/SanwangNet/Stardust/releases) 下载包含新架构的 `install.sh`，确认旧更新没有运行后执行：
 
 ```sh
-sudo install -d -m 0755 /etc/systemd/system/stardust.service.d
-printf '[Service]\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n' | sudo tee /etc/systemd/system/stardust.service.d/bind-port.conf >/dev/null
-sudo systemctl daemon-reload
-sudo install -o root -g root -m 0644 scripts/updater/*.mjs /usr/local/lib/stardust-updater/
-sudo node /usr/local/lib/stardust-updater/update.mjs /opt/stardust main
+sudo bash install.sh --migrate --enable-management
 ```
 
-若更新器报告同版本跳过，运行 `sudo systemctl restart stardust.service` 使 drop-in 生效。检查 `systemctl status stardust.service` 和实际端口的健康接口。当前更新器通过 systemd 主进程的监听 socket 查找实际端口并核对健康响应的运行 SHA，同版本检查和部署检查不依赖旧的 `healthPort`；服务重启前后均检查当前进程。若容器 root 无权读取该进程的 `/proc/<PID>/fd`，检查会尝试以 systemd 配置的非 root 服务用户读取，避免额外授予 `CAP_SYS_PTRACE`；仍无法确认时部署检查失败。状态命令在无法读取 systemd 进程时会尝试旧的 `healthPort`，否则报告 `unknown`。
+如果希望继续关闭 WebUI 软件管理，省略 `--enable-management`。迁移复用现有 `stardust.service` 和服务用户，保留 `shared`、端口、低端口权限、可信代理、已有备份和旧版本目录。新包在旧服务运行期间下载并校验，停机后先备份，再切换。标准旧 oneshot、sudoers 规则和旧启用 drop-in 会移到管理员私有目录，便于核对。自定义文件保持原样，请由部署者检查。旧构建账号、源码 release、旧 Updater 文件和构建残留不会自动清理，避免删除实验性或仍有价值的文件。
 
-健康接口中的 `runningSha` 是进程启动时读取的版本标识；开发环境缺少正式元数据时为 `development`。状态命令会通过本机健康接口观察运行 SHA，无法确认时显示 `unknown`。它与 `current` 的指向分别观察，避免只凭链接推断实际运行版本。
-
-## 独立反向代理与访问边界
-
-Stardust 以可信局域网为部署前提，同源校验和控制会话令牌用于防止跨站请求，并不是用户身份认证；能够访问 WebUI 的网络用户可以使用业务功能并审批 Tool。不要把服务或代理直接暴露到不可信网络，也不要只依靠转发头或同源检查来保护系统更新、备份下载等管理操作；更新器仍仅通过服务器上的管理员 CLI 执行。服务不会自动修改防火墙。Tool 的明确批准、参数摘要、来源与权限规则继续生效。
-
-默认不信任任何反向代理。使用独立 Caddy 时，在已有服务器上创建 systemd drop-in，填写 Caddy **连接 Stardust 时的实际源 IP**（多个地址用逗号分隔；仅支持精确 IPv4/IPv6，不支持网段、主机名或通配符）：
+若迁移已配置新单元但下载或部署失败，先查阅 `sudo journalctl -u stardust.service -e` 和终端错误。解决问题后，可以用同一套管理器重试安装：
 
 ```sh
-sudo install -d -m 0755 /etc/systemd/system/stardust.service.d
-printf '[Service]\nEnvironment=STARDUST_TRUSTED_PROXIES=192.168.30.23\n' | sudo tee /etc/systemd/system/stardust.service.d/trusted-proxy.conf >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl restart stardust.service
+sudo flock --no-fork /opt/stardust/management/private/lock "$(command -v node)" /usr/local/lib/stardust-lifecycle/manage.mjs install
 ```
 
-Caddy 的 reverse_proxy 应保留浏览器原始 Host 并设置单个 `X-Forwarded-Proto`；其默认行为满足此要求。该 IP 是 Stardust 看到的 TCP 对端地址，容器 NAT 存在时可能不同，应以实际连接为准。只为受控代理配置地址，并限制任何其他人不能使用该地址或经其转发任意 Host；不要信任客户端自带的转发头。直连使用服务器 IP，例如 `http://192.168.30.22/`，通过代理使用 `https://bot.lan.tenqui.ink`。直接访问时 Host 须为连接的服务端 IP（本机可使用 localhost），避免 DNS 重绑定；代理的 Host 由受信 Caddy 的站点配置限制。
+重试前确认当前部署和备份状态。如果安装器中途退出且尚未写齐单元，请先检查创建到哪一步。切换后的健康检查失败会保留失败状态和更新前备份，由部署者决定如何恢复。
 
-`STARDUST_TRUSTED_PROXIES` 也可写在 `/opt/stardust/shared/.env`；进程环境变量优先。配置非法时服务拒绝启动。不要同时在 drop-in 与 .env 中设置不同值。更改后重启生效，查看 `sudo systemctl status stardust.service` 和日志排查。
+## 软件更新、备份与回滚
 
-Debian 精简环境可先安装完整依赖：
+- 软件更新页面检查已发布的软件包。选中更新后，管理器再次确认目标 SHA、验证包并解压。旧服务继续运行到准备完成。服务停止后创建自动备份，再原子切换 `current`，启动并核对运行 SHA。
+- 版本清理默认保留当前版本和最近两个可用版本。编辑 root 专用的 `/opt/stardust/management/config.json` 可将 `retainVersions` 和 `retainAutomaticBackups` 分别设置为 1–50。迁移首次运行会额外保留旧源码版本。未知目录由部署者自行检查。
+- 回滚程序仅在两个发布版本声明相同数据兼容代数时开放。未来若修改数据兼容性，发布者须提高 `package.json` 的 `stardustDataFormat`。旧源码版本没有这个声明，必须通过对应的数据备份一起恢复。不提供 SQLite 逆向迁移。
+- 备份页面可手动创建、下载、上传、恢复和删除备份。创建备份时短暂停止服务，`shared` 由 Stardust 独占管理。正常更新继续使用原有 `shared`。下载走受控接口，归档包含配置、凭据和所有持久化数据。
+- 手动备份、上传备份和恢复前的安全副本不会随自动备份或程序版本清理。恢复会校验内容并先保存当前数据的安全副本，再替换 `shared`，启动备份对应程序。端口、代理设置及备份之后写入的数据都可能改变，WebUI 会要求确认。若发布版已从本机清理，管理器尝试按备份中的发布身份重新下载。
+- 旧 UUID 命名的 tar.gz 和独立 JSON 清单可读取及下载。仅在校验匹配且对应旧程序仍存在时可恢复。单独上传旧 tar.gz 可以保留和下载，但缺少可信版本关联，不能从 WebUI 恢复。包含链接或特殊文件的归档不支持自动恢复。恢复到不包含管理页面的旧版后，请在服务器侧核对结果，状态仍在 `/opt/stardust/management/status.json`。所有旧归档会保留，直到用户明确删除。
+- 备份上传和下载上限为 2 GiB，归档解压上限为 8 GiB。若通过代理上传，代理也需允许相应大小和请求时间。
+
+## 发布和运行边界
+
+`main` 推送触发 GitHub Actions。构建工作只读检查源码，执行 npm 安装、类型检查、编译和测试，再单独安装生产依赖。工作流将编译后的程序、静态资源、生产依赖、版本元数据和 SHA256 归档，并从解压目录独立启动验证。发布工作使用最小写权限，先创建草稿并上传完整产物，随后公开发布。发布身份包含工作流序号和完整 Commit SHA。已有发布产物不覆盖。失败留下草稿时，可由维护者检查并移除该草稿后重试同一运行。
+
+Core 通过固定请求文件提交预定义操作，systemd.path 启动独立 oneshot。管理器使用 flock 串行处理请求。Core 可读取筛选后的状态及被授权下载的备份，本身没有系统服务启动授权。用户请求不携带命令、服务名、路径、仓库地址或下载 URL。管理器安装在管理员控制的 `/usr/local/lib/stardust-lifecycle`，普通 Core 更新只更换运行包。不兼容管理器契约的包需要管理员从审核过的发布下载安装入口，执行 `sudo bash install.sh --refresh-manager`。若发布说明要求修改 systemd 单元或其他部署契约，还需按该发布的说明手动迁移。没有自动调度、原生 HTTPS、ACME 或自动回滚。
+
+状态和故障检查：
 
 ```sh
-sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin
+sudo systemctl status stardust.service stardust-lifecycle.path
+sudo journalctl -u stardust-lifecycle.service -u stardust.service -e
 ```
 
-`psmisc` 提供 `fuser`。发行版自带 Node.js 不一定满足版本要求，还需自行提供可信系统路径中的 Node.js 24 和 npm。升级期间备份前先停止服务并检查数据库文件是否仍被使用；如容器权限导致检查无法确认，更新会失败，不会忽略检查。
-
-## 启用 WebUI 软件更新
-
-WebUI 系统更新默认关闭。新安装可使用 `sudo bash scripts/install.sh --enable-web-update` 显式启用；现有安装不需重装。在包含本版本、来源可信且已由管理员审核的源码目录中执行：
-
-```sh
-sudo apt update && sudo apt install -y sudo
-sudo bash scripts/enable-web-update.sh
-sudo systemctl restart stardust.service
-```
-
-启用脚本只安装 root 所有的固定 `stardust-web-update.service`、只允许 Stardust 用户启动该服务的 sudoers 规则，以及 Core 的启用配置。它不会覆盖已有同名配置；若文件已存在，请管理员检查。该命令是一次性的部署授权，普通 Core 更新无需再次复制 updater。启用脚本必须来自可信的管理员审核源码，不能以 root 执行 updater 下载或构建的候选版本脚本。
-
-这是部署信任决策，不是用户身份认证：启用后，所有能访问受信 WebUI 的用户都可以触发固定的 Stardust 更新。Host、Origin 与 CSRF 检查不能识别管理员；仅在可信局域网和受控代理后启用，勿直接暴露公网。禁用时删除该 sudoers 规则和 Core 的 `web-update.conf`，执行 `sudo systemctl daemon-reload` 并重启 Core。不要给予 Core 通用 sudo 权限。
-
-软件更新页面在刷新或 Core 重启后继续读取经过筛选的任务状态；成功仅在 updater 报告成功且实际运行 SHA 匹配目标时显示。失败时查看页面提示及 `sudo journalctl -u stardust-web-update.service -e`。服务仅提供固定仓库、固定分支和固定部署路径，不接收浏览器提供的命令。现有 updater 不会自动替换自身或 systemd 配置；未来发布若要求更高的 `package.json` 中 `stardustUpdaterContract` 值，更新会停止并提示管理员迁移。未声明该字段的旧版本按契约 1 处理。
-
-Debian 实机验收：确认已安装 sudo、启用服务后打开设置中的「软件更新」，检查远程版本并在存在新版本时安装；观察下载、构建、备份与重启提示，待重连后比较页面显示的目标 SHA 与 `curl http://127.0.0.1:实际端口/api/health` 的 `runningSha`。再检查 updater 的最终状态；断线或仅有健康响应都不代表更新成功。无更新时应返回已是最新版本。当前开发机无法替代 Debian systemd/LXC 真实验收。
-
-## 数据和手动更新
-
-程序位于 `/opt/stardust/releases/<SHA>`，`current` 指向当前版本。配置、凭据、数据库和其他持久数据保存在 `/opt/stardust/shared`；服务通过 `STARDUST_STORAGE_ROOT` 使用它们。更新前的归档和校验清单位于 root 私有的 `/opt/stardust/backups`，包含敏感信息，不要公开。
-
-```sh
-sudo node /usr/local/lib/stardust-updater/update.mjs /opt/stardust main
-sudo node /usr/local/lib/stardust-updater/status.mjs /opt/stardust
-```
-
-当目标 SHA 与已安装版本一致时，更新器检查已安装产物、服务配置和实际运行 SHA；正常则返回 `UP_TO_DATE`，不重新构建、停机或备份。异常返回 `INSTALLATION_UNHEALTHY`，需要管理员检查。`--force` 只跳过退避，不绕过完整性或监督检查，也不会强制重新安装相同版本。
-
-有新版本时，旧服务在构建期间继续运行。新版本准备完成后，更新器停止服务，检查数据库使用情况，备份 `shared`，切换 `current`，再启动并检查运行 SHA。候选 release 已发布且完整性、归属和 SHA 校验通过时，重试可直接复用，无需重建。部署命令失败时，CLI 输出命令名、有限的脱敏 stderr 和退出码，诊断写入 root 私有的 updater 目录。旧 release 保留。备份失败会尝试恢复旧服务；切换后失败不会自动回滚，因为新程序可能已经迁移数据库。管理员应检查状态、日志和备份，确认数据兼容性后再处理。更新期间其他程序不应写入 `shared`；符号链接、硬链接和特殊文件会使备份保守失败。
-
-## 联合验收
-
-在干净的隔离 Debian 容器运行首次安装，并通过可信网络完成初始化。记下健康接口的 `runningSha`，再执行一次手动更新：应返回 `UP_TO_DATE`，不产生备份。远程 `main` 出现新版本后再次更新，核对新 `runningSha`、持久数据以及新建的备份和校验清单。首次安装、真实更新、服务管理与备份路径均需实机验证；本项目不会连接或操作服务器。
-
-WebUI 备份管理、备份恢复、自动更新 timer 和 updater 自更新尚未实现。旧阶段的技术调查与用户提供的 Debian 基础测试记录保留在 [历史部署调查](deployment-investigation.md)。
+在 Debian 13 / Proxmox LXC 验收时，应验证非 root Core 绑定 80、Caddy 访问、停机后请求继续执行、更新前备份、重启后运行 SHA、已填写配置及数据，以及一次受控的备份上传与恢复。历史源码构建方案仅作为记录，见 [旧部署调查](deployment-investigation.md)。

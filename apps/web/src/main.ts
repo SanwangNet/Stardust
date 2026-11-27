@@ -1,3 +1,4 @@
+import { initManagement } from "./management-ui.js";
 import { formatModelError, noModelResponseMessage } from "./model-errors.js";
 import { classifyModelName, isCompactModel } from "./model-classification.js";
 import { initializeConversationUI } from "./conversation-ui.js";
@@ -55,7 +56,7 @@ const menu: MenuCategory[] = [
   },
   { label: "人物与群组", items: [{ label: "人物与群组", path: "/model/people" }] },
   { label: "星核", items: [{ label: "星核中心", path: "/extensions/installed" }] },
-  { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }, { label: "软件更新", path: "/settings/update" }, { label: "星尘提示词", path: "/settings/agent" }] },
+  { label: "配置", items: [{ label: "基本设置", path: "/settings/general" }, { label: "服务设置", path: "/settings/server" }, { label: "软件更新", path: "/settings/update" }, { label: "备份与恢复", path: "/settings/backups" }, { label: "星尘提示词", path: "/settings/agent" }] },
 ];
 // Resolve the owner by route, so inserting a navigation category cannot change
 // the transition between the starcore list and its dynamically registered pages.
@@ -75,7 +76,8 @@ const pageDescriptions: Record<string, string> = {
   "/extensions/installed": "管理消息渠道，让 Stardust 连接更多可能。",
   "/settings/general": "查看当前工作空间的基本信息。",
   "/settings/server": "查看当前服务的连接信息。",
-  "/settings/update": "检查 Stardust 软件版本。",
+  "/settings/update": "检查已发布的软件包和本地历史版本。",
+  "/settings/backups": "创建、下载或恢复 Stardust 数据备份。",
 };
 const primaryNav = getElement<HTMLElement>("primary-nav");
 const secondaryNav = getElement<HTMLElement>("secondary-nav");
@@ -1285,94 +1287,7 @@ serverSettingsForm.addEventListener("submit", event => {
 window.addEventListener("hashchange", () => { if (location.hash === "#/settings/server") void loadServerSettings().catch(error => { serverSettingsFeedback.textContent = error.message; }); });
 void loadServerSettings().catch(() => {});
 
-const updateCurrent = getElement<HTMLElement>("update-current");
-const updateLatest = getElement<HTMLElement>("update-latest");
-const updateMessage = getElement<HTMLElement>("update-message");
-const updateResult = getElement<HTMLElement>("update-result");
-const updateFeedback = getElement<HTMLElement>("update-feedback");
-const updateCheck = getElement<HTMLButtonElement>("update-check");
-const updateInstall = getElement<HTMLButtonElement>("update-install");
-type UpdateJob = { jobId: string; running: boolean; status: string | null; phase: string | null; targetSha: string | null; result: string | null; failureStage: string | null; failureReason: string | null; detail: string | null };
-type UpdateState = { enabled: boolean; job: UpdateJob | null; runningSha: string };
-const pendingKey = "stardust.update.pending.v1";
-let updateEnabled = false, updateAvailable = false, updatePolling = false, updateRunning = false;
-let pendingUpdate: {previous: string | null; started: number} | null = null;
-try { const item = localStorage.getItem(pendingKey); if(item) pendingUpdate=JSON.parse(item) as typeof pendingUpdate; } catch { /* Status remains available after reload. */ }
-function savePending(): void { try { if(pendingUpdate) localStorage.setItem(pendingKey,JSON.stringify(pendingUpdate)); else localStorage.removeItem(pendingKey); } catch { /* The public status still reports the task. */ } }
-function stageText(job: UpdateJob): string {
-  const phase=job.phase ?? job.status ?? "";
-  if (/REMOTE|CHECK/.test(phase)) return "正在检查更新…";
-  if (/SOURCE|FETCH|CLONE/.test(phase)) return "正在下载源码…";
-  if (/BACKUP/.test(phase)) return "正在备份数据…";
-  if (/SWITCH/.test(phase)) return "正在切换版本…";
-  if (/STOP|START|HEALTH/.test(phase)) return "正在重启服务并检查新版本…";
-  return "正在构建和验证更新…";
-}
-function failureText(reason: string | null): string {
-  const known: Record<string,string> = { MIGRATION_REQUIRED:"此版本需要管理员手动迁移 Updater 或服务配置。", MIGRATION_CHECK_FAILED:"无法确认版本兼容性，请检查网络后重试。", REMOTE_CHECK_FAILED:"无法检查远程版本，请检查网络后重试。", BACKOFF:"更新器正在等待重试，请稍后再试。", LOCK_BUSY:"另一个更新任务正在运行。", HEALTH_CHECK_FAILED:"新版本健康检查失败，请查看服务器日志。", DATABASE_IN_USE:"数据库仍被占用，备份未完成。", FUSER_UNAVAILABLE:"数据库占用检查不可用，请检查服务器依赖。", MISSING_DEPENDENCIES:"服务器缺少更新所需的系统依赖。", UPDATER_INTERRUPTED:"更新服务意外中断，请检查服务器日志。", UPDATER_UNAVAILABLE:"更新服务无法启动或异常退出。", UNIT_FAILED:"构建或检查失败，请查看服务器日志。", COMMAND_FAILED:"部署中的系统命令失败。", MANUAL_INTERVENTION:"更新状态需要管理员检查。" };
-  return reason ? known[reason] ?? `更新未完成（${reason}）。` : "更新未完成，请查看服务器日志。";
-}
-function displayUpdate(job: UpdateJob, runningSha: string): void {
-  if(job.running) { updateResult.textContent=stageText(job); updateFeedback.textContent=stageText(job); updateInstall.disabled=true; return; }
-  if (job.result === "UPDATED" || job.result === "UP_TO_DATE") {
-    if (!job.targetSha || !/^[a-f0-9]{40}$/.test(runningSha) || runningSha !== job.targetSha) {
-      updateResult.textContent="服务已恢复，但运行版本与更新目标尚未匹配。";
-      if(pendingUpdate) updateFeedback.textContent=updateResult.textContent;
-      return;
-    }
-    updateResult.textContent=job.result === "UPDATED" ? `更新成功，正在运行 ${runningSha}。` : `当前已是最新版本（${runningSha}）。`;
-    if(pendingUpdate) {
-      updateFeedback.textContent=updateResult.textContent;
-      if(job.result === "UPDATED") { try { if(localStorage.getItem("stardust.update.reloaded.v1") !== job.jobId) { localStorage.setItem("stardust.update.reloaded.v1",job.jobId); setTimeout(()=>location.reload(),1500); } } catch { updateFeedback.textContent+="请刷新页面以加载新版本。"; } }
-      updateAvailable=false; updateInstall.disabled=true; void updateCurrentVersion();
-    }
-  } else if(job.result) { updateResult.textContent=failureText(job.failureReason ?? job.result) + (job.detail ? ` ${job.detail}` : ""); if(pendingUpdate) updateFeedback.textContent=updateResult.textContent; }
-}
-async function updateCurrentVersion(): Promise<void> {
-  try { const response=await fetch("/api/health",{cache:"no-store",signal:AbortSignal.timeout(5000)}); if(!response.ok) throw new Error(); const value=await response.json() as {version?:string;runningSha?:string}; updateCurrent.textContent=`${value.version ?? "未知版本"} · ${value.runningSha ?? "未知 SHA"}`; }
-  catch { updateCurrent.textContent="无法读取当前版本"; }
-}
-async function refreshUpdateStatus(): Promise<UpdateState> {
-  const response=await fetch("/api/v1/software-update/status",{cache:"no-store",signal:AbortSignal.timeout(5000)});
-  if(!response.ok) throw new Error("无法读取更新状态。");
-  const state=await response.json() as UpdateState; updateEnabled=state.enabled; updateRunning=!!state.job?.running;
-  updateInstall.disabled=!updateEnabled || !updateAvailable || !!pendingUpdate || !!state.job?.running;
-  if(pendingUpdate && (!state.job || state.job.jobId===pendingUpdate.previous)) {
-    updateFeedback.textContent=Date.now()-pendingUpdate.started>15000 ? "尚未确认更新服务已启动，请检查服务状态。" : "正在启动更新服务…";
-  } else if(state.job) {
-    displayUpdate(state.job,state.runningSha);
-    if(!state.job.running && pendingUpdate && (!(state.job.result === "UPDATED" || state.job.result === "UP_TO_DATE") || (!!state.job.targetSha && state.runningSha === state.job.targetSha))) { pendingUpdate=null; savePending(); }
-  } else if(!state.enabled) updateFeedback.textContent="WebUI 更新未启用，请联系部署者配置。";
-  else if(!pendingUpdate && updateLatest.textContent === "尚未检查" && !updateCheck.disabled) updateFeedback.textContent="可检查更新并安装新版本。";
-  return state;
-}
-updateCheck.addEventListener("click", () => {
-  updateCheck.disabled=true; updateFeedback.textContent="正在检查更新…";
-  void (async()=>{try {
-    const response=await fetch("/api/v1/software-update/check",{cache:"no-store",signal:AbortSignal.timeout(25000)});
-    const info=await response.json() as {current?:{version:string;sha:string};latest?:{version:string|null;sha:string;message:string};updateAvailable?:boolean|null;message?:string};
-    if(!response.ok||!info.latest||!info.current)throw new Error(info.message??"检查更新失败。");
-    updateCurrent.textContent=`${info.current.version} · ${info.current.sha}`; updateLatest.textContent=`${info.latest.version??"版本号不可用"} · ${info.latest.sha}`; updateMessage.textContent=info.latest.message;
-    updateAvailable=info.updateAvailable===true; updateInstall.disabled=!updateEnabled||!updateAvailable||!!pendingUpdate||updateRunning;
-    updateFeedback.textContent=info.updateAvailable===null?"无法确定当前版本。":info.updateAvailable?(updateEnabled?"发现新版本，可以安装。":"发现新版本；WebUI 更新尚未启用。"):"当前已是最新版本。";
-  } catch(error){updateFeedback.textContent=error instanceof Error?error.message:"检查更新失败。";} finally {updateCheck.disabled=false;}})();
-});
-updateInstall.addEventListener("click",()=>{
-  updateInstall.disabled=true;
-  void (async()=>{try {
-    const state=await refreshUpdateStatus(); if(!state.enabled || state.job?.running) return;
-    pendingUpdate={previous:state.job?.jobId??null,started:Date.now()};savePending();updateFeedback.textContent="正在启动更新服务…";
-    const response=await fetch("/api/v1/software-update/install",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}",signal:AbortSignal.timeout(12000)});
-    if(!response.ok){const data=await response.json() as {message?:string};pendingUpdate=null;savePending();throw new Error(data.message??"启动更新失败。");}
-  }catch(error){if(pendingUpdate){updateFeedback.textContent="连接暂时中断，正在确认更新状态…";}else updateFeedback.textContent=error instanceof Error?error.message:"启动更新失败。";}})();
-});
-void updateCurrentVersion();
-async function pollUpdate(): Promise<void> {
-  if(updatePolling)return;updatePolling=true;
-  try{await refreshUpdateStatus();}catch{if(pendingUpdate)updateFeedback.textContent="服务正在重启或连接暂时中断，正在重新连接…";}
-  finally{updatePolling=false;}
-}
-void pollUpdate();setInterval(()=>{if(!document.hidden)void pollUpdate();},2000);
+initManagement();
 
 type ModelView = { baseUrl: string; modelId: string; timeoutMs: number; stream: boolean; keyConfigured: boolean; keySource: "process" | "file" | "none"; fileKeyConfigured: boolean; processOverride: boolean };
 const modelForm = getElement<HTMLFormElement>("model-form");

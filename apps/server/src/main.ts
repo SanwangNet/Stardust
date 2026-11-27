@@ -1,3 +1,4 @@
+import { writeFile, rename } from "node:fs/promises";
 import { createStardustServer } from "./app.js";
 import { loadCoreEnv } from "./env.js";
 import { loadConfig, resolveConfig } from "./config.js";
@@ -27,6 +28,12 @@ if (listenConfig) {
     if (address && typeof address !== "string") {
       const listenHost = address.address.includes(":") ? `[${address.address}]` : address.address;
       logger.write("INFO", "server", `WebUI: http://${listenHost}:${address.port}`);
+      if (process.env.STARDUST_MANAGED_ENDPOINT === "1") {
+        const path = "/run/stardust-core/endpoint.json";
+        const temporary = `${path}.${process.pid}`;
+        void writeFile(temporary, JSON.stringify({pid:process.pid, address:address.address, port:address.port}), {mode:0o600})
+          .then(() => rename(temporary,path)).catch(() => logger.write("ERROR", "server", "无法写入服务监听状态。"));
+      }
     }
     try {
       if (!setupService.getInitializationState().initialized) {
