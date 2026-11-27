@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as createVite } from "vite";
-import { isTrustedLocalAccess, isTrustedDevProxyClient } from "../apps/server/dist/local-access.js";
+import { isTrustedLocalAccess, isTrustedDevProxyClient, isWebAccess, parseTrustedProxies } from "../apps/server/dist/local-access.js";
 import { createStardustServer } from "../apps/server/dist/app.js";
 import { FlowPublication } from "../apps/server/dist/flow-publication.js";
 
@@ -62,15 +62,15 @@ test("loopback edits work without token or editor flag and hostile origins canno
   assert.equal((await post("/api/v1/admin/login", {})).status, 405);
 });
 
-test("wildcard listener and apparent forwarded traffic remain read-only", async t => {
+test("wildcard listener allows same-origin WebUI and rejects forged forwarding", async t => {
   const root = mkdtempSync(join(tmpdir(), "stardust-wildcard-flow-")), server = testServer(root); server.listen(0, "0.0.0.0"); await once(server, "listening");
   t.after(async () => { await closeServer(server); rmSync(root, { recursive: true, force: true }); });
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const response = await fetch(origin + "/api/v1/flow-overview"); assert.equal(response.status, 200); const data = await response.json(); assert.equal(data.canEdit, false);
+  const response = await fetch(origin + "/api/v1/flow-overview"); assert.equal(response.status, 200); const data = await response.json(); assert.equal(data.canEdit, true);
   const post = (path, body) => fetch(origin + path, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) });
-  assert.equal((await post("/api/v1/flow-publication/save", { revision: "initial", connections: data.published.connections })).status, 403);
-  assert.equal((await post("/api/v1/tool-runs", { message: "test" })).status, 403);
-  assert.equal((await post("/api/v1/extensions/demo/enable", {})).status, 403);
+  assert.notEqual((await post("/api/v1/flow-publication/save", { revision: "initial", connections: data.published.connections })).status, 403);
+  assert.notEqual((await post("/api/v1/tool-runs", { message: "test" })).status, 403);
+  assert.notEqual((await post("/api/v1/extensions/demo/enable", {})).status, 403);
 });
 
 test("actual loopback Vite proxy uses an ephemeral transport proof and refuses forged forwarding", async t => {
@@ -87,4 +87,21 @@ test("actual loopback Vite proxy uses an ephemeral transport proof and refuses f
   assert.equal((await post({ origin: "https://attacker.example" })).status, 403);
   assert.equal((await post({ "x-forwarded-for": "203.0.113.10" })).status, 403);
   assert.equal((await post({ "x-stardust-dev-proxy": "attacker-controlled" })).status, 200);
+});
+
+
+test("explicit proxy addresses and direct IP authorities control forwarded transport", () => {
+  const proxies = parseTrustedProxies("192.168.30.23, ::1");
+  assert.throws(() => parseTrustedProxies("192.168.30.0/24"), /STARDUST_TRUSTED_PROXIES/);
+  assert.throws(() => parseTrustedProxies("192.168.30.23,,::1"), /STARDUST_TRUSTED_PROXIES/);
+  const req = { socket: { remoteAddress: "::ffff:192.168.30.23", localAddress: "::ffff:192.168.30.22", localPort: 80 }, headers: { host: "bot.lan.tenqui.ink", origin: "https://bot.lan.tenqui.ink", "x-forwarded-proto": "https", "x-forwarded-for": "192.168.30.40" } };
+  assert.equal(isWebAccess(req, { address:"0.0.0.0",family:"IPv4",port:80 }, true, proxies), true);
+  assert.equal(isWebAccess(req, { address:"0.0.0.0",family:"IPv4",port:80 }, true, new Set()), false);
+  assert.equal(isWebAccess({ ...req, headers: {...req.headers, origin:"https://evil.example"} }, null, true, proxies), false);
+  assert.equal(isWebAccess({ ...req, headers: {...req.headers, "x-forwarded-proto":"https,http"} }, null, true, proxies), false);
+  assert.equal(isWebAccess({ ...req, headers: {...req.headers, "sec-fetch-site":"cross-site"} }, null, true, proxies), false);
+  const direct = {socket:{remoteAddress:"192.168.30.30",localAddress:"192.168.30.22",localPort:80},headers:{host:"192.168.30.22",origin:"http://192.168.30.22"}};
+  assert.equal(isWebAccess(direct,null,true,proxies), true);
+  assert.equal(isWebAccess({...direct,headers:{host:"evil.example",origin:"http://evil.example"}},null,true,proxies), false);
+  assert.equal(isWebAccess({...direct,headers:{...direct.headers,"x-forwarded-proto":"https"}},null,true,proxies), false);
 });

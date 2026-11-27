@@ -138,6 +138,8 @@ test("CLI 与 HTTP 同时提交时只有一个入口成功", async (t) => {
 
 
 test("HTTPS 反向代理同源初始化，拒绝跨域请求并持久化", async t => {
+  const oldProxy = process.env.STARDUST_TRUSTED_PROXIES; process.env.STARDUST_TRUSTED_PROXIES = "127.0.0.1";
+  t.after(() => { if (oldProxy === undefined) delete process.env.STARDUST_TRUSTED_PROXIES; else process.env.STARDUST_TRUSTED_PROXIES = oldProxy; });
   const { root, origin } = await fixture(t);
   const headers = { Origin: origin.replace("http:", "https:"), "X-Forwarded-Proto": "https", "Sec-Fetch-Site": "same-origin" };
   assert.equal((await post(origin, {}, { ...headers, Origin: "https://evil.example" })).status, 403);
@@ -172,9 +174,9 @@ test("初始化写入权限错误可见且不会标记成功", async t => {
 });
 
 
-test("通配监听允许同源初始化，其他管理写入仍拒绝", async t => {
+test("通配监听允许同源初始化与业务写入校验", async t => {
   const { origin } = await fixture(t, "0.0.0.0");
   assert.equal((await post(origin, {}, { Origin: origin })).status, 200);
   const response = await fetch(origin + "/api/v1/flow-publication/save", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: "{}" });
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 400);
 });

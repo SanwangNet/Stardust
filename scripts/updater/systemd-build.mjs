@@ -24,6 +24,12 @@ async function executable(name) {
   for(const dir of pathEnv.split(':'))try{const path=await realpath(join(dir,name));await access(path,constants.X_OK);await trustedPath(path);return path;}catch{}
   throw new Error('SUPERVISION_UNAVAILABLE');
 }
+export async function checkDependencies(findExecutable=executable) {
+  const tools={},missing=[];
+  for(const name of ['git','npm','systemctl','systemd-run','flock','runuser','node','tar','fuser','gzip','ps','getent','chown','chmod','mv'])try{tools[name]=await findExecutable(name);}catch{missing.push(name);}
+  if(missing.length){const e=new Error('MISSING_DEPENDENCIES');e.missing=missing;throw e;}
+  return tools;
+}
 async function readSmall(path,owner,limit=4096) {
   const f=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);try{const s=await f.stat();if(!s.isFile()||s.uid!==owner||s.nlink!==1||s.size>limit)throw new Error('UNSAFE_FILE');const b=Buffer.alloc(limit+1);const {bytesRead}=await f.read(b,0,b.length,0);if(bytesRead>limit)throw new Error('UNSAFE_FILE');return b.subarray(0,bytesRead).toString('utf8');}finally{await f.close();}
 }
@@ -41,10 +47,10 @@ export async function checkBuildEnvironment(root,dir) {
     if(process.platform!=='linux'||process.getuid?.()!==0||!/^\/[a-zA-Z0-9_./-]+$/.test(root))throw Error();
     const configPath=join(dir,'config.json'),s=await lstat(configPath);if(!s.isFile()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o077)!==0)throw Error();
     const config=JSON.parse(await readSmall(configPath,0));if(!config||!['buildUser,coreUser','buildUser,coreUser,healthPort'].includes(Object.keys(config).sort().join(','))||!userPattern.test(config.buildUser??'')||!userPattern.test(config.coreUser??'')||(config.healthPort!==undefined&&(!Number.isInteger(config.healthPort)||config.healthPort<1||config.healthPort>65535)))throw Error();
-    const builder=await account(config.buildUser),core=await account(config.coreUser);if(!builder.uid||!core.uid||builder.uid===core.uid||!/(?:\/nologin|\/false)$/.test(builder.shell))throw Error();
     const codeDir=dirname(fileURLToPath(import.meta.url));if(!/^\/[a-zA-Z0-9_./-]+$/.test(codeDir)||!/^\/[a-zA-Z0-9_./-]+$/.test(await realpath(process.execPath)))throw Error();await trustedPath(codeDir);await trustedPath(await realpath(process.execPath));
-    for(const name of ['build-worker.mjs','prepare.mjs','prepare-core.mjs','diagnostics.mjs','deploy.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs'])await trustedPath(join(codeDir,name));
-    const tools={};for(const name of ['git','npm','systemctl','systemd-run','flock','runuser','node','tar','fuser','chown','chmod','mv'])tools[name]=await executable(name);
+    for(const name of ['build-worker.mjs','prepare.mjs','prepare-core.mjs','diagnostics.mjs','deploy.mjs','check.mjs','update.mjs','state.mjs','lock.mjs','preflight.mjs','systemd-build.mjs','systemd-evidence.mjs','running-port.mjs'])await trustedPath(join(codeDir,name));
+    const tools=await checkDependencies();
+    const builder=await account(config.buildUser),core=await account(config.coreUser);if(!builder.uid||!core.uid||builder.uid===core.uid||!/(?:\/nologin|\/false)$/.test(builder.shell))throw Error();
     if(tools.node!==(await realpath(process.execPath)))throw Error();
     for(const name of ['node','git','npm'])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',tools[name]]);
     for(const path of [root,codeDir])await command('runuser',['-u',config.buildUser,'--','/usr/bin/test','-x',path]);
@@ -58,7 +64,7 @@ export async function checkBuildEnvironment(root,dir) {
     for(const path of new Set(protectedPaths)){if(!/^\/[a-zA-Z0-9_./-]+$/.test(path))throw Error();try{const st=await lstat(path);if(!st.isDirectory()||st.isSymbolicLink()||(await realpath(path))!==path||!await denyAccess(config.buildUser,path))throw Error();}catch(e){if(e.code!=='ENOENT')throw e;}}
     const probe=await preflight({root,buildUser:config.buildUser,runUser:config.coreUser,active:true});if(probe.active.result!=='passed')throw Error();
     return {config,builder,codeDir,protectedPaths};
-  } catch {throw new Error('SUPERVISION_UNAVAILABLE');}
+  } catch (e) {if(e.message==='MISSING_DEPENDENCIES')throw e;throw new Error('SUPERVISION_UNAVAILABLE');}
 }
 
 async function properties(unit){const out=await command('systemctl',['show',unit,'--property=LoadState,ActiveState,SubState,InvocationID,Result,ExecMainCode,ExecMainStatus,Type,ExitType,KillMode,SendSIGKILL,Delegate,Restart,NoNewPrivileges,ProtectControlGroups,RemainAfterExit,User']);return Object.fromEntries(out.split(/\r?\n/).filter(x=>x.includes('=')).map(x=>{const i=x.indexOf('=');return [x.slice(0,i),x.slice(i+1)];}));}

@@ -12,7 +12,7 @@ import { setupService, type SetupService } from "./setup.js";
 import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
-import { isLocalRead, isTrustedLocalAccess } from "./local-access.js";
+import { isWebAccess, isTrustedLocalAccess, parseTrustedProxies } from "./local-access.js";
 import { ToolRuns } from "./tool-runs.js";
 import { ScopedHistorySearch } from "./scoped-history-search.js";
 import { ContextService, deliveryStatus } from "./context-service.js";
@@ -84,21 +84,6 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown): 
 const maxSetupBody = 16 * 1024;
 const maxCapabilityUploadBody = 20 * 1024 * 1024 + 64 * 1024;
 const maxCapabilityImageSize = 10 * 1024 * 1024;
-
-function isSameOrigin(request: IncomingMessage): boolean {
-  if (request.headers["sec-fetch-site"] === "cross-site") return false;
-  const origin = request.headers.origin;
-  if (!origin) return true; // Non-browser clients may omit Origin; JSON is still required.
-  if (!request.headers.host) return false;
-  try {
-    const localProxy = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress ?? "");
-    const protocol = localProxy && request.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-    const parsed = new URL(origin);
-    return parsed.href === `${parsed.origin}/` && parsed.origin === new URL(`${protocol}://${request.headers.host}`).origin && origin !== "null";
-  } catch {
-    return false;
-  }
-}
 
 function readSetupBody(request: IncomingMessage, limit = maxSetupBody): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -189,6 +174,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
   const logs = options.logService ?? logger;
   const extensions = options.extensionManager ?? new ExtensionManager(undefined, model, [webChatExtension], logs);
   const devProxyProof = process.env.STARDUST_DEV_PROXY_PROOF;
+  const trustedProxies = parseTrustedProxies(process.env.STARDUST_TRUSTED_PROXIES ?? loadCoreEnv().STARDUST_TRUSTED_PROXIES ?? "");
   const agent = options.agentOrchestrator ?? new AgentOrchestrator(model);
   const toolRuns = new ToolRuns(model, extensions, logs, agent);
   const flowPublication = options.flowPublication ?? new FlowPublication();
@@ -290,9 +276,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         try {result=await deliver(reply,deliverySignal);} catch {result={status:"unknown_outcome"};}
         await save(deliveryStatus(result)); return result;
       };
-      const listener = server.address();
-      const localControl = !!listener && typeof listener !== "string" && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(listener.address);
-      if (message.channelId === "qq-bot" && qqEnabled && localControl && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
+      if (message.channelId === "qq-bot" && qqEnabled && typeof model.chatWithTools === "function" && deliver && qqRuns.productionAllowed(message)) {
         const runId = await qqRuns.start(message, signal, { deliver: deliverAndRecord, personContext, contextMessages, ...(handle ? {searchHistory: handle.search} : {}) });
         if (runId) return { kind: "deferred" as const };
       }
@@ -318,7 +302,8 @@ export function createStardustServer(options: AppOptions = {}): Server {
       sendJson(response, 400, { error: "INVALID_URL" });
       return;
     }
-    const trusted = (requireOrigin: boolean) => isTrustedLocalAccess(request, server.address(), requireOrigin, devProxyProof);
+    const trusted = (requireOrigin: boolean) => isWebAccess(request, server.address(), requireOrigin, trustedProxies, devProxyProof);
+    const isSameOrigin = (_request: IncomingMessage) => trusted(false);
     const adminAuthorized = () => {
       const supplied = request.headers["x-stardust-approval-token"];
       return validApprovalToken && typeof supplied === "string" && /^[A-Za-z0-9_-]{43}$/.test(supplied) && timingSafeEqual(Buffer.from(supplied), Buffer.from(approvalToken));
@@ -327,11 +312,10 @@ export function createStardustServer(options: AppOptions = {}): Server {
       const value = request.headers["x-stardust-control-token"];
       return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(value), Buffer.from(controlToken));
     };
-    if (pathname.startsWith("/api/v1/") && !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "")) {
-      const browserSettings = (pathname === "/api/v1/setup/complete" || pathname === "/api/v1/server/settings")
-        && request.method === "POST" && !!request.headers.origin && isSameOrigin(request)
-        && /^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "");
-      if (!trusted(false) && !browserSettings) { sendJson(response, 403, { error: "LOCAL_WRITE_FORBIDDEN", message: "请求未通过本机或同源访问校验。" }); return; }
+    if (pathname.startsWith("/api/v1/")) {
+      const writing = !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "");
+      const localCli = isTrustedLocalAccess(request, server.address(), false, devProxyProof);
+      if (!trusted(writing && !localCli)) { sendJson(response, 403, { error: "ACCESS_FORBIDDEN", message: "请求未通过访问来源校验。" }); return; }
     }
     if (pathname === "/api/v1/control-session") {
       response.setHeader("Cache-Control", "no-store");
@@ -386,7 +370,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
     if (pathname === "/api/v1/qq-tool-runs" || pathname.startsWith("/api/v1/qq-tool-runs/")) {
-      if (!setup.getInitializationState().initialized || !trusted(request.method !== "GET") || !adminAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !isTrustedLocalAccess(request, server.address(), request.method !== "GET", devProxyProof) || !adminAuthorized()) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try {
         if (request.method === "GET" && pathname === "/api/v1/qq-tool-runs") { sendJson(response, 200, { runs: qqRuns.list() }); return; }
         const match = /^\/api\/v1\/qq-tool-runs\/([0-9a-f-]{36})(\/decision)?$/.exec(pathname);
@@ -488,14 +472,14 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
     if (pathname === "/api/v1/flow-overview") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
-      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !trusted(false) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try { sendJson(response, 200, overviewData(trusted(false))); }
       catch { sendJson(response, 500, { error: "FLOW_OVERVIEW_UNAVAILABLE" }); }
       return;
     }
     if (pathname === "/api/v1/capabilities") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
-      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !trusted(false) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try { sendJson(response, 200, extensions.capabilityCatalog()); }
       catch { sendJson(response, 500, { error: "CAPABILITIES_UNAVAILABLE" }); }
       return;
@@ -524,7 +508,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     }
     if (pathname === "/api/v1/starcore-flows") {
       if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
-      if (!setup.getInitializationState().initialized || !isLocalRead(request) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
+      if (!setup.getInitializationState().initialized || !trusted(false) || !isSameOrigin(request)) { sendJson(response, 403, { error: "UNAVAILABLE" }); return; }
       try {
         const entries = typeof extensions.flowCatalog === "function" ? extensions.flowCatalog() : [];
         const contextEnabled = conversations?.contextFlowConfiguration().enabled ?? process.env.STARDUST_WEB_CONTEXT_FLOW === "1";
@@ -541,7 +525,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/global-context" || pathname.startsWith("/api/v1/global-context/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const store = (await openConversations()).globalContext;
         if (pathname === "/api/v1/global-context" && request.method === "GET") { sendJson(response, 200, { owner: WEB_CONTEXT_OWNER, entries: store.entries(WEB_CONTEXT_OWNER), counts: store.counts(WEB_CONTEXT_OWNER), lastCompletedAt: store.lastCompletedAt(WEB_CONTEXT_OWNER) }); return; }
@@ -564,7 +548,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/agent/settings") {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!isLocalRead(request) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
+        if (!trusted(false) || !isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const store = await openConversations();
         const tools = [{ name: "search_history", description: "跨会话记忆 Tool" }, ...extensions.availableTools().filter((tool) => tool.name !== "search_history").map(({ name, description }) => ({ name, description }))];
         if (request.method === "GET") { sendJson(response, 200, { ...store.agent.settings(), tools: tools.map((tool) => ({ ...tool, enabled: store.agent.toolAllowed(tool.name) })) }); return; }
@@ -578,7 +562,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
     if (pathname === "/api/v1/conversations" || pathname.startsWith("/api/v1/conversations/")) {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
-        if (!isLocalRead(request)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
+        if (!trusted(false)) { sendJson(response, 403, { error: "LOCAL_ONLY" }); return; }
         if (!isSameOrigin(request) || (request.method !== "GET" && !request.headers.origin)) { sendJson(response, 403, { error: "INVALID_ORIGIN" }); return; }
         const activityRoute = /^\/api\/v1\/conversations\/([0-9a-f-]{36})\/messages\/([0-9a-f-]{36})\/activity$/i.exec(pathname);
         if (activityRoute && request.method === "GET") {

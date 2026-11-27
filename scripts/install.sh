@@ -12,10 +12,16 @@ fail() { printf '安装停止：%s\n' "$*" >&2; exit 1; }
 trap 'printf "安装未完成，已保留现场。请检查 /opt/stardust/updater/state.json 和 journalctl -u stardust.service。\n" >&2' ERR
 [[ $(id -u) == 0 ]] || fail '请使用 sudo bash scripts/install.sh'
 [[ $(uname -s) == Linux ]] || fail '仅支持 Debian Linux'
-[[ -d /run/systemd/system ]] && systemctl show --property=Version >/dev/null || fail 'systemd 系统管理器不可用'
-for tool in node npm git systemctl systemd-run flock tar fuser chown chmod mv ps getent useradd install readlink; do
-  command -v "$tool" >/dev/null || fail "缺少 $tool，请先安装依赖"
+missing=()
+for tool in node npm git systemctl systemd-run flock tar gzip fuser chown chmod mv ps getent useradd install readlink runuser mkdir ln; do
+  command -v "$tool" >/dev/null || missing+=("$tool")
 done
+if (( ${#missing[@]} )); then
+  printf '缺少系统命令：%s\n' "${missing[*]}" >&2
+  printf 'Debian 依赖：sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin\n' >&2
+  fail '安装依赖后重试；Node.js 还需满足版本 24 要求'
+fi
+[[ -d /run/systemd/system ]] && systemctl show --property=Version >/dev/null || fail 'systemd 系统管理器不可用'
 NODE=$(readlink -f "$(command -v node)")
 [[ $NODE =~ ^/[a-zA-Z0-9_./-]+$ ]] || fail 'Node 路径包含不支持的字符'
 [[ $($NODE -p 'Number(process.versions.node.split(".")[0])') == 24 ]] || fail '需要 Node.js 24'

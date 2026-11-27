@@ -106,11 +106,14 @@ test("local control can approve explicitly authorized QQ tools without a separat
   assert.equal((await f.get("/api/v1/qq-tool-runs")).status, 403);
 });
 
-test("wildcard listeners do not enable QQ tools or expose the control session", async t => {
+test("wildcard listener supports explicit QQ tool approval", async t => {
   const f = await fixture(t, { listenHost: "0.0.0.0" });
   await f.bot.emit(event("remote-listener", "执行工具"));
-  assert.equal(f.model.plain.length, 1); assert.equal(f.turns.length, 0);
-  assert.equal((await fetch(`${f.origin}/api/v1/control-session`)).status, 403);
+  const session = await (await fetch(`${f.origin}/api/v1/control-session`)).json();
+  const approval = await until(async () => { const response = await fetch(`${f.origin}/api/v1/approvals`, { headers: { "x-stardust-control-token": session.token } }); const data = await response.json(); return data.items?.[0]; });
+  assert.equal(f.executions.length, 0);
+  const response = await fetch(`${f.origin}/api/v1/approvals/decision`, { method: "POST", headers: { origin: f.origin, "content-type": "application/json", "x-stardust-control-token": session.token }, body: JSON.stringify({ source: "qq", runId: approval.runId, callId: approval.callId, decision: "deny" }) });
+  assert.equal(response.status, 200); assert.equal(f.executions.length, 0);
 });
 
 test("operations without a safe parameter summary cannot be approved", async t => {

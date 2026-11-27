@@ -55,7 +55,7 @@ test("overview reports actual graphs, publication gates, channels and separate T
   await extensions.enable("web-chat");
   data = await get(); assert.equal(data.canEdit, true); assert.equal(data.overview.publishedInUse, true); assert.deepEqual(data.currentConnections, { recent: false, global: false, search: false }); assert.match(data.toolCandidates.find(item => item.name === "search_history").status, /断开/);
   assert.equal((await post("/api/v1/flow-publication/save", { revision: "bad", connections: data.published.connections })).status, 409);
-  const forwarded = await (await fetch(origin + "/api/v1/flow-overview", { headers: { "x-forwarded-for": "203.0.113.9" } })).json(); assert.equal(forwarded.canEdit, false);
+  const forwarded = await fetch(origin + "/api/v1/flow-overview", { headers: { "x-forwarded-for": "203.0.113.9" } }); assert.equal(forwarded.status, 403);
   assert.equal((await fetch(origin + "/api/v1/flow-publication/save", { method: "POST", headers: { origin, "content-type": "application/json", "x-forwarded-for": "203.0.113.9" }, body: JSON.stringify({ revision: data.revision, connections: data.published.connections }) })).status, 403);
   assert.equal(typeof data.revision, "string");
   assert.equal((await post("/api/v1/flow-publication/save", { revision: data.revision, connections: { recent: true, global: true, search: true, forged: true } })).status, 400);

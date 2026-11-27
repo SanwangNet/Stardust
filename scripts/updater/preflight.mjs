@@ -88,7 +88,7 @@ export async function preflight({root,buildUser,runUser,active=false}) {
   result.checks.buildUser=builder&&builder.uid!==0?{name:builder.name,uid:builder.uid}:'missing_or_root';
   result.checks.runUser=runner&&runner.uid!==0?{name:runner.name,uid:runner.uid}:'missing_or_root';
   result.checks.userSeparation=builder&&runner&&builder.uid!==0&&runner.uid!==0&&builder.uid!==runner.uid?'distinct':'invalid';
-  result.checks.executables=Object.fromEntries(await Promise.all(['systemctl','systemd-run','flock','git','npm'].map(async name=>[name,await executable(name)])));result.checks.executables.node=process.execPath;
+  result.checks.executables=Object.fromEntries(await Promise.all(['systemctl','systemd-run','flock','git','npm','tar','gzip','fuser','ps','getent','runuser','chown','chmod','mv'].map(async name=>[name,await executable(name)])));result.checks.executables.node=process.execPath;
   try{result.checks.cgroupV2=(await statfs('/sys/fs/cgroup')).type===0x63677270?'present':'unavailable';}catch{result.checks.cgroupV2='unavailable';}
   try{await command('systemctl',['show','--property=Version','--value']);result.checks.systemManager='available';}catch{result.checks.systemManager='unavailable';}
   for(const name of ['updater','releases','shared'])try{const st=await lstat(join(root,name));result.checks[name]={type:st.isSymbolicLink()?'symlink':st.isDirectory()?'directory':'other',uid:st.uid,mode:(st.mode&0o777).toString(8)};}catch(e){result.checks[name]=e.code==='ENOENT'?'missing':'inaccessible';}

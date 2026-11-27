@@ -1,20 +1,34 @@
 import { execFile } from 'node:child_process';
 import { readdir, readFile, readlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { createOutputTail } from './diagnostics.mjs';
 
 // Inspect the systemd main process's listening sockets, not the next-start config.
 // Only the local health endpoint for the expected Stardust process is accepted.
 export async function runningEndpoints() {
-  const { stdout } = await promisify(execFile)('systemctl', ['show', 'stardust.service', '--property=MainPID', '--value'], { timeout: 3000, env: { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' } });
-  const pid = Number(stdout.trim());
-  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('SERVICE_NOT_RUNNING');
-  return endpointsForProcess(pid);
+  const exec=promisify(execFile),env={ PATH:'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', LANG:'C' };
+  const run=async(file,args,options)=>{try{return await exec(file,args,options);}catch(e){const tail=createOutputTail(4096);tail.push(String(e.stderr??''));e.diagnostic={command:file+' <args>',exitCode:Number.isInteger(e.code)?e.code:null,signal:e.signal??null,stderr:tail.snapshot(env).text.replace(/(?:\/[^\s:]+)+/g,'<path>').slice(-2048)};throw e;}};
+  const {stdout}=await run('systemctl',['show','stardust.service','--property=MainPID,User'],{timeout:3000,env});
+  const fields=Object.fromEntries(stdout.trim().split(/\r?\n/).map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+  const pid=Number(fields.MainPID),user=fields.User;
+  if(!Number.isSafeInteger(pid)||pid<1)throw new Error('SERVICE_NOT_RUNNING');
+  try{return await endpointsForProcess(pid);}catch(e){
+    if(!['EACCES','EPERM'].includes(e.code)||process.getuid?.()!==0||!user||! /^[a-z_][a-z0-9_-]{0,31}$/.test(user)||user==='root')throw e;
+    // A container root may lack CAP_SYS_PTRACE. Read the same process as its
+    // dedicated service user rather than requesting additional capabilities.
+    const result=await run('runuser',['-u',user,'--',process.execPath,fileURLToPath(import.meta.url),'--pid',String(pid)],{timeout:5000,maxBuffer:16384,env});
+    const value=JSON.parse(result.stdout);
+    if(!Array.isArray(value)||value.length>256||value.some(x=>!x||typeof x.host!=='string'||!/^(?:[0-9.]+|\[[0-9a-f:]+\])$/.test(x.host)||!Number.isInteger(x.port)||x.port<1||x.port>65535))throw new Error('SERVICE_ENDPOINT_INVALID');
+    return value;
+  }
 }
 
 export async function endpointsForProcess(pid) {
   const inodes = new Set();
   for (const fd of await readdir(`/proc/${pid}/fd`)) {
-    try { const match = /^socket:\[(\d+)\]$/.exec(await readlink(`/proc/${pid}/fd/${fd}`)); if (match) inodes.add(match[1]); } catch { /* Descriptor closed. */ }
+    try { const match = /^socket:\[(\d+)\]$/.exec(await readlink(`/proc/${pid}/fd/${fd}`)); if (match) inodes.add(match[1]); } catch (e) { if(e.code==='EACCES'||e.code==='EPERM')throw e; /* Descriptor closed. */ }
   }
   const endpoints = new Map();
   for (const name of ['tcp', 'tcp6']) {
@@ -32,4 +46,10 @@ export async function endpointsForProcess(pid) {
     }
   }
   return [...endpoints.values()];
+}
+
+if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
+  const pid=Number(process.argv[3]);
+  if(process.argv.length!==4||process.argv[2]!=='--pid'||!Number.isSafeInteger(pid)||pid<1)process.exitCode=2;
+  else try{console.log(JSON.stringify(await endpointsForProcess(pid)));}catch{console.error('PROCESS_ENDPOINT_UNAVAILABLE');process.exitCode=1;}
 }

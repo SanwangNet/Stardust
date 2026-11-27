@@ -1,6 +1,6 @@
 # 安装、运行和更新
 
-当前安装与更新功能尚待在 Debian 13 的隔离环境中完整验收。请先在可丢弃的测试容器中按下面的命令验证，不要直接用于已有生产服务。需要 systemd、cgroup v2、Node.js 24、npm、Git、flock、tar 和 fuser；脚本检查依赖，不自动安装系统软件包。
+当前安装与更新功能尚待在 Debian 13 的隔离环境中完整验收。请先在可丢弃的测试容器中按下面的命令验证，不要直接用于已有生产服务。需要 systemd、cgroup v2、Node.js 24、npm、Git、flock、tar、gzip 和 psmisc 提供的 fuser；脚本检查依赖，不自动安装系统软件包。
 
 ## 首次安装
 
@@ -44,9 +44,34 @@ sudo install -o root -g root -m 0644 scripts/updater/*.mjs /usr/local/lib/stardu
 sudo node /usr/local/lib/stardust-updater/update.mjs /opt/stardust main
 ```
 
-若更新器报告同版本跳过，运行 `sudo systemctl restart stardust.service` 使 drop-in 生效。检查 `systemctl status stardust.service` 和实际端口的健康接口。当前更新器通过 systemd 主进程的监听 socket 查找实际端口并核对健康响应的运行 SHA，同版本检查和部署检查不依赖旧的 `healthPort`；服务重启前后均检查当前进程。状态命令在无法读取 systemd 进程时会尝试旧的 `healthPort`，否则报告 `unknown`。
+若更新器报告同版本跳过，运行 `sudo systemctl restart stardust.service` 使 drop-in 生效。检查 `systemctl status stardust.service` 和实际端口的健康接口。当前更新器通过 systemd 主进程的监听 socket 查找实际端口并核对健康响应的运行 SHA，同版本检查和部署检查不依赖旧的 `healthPort`；服务重启前后均检查当前进程。若容器 root 无权读取该进程的 `/proc/<PID>/fd`，检查会尝试以 systemd 配置的非 root 服务用户读取，避免额外授予 `CAP_SYS_PTRACE`；仍无法确认时部署检查失败。状态命令在无法读取 systemd 进程时会尝试旧的 `healthPort`，否则报告 `unknown`。
 
 健康接口中的 `runningSha` 是进程启动时读取的版本标识；开发环境缺少正式元数据时为 `development`。状态命令会通过本机健康接口观察运行 SHA，无法确认时显示 `unknown`。它与 `current` 的指向分别观察，避免只凭链接推断实际运行版本。
+
+## 独立反向代理与访问边界
+
+Stardust 以可信局域网为部署前提，同源校验和控制会话令牌用于防止跨站请求，并不是用户身份认证；能够访问 WebUI 的网络用户可以使用业务功能并审批 Tool。不要把服务或代理直接暴露到不可信网络，也不要只依靠转发头或同源检查来保护系统更新、备份下载等管理操作；更新器仍仅通过服务器上的管理员 CLI 执行。服务不会自动修改防火墙。Tool 的明确批准、参数摘要、来源与权限规则继续生效。
+
+默认不信任任何反向代理。使用独立 Caddy 时，在已有服务器上创建 systemd drop-in，填写 Caddy **连接 Stardust 时的实际源 IP**（多个地址用逗号分隔；仅支持精确 IPv4/IPv6，不支持网段、主机名或通配符）：
+
+```sh
+sudo install -d -m 0755 /etc/systemd/system/stardust.service.d
+printf '[Service]\nEnvironment=STARDUST_TRUSTED_PROXIES=192.168.30.23\n' | sudo tee /etc/systemd/system/stardust.service.d/trusted-proxy.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart stardust.service
+```
+
+Caddy 的 reverse_proxy 应保留浏览器原始 Host 并设置单个 `X-Forwarded-Proto`；其默认行为满足此要求。该 IP 是 Stardust 看到的 TCP 对端地址，容器 NAT 存在时可能不同，应以实际连接为准。只为受控代理配置地址，并限制任何其他人不能使用该地址或经其转发任意 Host；不要信任客户端自带的转发头。直连使用服务器 IP，例如 `http://192.168.30.22/`，通过代理使用 `https://bot.lan.tenqui.ink`。直接访问时 Host 须为连接的服务端 IP（本机可使用 localhost），避免 DNS 重绑定；代理的 Host 由受信 Caddy 的站点配置限制。
+
+`STARDUST_TRUSTED_PROXIES` 也可写在 `/opt/stardust/shared/.env`；进程环境变量优先。配置非法时服务拒绝启动。不要同时在 drop-in 与 .env 中设置不同值。更改后重启生效，查看 `sudo systemctl status stardust.service` 和日志排查。
+
+Debian 精简环境可先安装完整依赖：
+
+```sh
+sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin
+```
+
+`psmisc` 提供 `fuser`。发行版自带 Node.js 不一定满足版本要求，还需自行提供可信系统路径中的 Node.js 24 和 npm。升级期间备份前先停止服务并检查数据库文件是否仍被使用；如容器权限导致检查无法确认，更新会失败，不会忽略检查。
 
 ## 数据和手动更新
 
@@ -59,7 +84,7 @@ sudo node /usr/local/lib/stardust-updater/status.mjs /opt/stardust
 
 当目标 SHA 与已安装版本一致时，更新器检查已安装产物、服务配置和实际运行 SHA；正常则返回 `UP_TO_DATE`，不重新构建、停机或备份。异常返回 `INSTALLATION_UNHEALTHY`，需要管理员检查。`--force` 只跳过退避，不绕过完整性或监督检查，也不会强制重新安装相同版本。
 
-有新版本时，旧服务在构建期间继续运行。新版本准备完成后，更新器停止服务，检查数据库使用情况，备份 `shared`，切换 `current`，再启动并检查运行 SHA。旧 release 保留。备份失败会尝试恢复旧服务；切换后失败不会自动回滚，因为新程序可能已经迁移数据库。管理员应检查状态、日志和备份，确认数据兼容性后再处理。更新期间其他程序不应写入 `shared`；符号链接、硬链接和特殊文件会使备份保守失败。
+有新版本时，旧服务在构建期间继续运行。新版本准备完成后，更新器停止服务，检查数据库使用情况，备份 `shared`，切换 `current`，再启动并检查运行 SHA。候选 release 已发布且完整性、归属和 SHA 校验通过时，重试可直接复用，无需重建。部署命令失败时，CLI 输出命令名、有限的脱敏 stderr 和退出码，诊断写入 root 私有的 updater 目录。旧 release 保留。备份失败会尝试恢复旧服务；切换后失败不会自动回滚，因为新程序可能已经迁移数据库。管理员应检查状态、日志和备份，确认数据兼容性后再处理。更新期间其他程序不应写入 `shared`；符号链接、硬链接和特殊文件会使备份保守失败。
 
 ## 联合验收
 

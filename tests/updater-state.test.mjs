@@ -7,6 +7,7 @@ import { executeUpdate } from '../scripts/updater/update.mjs';
 import { getStatus } from '../scripts/updater/status.mjs';
 import { initialState, readState, updaterDirectory, writeState } from '../scripts/updater/state.mjs';
 import { buildUnitName } from '../scripts/updater/systemd-evidence.mjs';
+import { checkDependencies } from '../scripts/updater/systemd-build.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 
@@ -30,3 +31,24 @@ test('failed persistence prevents remote operations',async t=>{const root=fixtur
 test('production storage overlap is rejected before updater files are created',async t=>{const root=fixture(t),previous=process.env.STARDUST_STORAGE_ROOT;process.env.STARDUST_STORAGE_ROOT=root;t.after(()=>{if(previous===undefined)delete process.env.STARDUST_STORAGE_ROOT;else process.env.STARDUST_STORAGE_ROOT=previous;});await assert.rejects(executeUpdate({root},seam()),/STORAGE_OVERLAP/);assert.equal(existsSync(join(root,'updater')),false);});
 test('unsafe updater directory symlink is rejected',async t=>{const root=fixture(t),other=join(root,'other');mkdirSync(other);try{symlinkSync(other,join(root,'updater'),'junction');}catch(e){t.skip('符号链接不可用：'+e.code);return;}await assert.rejects(updaterDirectory(root,true));});
 test('Linux real flock behavior requires Linux', {skip:process.platform!=='linux'?'需要 Linux flock 和独立进程验证':false},async t=>{const {acquireLock,observeLock}=await import('../scripts/updater/lock.mjs');const root=fixture(t),dir=await updaterDirectory(root,true),lock=await acquireLock(dir);assert.equal(await observeLock(dir),'held');await assert.rejects(acquireLock(dir),/LOCK_BUSY/);await lock.release();assert.equal(await observeLock(dir),'not_held');});
+
+
+test('published validated release is reused without another systemd build',async t=>{
+  const root=fixture(t);let built=false,deployed=false;
+  const a=seam({checkBuildEnvironment:async()=>({config:{coreUser:'stardust'},builder:{uid:1}}),inspectInstalled:async()=>false,publishedCandidate:async(_root,target)=>{assert.equal(target,first);return true;},runSystemdBuild:async()=>{built=true;throw Error('unexpected');},deployStaged:async()=>{deployed=true;return {status:'updated',phase:'HEALTH'};}});
+  const result=await executeUpdate({root},a);assert.equal(result.result,'UPDATED');assert.equal(built,false);assert.equal(deployed,true);
+});
+test('deployment command diagnostics are retained without changing state schema',async t=>{
+  const root=fixture(t),diagnostic={command:'fuser <path>',exitCode:2,signal:null,stderr:'No process specification given'};
+  const a=seam({checkBuildEnvironment:async()=>({config:{coreUser:'stardust'},builder:{uid:1}}),inspectInstalled:async()=>false,publishedCandidate:async()=>true,deployStaged:async()=>({status:'failed',phase:'BACKUP',reason:'COMMAND_FAILED',diagnostic,restored:true,switched:false})});
+  const result=await executeUpdate({root},a);assert.equal(result.result,'UPDATE_FAILED');assert.deepEqual(result.diagnostic,diagnostic);assert.deepEqual(JSON.parse(readFileSync(result.diagnosticPath,'utf8')),{phase:'BACKUP',...diagnostic});assert.equal((await readState(await updaterDirectory(root))).failureReason,'COMMAND_FAILED');
+});
+
+
+test('dependency checks report all unavailable commands at once',async()=>{
+  await assert.rejects(checkDependencies(async name=>{if(['fuser','gzip','git'].includes(name))throw Error('missing');return '/usr/bin/'+name;}),e=>{assert.equal(e.message,'MISSING_DEPENDENCIES');assert.deepEqual(e.missing,['git','fuser','gzip']);return true;});
+});
+test('missing dependency report includes the Debian package command',async t=>{
+  const root=fixture(t);const a=seam({checkBuildEnvironment:async()=>{const e=Error('MISSING_DEPENDENCIES');e.missing=['fuser','gzip'];throw e;}});
+  const result=await executeUpdate({root},a);assert.deepEqual(result.missing,['fuser','gzip']);assert.match(result.installCommand,/psmisc/);assert.equal(result.state.failureReason,'MISSING_DEPENDENCIES');
+});

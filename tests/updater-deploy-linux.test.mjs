@@ -15,6 +15,8 @@ async function internals(){
   const source=readFileSync(new URL('../scripts/updater/deploy.mjs',import.meta.url),'utf8')
     .replace("from './prepare-core.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/prepare-core.mjs',import.meta.url).href)}`)
     .replace("from './check.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/check.mjs',import.meta.url).href)}`)
+    .replace("from './running-port.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/running-port.mjs',import.meta.url).href)}`)
+    .replace("from './diagnostics.mjs'",`from ${JSON.stringify(new URL('../scripts/updater/diagnostics.mjs',import.meta.url).href)}`)
     + '\nexport { backup as testBackup, inspectTree as testInspectTree };\n';
   return import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 }

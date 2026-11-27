@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkRemote } from './check.mjs';
 import { prepareCandidate } from './prepare-core.mjs';
 import { acquireLock } from './lock.mjs';
 import { updaterDirectory, readState, writeState } from './state.mjs';
-import { checkBuildEnvironment, runSystemdBuild } from './systemd-build.mjs';
-import { deployStaged, publishStaged, inspectInstalled } from './deploy.mjs';
+import { checkBuildEnvironment, runSystemdBuild, checkDependencies } from './systemd-build.mjs';
+import { deployStaged, publishStaged, inspectInstalled, publishedCandidate } from './deploy.mjs';
 
 const delays=[60,120,300,600,1800];
 const active=new Set(['CHECKING','PREPARING','VERIFYING']);
@@ -20,6 +22,7 @@ const stageCode=value=>String(value).toUpperCase().replace(/[^A-Z0-9_]/g,'_').sl
 export async function executeUpdate({root,branch='main',sha,timeout=900000,force=false,prepareOnly=false,signal},adapter={}) {
   const storage=process.env.STARDUST_STORAGE_ROOT;
   if(storage!==undefined){if(!isAbsolute(storage))throw new Error('STORAGE_OVERLAP');const production=resolve(storage);for(const path of [join(root,'updater'),join(root,'releases')]){const a=relative(production,path),b=relative(path,production);const within=x=>x==='' || x!=='..' && !x.startsWith('..'+sep) && !isAbsolute(x);if(within(a)||within(b))throw new Error('STORAGE_OVERLAP');}}
+  if(process.platform==='linux'&&!adapter.acquireLock){try{await checkDependencies();}catch(e){if(e.message!=='MISSING_DEPENDENCIES')throw e;return {result:'SUPERVISION_UNAVAILABLE',reason:'MISSING_DEPENDENCIES',missing:e.missing,installCommand:'sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin'};}}
   const dir=await updaterDirectory(root,true), lock=await (adapter.acquireLock??acquireLock)(dir);
   const controller=new AbortController(); const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});lock.signal?.addEventListener('abort',abort,{once:true});
   let state,phase='CHECKING',persistenceFailed=false;
@@ -43,19 +46,20 @@ export async function executeUpdate({root,branch='main',sha,timeout=900000,force
     if(state.buildFailureSha && state.buildFailureSha!==remote.target){state.buildFailures=0;state.buildFailureSha=null;state.buildNextAt=null;}
     if(!force && state.buildNextAt && Date.parse(state.buildNextAt)>clock()){state.status='IDLE';state.phase=null;state.lastResult='BACKOFF';await save();return {result:'BACKOFF',state};}
     if(!adapter.processTreeSupervised){
-      let environment;try{environment=await (adapter.checkBuildEnvironment??checkBuildEnvironment)(root,dir);}catch{state.status='FAILED';state.phase=null;state.failureStage='PROCESS_SUPERVISION';state.failureReason='SUPERVISION_UNAVAILABLE';state.lastResult='SUPERVISION_UNAVAILABLE';await save();return {result:'SUPERVISION_UNAVAILABLE',state};}
+      let environment;try{environment=await (adapter.checkBuildEnvironment??checkBuildEnvironment)(root,dir);}catch(e){state.status='FAILED';state.phase=null;state.failureStage='PROCESS_SUPERVISION';state.failureReason=e.message==='MISSING_DEPENDENCIES'?'MISSING_DEPENDENCIES':'SUPERVISION_UNAVAILABLE';state.lastResult='SUPERVISION_UNAVAILABLE';await save();return {result:'SUPERVISION_UNAVAILABLE',state,...(e.message==='MISSING_DEPENDENCIES'?{missing:e.missing,installCommand:'sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin'}:{})};}
       if(!prepareOnly){try{if(await (adapter.inspectInstalled??inspectInstalled)(root,remote.target,branch,environment.config)){state.status='IDLE';state.phase=null;state.failureStage=null;state.failureReason=null;state.lastResult='UP_TO_DATE';await save();return {result:'UP_TO_DATE',state};}}catch{state.status='FAILED';state.phase=null;state.failureStage='INSTALLATION_CHECK';state.failureReason='INSTALLATION_UNHEALTHY';state.lastResult='INSTALLATION_UNHEALTHY';await save();return {result:'INSTALLATION_UNHEALTHY',state};}}
       if(controller.signal.aborted){state.status='INTERRUPTED';state.interruptedPhase=state.phase;state.lastResult='INTERRUPTED';await save();return {result:'MANUAL_INTERVENTION',state};}
       state.status='PREPARING';state.phase='SYSTEMD_START';await save();
       try {
-        const result=await runSystemdBuild({root,dir,state,branch,timeout,signal:controller.signal,environment,onPhase:async value=>{phase=value;state.phase=value;await save();}});
+        const reused=await (adapter.publishedCandidate??publishedCandidate)(root,remote.target,branch);
+        const result=reused ? {status:'staged'} : await (adapter.runSystemdBuild??runSystemdBuild)({root,dir,state,branch,timeout,signal:controller.signal,environment,onPhase:async value=>{phase=value;state.phase=value;await save();}});
         if(!lock.alive||controller.signal.aborted)throw new Error('MANUAL_INTERVENTION');
         if(result.status==='failed'){state.status='FAILED';state.failureStage=result.phase;state.failureReason=result.reason;state.buildFailures=Math.min(1000,state.buildFailures+1);state.buildFailureSha=remote.target;state.buildNextAt=nowIso(clock()+boundedDelay(state.buildFailures));state.lastResult='PREPARE_FAILED';await save();return {result:'PREPARE_FAILED',state};}
         state.buildFailures=0;state.buildFailureSha=null;state.buildNextAt=null;
         const deployInput={root,state,branch,environment,signal:controller.signal,onPhase:async value=>{phase=value;state.phase=value;await save();}};
-        const deployed=await (prepareOnly?publishStaged(deployInput):deployStaged(deployInput));
+        const deployed=await (prepareOnly?(adapter.publishStaged??publishStaged)(deployInput):(adapter.deployStaged??deployStaged)(deployInput));
         if(persistenceFailed||!lock.alive)throw new Error('LOCK_LOST');
-        if(deployed.status!=='updated'&&deployed.status!=='prepared'){state.status='FAILED';state.failureStage=deployed.phase;state.failureReason=deployed.reason;state.lastResult=deployed.switched?'UPDATE_FAILED_SWITCHED':deployed.restored?'UPDATE_FAILED_RESTORED':'UPDATE_FAILED';await save();return {result:'UPDATE_FAILED',state,restored:deployed.restored,switched:deployed.switched};}
+        if(deployed.status!=='updated'&&deployed.status!=='prepared'){state.status='FAILED';state.failureStage=deployed.phase;state.failureReason=deployed.reason;state.lastResult=deployed.switched?'UPDATE_FAILED_SWITCHED':deployed.restored?'UPDATE_FAILED_RESTORED':'UPDATE_FAILED';await save();let diagnosticPath,diagnosticWriteError;if(deployed.diagnostic){try{diagnosticPath=join(dir,`failure-${state.taskId}.json`);const f=await open(diagnosticPath,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|(constants.O_NOFOLLOW??0),0o600);try{await f.writeFile(JSON.stringify({phase:deployed.phase,...deployed.diagnostic},null,2)+'\n');await f.sync();}finally{await f.close();}}catch{diagnosticPath=undefined;diagnosticWriteError='DIAGNOSTIC_WRITE_FAILED';}}return {result:'UPDATE_FAILED',state,restored:deployed.restored,switched:deployed.switched,...(deployed.diagnostic?{diagnostic:deployed.diagnostic,...(diagnosticPath?{diagnosticPath}:{}),...(diagnosticWriteError?{diagnosticWriteError}:{})}:{})};}
         state.status='READY';state.phase=null;state.preparedSha=remote.target;state.preparedAt=nowIso(clock());state.failureStage=null;state.failureReason=null;state.lastResult=prepareOnly?'PREPARED':'UPDATED';await save();return {result:state.lastResult,state};
       }catch(e){if(persistenceFailed||!lock.alive)throw e;state.interruptedPhase=state.phase;state.status='INTERRUPTED';state.failureStage=state.phase;state.failureReason='MANUAL_INTERVENTION';state.lastResult='INTERRUPTED';await save();return {result:'MANUAL_INTERVENTION',state};}
     }
