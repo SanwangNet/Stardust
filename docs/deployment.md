@@ -73,6 +73,24 @@ sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzi
 
 `psmisc` 提供 `fuser`。发行版自带 Node.js 不一定满足版本要求，还需自行提供可信系统路径中的 Node.js 24 和 npm。升级期间备份前先停止服务并检查数据库文件是否仍被使用；如容器权限导致检查无法确认，更新会失败，不会忽略检查。
 
+## 启用 WebUI 软件更新
+
+WebUI 系统更新默认关闭。新安装可使用 `sudo bash scripts/install.sh --enable-web-update` 显式启用；现有安装不需重装。在包含本版本、来源可信且已由管理员审核的源码目录中执行：
+
+```sh
+sudo apt update && sudo apt install -y sudo
+sudo bash scripts/enable-web-update.sh
+sudo systemctl restart stardust.service
+```
+
+启用脚本只安装 root 所有的固定 `stardust-web-update.service`、只允许 Stardust 用户启动该服务的 sudoers 规则，以及 Core 的启用配置。它不会覆盖已有同名配置；若文件已存在，请管理员检查。该命令是一次性的部署授权，普通 Core 更新无需再次复制 updater。启用脚本必须来自可信的管理员审核源码，不能以 root 执行 updater 下载或构建的候选版本脚本。
+
+这是部署信任决策，不是用户身份认证：启用后，所有能访问受信 WebUI 的用户都可以触发固定的 Stardust 更新。Host、Origin 与 CSRF 检查不能识别管理员；仅在可信局域网和受控代理后启用，勿直接暴露公网。禁用时删除该 sudoers 规则和 Core 的 `web-update.conf`，执行 `sudo systemctl daemon-reload` 并重启 Core。不要给予 Core 通用 sudo 权限。
+
+软件更新页面在刷新或 Core 重启后继续读取经过筛选的任务状态；成功仅在 updater 报告成功且实际运行 SHA 匹配目标时显示。失败时查看页面提示及 `sudo journalctl -u stardust-web-update.service -e`。服务仅提供固定仓库、固定分支和固定部署路径，不接收浏览器提供的命令。现有 updater 不会自动替换自身或 systemd 配置；未来发布若要求更高的 `package.json` 中 `stardustUpdaterContract` 值，更新会停止并提示管理员迁移。未声明该字段的旧版本按契约 1 处理。
+
+Debian 实机验收：确认已安装 sudo、启用服务后打开设置中的「软件更新」，检查远程版本并在存在新版本时安装；观察下载、构建、备份与重启提示，待重连后比较页面显示的目标 SHA 与 `curl http://127.0.0.1:实际端口/api/health` 的 `runningSha`。再检查 updater 的最终状态；断线或仅有健康响应都不代表更新成功。无更新时应返回已是最新版本。当前开发机无法替代 Debian systemd/LXC 真实验收。
+
 ## 数据和手动更新
 
 程序位于 `/opt/stardust/releases/<SHA>`，`current` 指向当前版本。配置、凭据、数据库和其他持久数据保存在 `/opt/stardust/shared`；服务通过 `STARDUST_STORAGE_ROOT` 使用它们。更新前的归档和校验清单位于 root 私有的 `/opt/stardust/backups`，包含敏感信息，不要公开。
@@ -90,4 +108,4 @@ sudo node /usr/local/lib/stardust-updater/status.mjs /opt/stardust
 
 在干净的隔离 Debian 容器运行首次安装，并通过可信网络完成初始化。记下健康接口的 `runningSha`，再执行一次手动更新：应返回 `UP_TO_DATE`，不产生备份。远程 `main` 出现新版本后再次更新，核对新 `runningSha`、持久数据以及新建的备份和校验清单。首次安装、真实更新、服务管理与备份路径均需实机验证；本项目不会连接或操作服务器。
 
-WebUI 更新与备份页面、备份恢复、自动更新 timer 和 updater 自更新尚未实现。旧阶段的技术调查与用户提供的 Debian 基础测试记录保留在 [历史部署调查](deployment-investigation.md)。
+WebUI 备份管理、备份恢复、自动更新 timer 和 updater 自更新尚未实现。旧阶段的技术调查与用户提供的 Debian 基础测试记录保留在 [历史部署调查](deployment-investigation.md)。

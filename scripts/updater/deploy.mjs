@@ -45,11 +45,18 @@ async function stagedMetadata(source,sha,branch,status){
   const path=join(source,'.stardust-candidate.json'),f=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
   try{const s=await f.stat();if(!s.isFile()||s.nlink!==1||s.size>65536)throw new Error('INVALID_CANDIDATE');const text=await f.readFile('utf8');const data=JSON.parse(text);if(data.format!==1||data.status!==status||data.sha!==sha||data.branch!==branch||data.repository!==REPOSITORY)throw new Error('INVALID_CANDIDATE');return data;}finally{await f.close();}
 }
+export async function checkDeploymentContract(release){
+  const file=join(release,'package.json'),entry=await lstat(file);
+  if(!entry.isFile()||entry.isSymbolicLink()||entry.size>65536)throw new Error('INVALID_CANDIDATE');
+  const pkg=JSON.parse(await readFile(file,'utf8')),required=pkg.stardustUpdaterContract??1;
+  if(!Number.isSafeInteger(required)||required<1)throw new Error('INVALID_CANDIDATE');
+  if(required>1)throw new Error('MIGRATION_REQUIRED');
+}
 async function publish(root,taskId,sha,branch,builder){
   const base=join(root,'releases'),source=join(root,'build-work',taskId,'source'),destination=join(base,sha);
   await directory(base);
   let existing;try{existing=await lstat(destination);}catch(e){if(e.code!=='ENOENT')throw e;}
-  if(existing){try{if(!existing.isDirectory()||existing.isSymbolicLink()||existing.uid!==0||(await realpath(destination))!==destination)throw Error();await inspectTree(destination,0);await stagedMetadata(destination,sha,branch,'prepared');await inspectStagedArtifacts(destination);const head=join(destination,'.git','HEAD'),hs=await lstat(head);if(!hs.isFile()||hs.isSymbolicLink()||hs.size>128||(await readFile(head,'utf8')).trim()!==sha)throw Error();return destination;}catch{throw new Error('CANDIDATE_CONFLICT');}}
+  if(existing){try{if(!existing.isDirectory()||existing.isSymbolicLink()||existing.uid!==0||(await realpath(destination))!==destination)throw Error();await inspectTree(destination,0);await stagedMetadata(destination,sha,branch,'prepared');await inspectStagedArtifacts(destination);const head=join(destination,'.git','HEAD'),hs=await lstat(head);if(!hs.isFile()||hs.isSymbolicLink()||hs.size>128||(await readFile(head,'utf8')).trim()!==sha)throw Error();await checkDeploymentContract(destination);return destination;}catch(e){if(e.message==='MIGRATION_REQUIRED')throw e;throw new Error('CANDIDATE_CONFLICT');}}
   const src=await lstat(source);if(!src.isDirectory()||src.isSymbolicLink()||src.uid!==builder.uid||(await realpath(source))!==source)throw new Error('INVALID_CANDIDATE');
   await noBuilderProcesses(builder.uid);await stagedMetadata(source,sha,branch,'staged');await inspectStagedArtifacts(source);await inspectTree(source,builder.uid);
   if((await stat(source)).dev!==(await stat(base)).dev)throw new Error('RELEASE_FILESYSTEM_MISMATCH');
@@ -61,7 +68,7 @@ async function publish(root,taskId,sha,branch,builder){
   await writeFile(join(source,'.stardust-candidate.json'),JSON.stringify(meta,null,2)+'\n',{mode:0o644});
   await command('mv',['--no-clobber','--no-target-directory','--',source,destination],300000);
   try{await lstat(source);throw new Error('CANDIDATE_CONFLICT');}catch(e){if(e.code!=='ENOENT')throw e;}
-  await inspectStagedArtifacts(destination);return destination;
+  await inspectStagedArtifacts(destination);await checkDeploymentContract(destination);return destination;
 }
 async function currentRelease(root){
   const current=join(root,'current'),s=await lstat(current);if(!s.isSymbolicLink())throw new Error('CURRENT_INVALID');
@@ -125,7 +132,7 @@ export async function publishedCandidate(root,sha,branch) {
 export async function publishStaged({root,state,branch,environment,onPhase,signal},adapter={}) {
   if(!shaPattern.test(state.targetSha??'')||!taskPattern.test(state.taskId??''))throw new Error('INVALID_TASK');
   try{if(signal?.aborted)throw new Error('CANCELLED');await onPhase('PUBLISH');await (adapter.publish??publish)(root,state.taskId,state.targetSha,branch,environment.builder);return {status:'prepared'};}
-  catch(e){const allowed=['INVALID_CANDIDATE','CANDIDATE_CONFLICT','UNSAFE_DIRECTORY','UNSAFE_RELEASE','RELEASE_TOO_LARGE','RELEASE_FILESYSTEM_MISMATCH','BUILD_STILL_RUNNING','CANCELLED'];return {status:'failed',phase:'PUBLISH',reason:allowed.includes(e?.message)?e.message:e?.diagnostic?'COMMAND_FAILED':'UPDATE_FAILED',...(e?.diagnostic?{diagnostic:e.diagnostic}:{}),restored:false,switched:false};}
+  catch(e){const allowed=['INVALID_CANDIDATE','CANDIDATE_CONFLICT','UNSAFE_DIRECTORY','UNSAFE_RELEASE','RELEASE_TOO_LARGE','RELEASE_FILESYSTEM_MISMATCH','BUILD_STILL_RUNNING','MIGRATION_REQUIRED','CANCELLED'];return {status:'failed',phase:'PUBLISH',reason:allowed.includes(e?.message)?e.message:e?.diagnostic?'COMMAND_FAILED':'UPDATE_FAILED',...(e?.diagnostic?{diagnostic:e.diagnostic}:{}),restored:false,switched:false};}
 }
 
 export async function deployStaged({root,state,branch,environment,onPhase,signal},adapter={}){
@@ -143,7 +150,7 @@ export async function deployStaged({root,state,branch,environment,onPhase,signal
     return {status:'updated',phase:'HEALTH'};
   } catch(e){
     let restored=false;if(serviceStopped&&!switched&&!signal?.aborted&&e?.message!=='LOCK_LOST'){try{await ops.start();await ops.health(adapter.health ? (environment.config.healthPort??80) : null);restored=true;}catch{}}
-    const allowed=['INVALID_TASK','INVALID_CANDIDATE','CANDIDATE_CONFLICT','UNSAFE_DIRECTORY','UNSAFE_RELEASE','RELEASE_TOO_LARGE','RELEASE_FILESYSTEM_MISMATCH','BUILD_STILL_RUNNING','CURRENT_INVALID','SERVICE_CONFIGURATION_INVALID','SERVICE_STILL_RUNNING','SERVICE_STOP_UNCONFIRMED','DATABASE_IN_USE','DATABASE_UNSAFE','FUSER_UNAVAILABLE','SHARED_INVALID','BACKUP_INVALID','HEALTH_CHECK_FAILED','CANCELLED'];
+    const allowed=['INVALID_TASK','INVALID_CANDIDATE','CANDIDATE_CONFLICT','UNSAFE_DIRECTORY','UNSAFE_RELEASE','RELEASE_TOO_LARGE','RELEASE_FILESYSTEM_MISMATCH','BUILD_STILL_RUNNING','CURRENT_INVALID','SERVICE_CONFIGURATION_INVALID','SERVICE_STILL_RUNNING','SERVICE_STOP_UNCONFIRMED','DATABASE_IN_USE','DATABASE_UNSAFE','FUSER_UNAVAILABLE','SHARED_INVALID','BACKUP_INVALID','HEALTH_CHECK_FAILED','MIGRATION_REQUIRED','CANCELLED'];
     return {status:'failed',phase,reason:allowed.includes(e?.message)?e.message:e?.diagnostic?'COMMAND_FAILED':'UPDATE_FAILED',...(e?.diagnostic?{diagnostic:e.diagnostic}:{}),restored,switched};
   }
 }

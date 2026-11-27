@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 unset STARDUST_STORAGE_ROOT
+WEB_UPDATE=0
+if [[ ${1:-} == --enable-web-update && $# == 1 ]]; then WEB_UPDATE=1; elif (( $# != 0 )); then printf "用法：sudo bash scripts/install.sh [--enable-web-update]\n" >&2; exit 1; fi
 ROOT=/opt/stardust
 CODE=/usr/local/lib/stardust-updater
 UNIT=/etc/systemd/system/stardust.service
@@ -13,12 +15,14 @@ trap 'printf "安装未完成，已保留现场。请检查 /opt/stardust/update
 [[ $(id -u) == 0 ]] || fail '请使用 sudo bash scripts/install.sh'
 [[ $(uname -s) == Linux ]] || fail '仅支持 Debian Linux'
 missing=()
-for tool in node npm git systemctl systemd-run flock tar gzip fuser chown chmod mv ps getent useradd install readlink runuser mkdir ln; do
+tools=(node npm git systemctl systemd-run flock tar gzip fuser chown chmod mv ps getent useradd install readlink runuser mkdir ln)
+if (( WEB_UPDATE )); then tools+=(sudo visudo stat cmp mktemp); fi
+for tool in "${tools[@]}"; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 if (( ${#missing[@]} )); then
   printf '缺少系统命令：%s\n' "${missing[*]}" >&2
-  printf 'Debian 依赖：sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin\n' >&2
+  printf 'Debian 依赖：sudo apt update && sudo apt install -y git nodejs npm systemd util-linux tar gzip psmisc coreutils procps passwd libc-bin sudo diffutils\n' >&2
   fail '安装依赖后重试；Node.js 还需满足版本 24 要求'
 fi
 [[ -d /run/systemd/system ]] && systemctl show --property=Version >/dev/null || fail 'systemd 系统管理器不可用'
@@ -74,6 +78,7 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 chmod 0644 "$UNIT"
+if (( WEB_UPDATE )); then bash "$SCRIPT_DIR/enable-web-update.sh"; fi
 systemctl daemon-reload
 systemctl enable --now stardust.service
 "$NODE" --input-type=module - "$SHA" <<'JS'

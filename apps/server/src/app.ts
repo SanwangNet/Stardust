@@ -13,6 +13,8 @@ import { ModelError, modelService, type ModelService } from "./model.js";
 import { ExtensionError, ExtensionManager } from "./extension-manager.js";
 import { logger, type LogService, type LogEntry } from "./logger.js";
 import { isWebAccess, isTrustedLocalAccess, parseTrustedProxies } from "./local-access.js";
+import { checkSoftwareUpdate } from "./software-update.js";
+import { createWebUpdateControl } from "./web-update-control.js";
 import { ToolRuns } from "./tool-runs.js";
 import { ScopedHistorySearch } from "./scoped-history-search.js";
 import { ContextService, deliveryStatus } from "./context-service.js";
@@ -42,6 +44,13 @@ export function readRunningCommit(root: string = applicationRoot): string {
   return "development";
 }
 const runningSha = readRunningCommit();
+function readRunningVersion(): string {
+  try {
+    const data: unknown = JSON.parse(readFileSync(join(applicationRoot, "package.json"), "utf8"));
+    if (data && typeof data === "object" && "version" in data && typeof data.version === "string" && /^[0-9A-Za-z.+-]{1,80}$/.test(data.version)) return data.version;
+  } catch { /* Release metadata may be unavailable in development fixtures. */ }
+  return "unknown";
+}
 
 export interface AppOptions {
   version?: string;
@@ -61,6 +70,10 @@ export interface AppOptions {
   /** Trusted server integration only; it is deliberately not wired to production QQ input. */
   qqToolAdapter?: { policy?: QQToolPolicy; register(start: QQToolStarter): void; runTimeoutMs?: number; retentionMs?: number };
   qqApprovalToken?: string;
+  /** In-process test seam; never configured by browser requests. */
+  webUpdateControl?: ReturnType<typeof createWebUpdateControl>;
+  runningShaForTest?: string;
+  updateCheckForTest?: typeof checkSoftwareUpdate;
   qqToolCalling?: { enabled: boolean; policy: QQToolPolicy; maxActive?: number };
 }
 
@@ -166,8 +179,10 @@ const staticFiles: Readonly<Record<string, { filename: string; contentType: stri
 };
 
 export function createStardustServer(options: AppOptions = {}): Server {
+  const webUpdate = options.webUpdateControl ?? createWebUpdateControl(process.env.STARDUST_WEB_UPDATE_ENABLED === "1");
+  const activeSha = options.runningShaForTest ?? runningSha;
   const startedAt = options.startedAt ?? new Date();
-  const version = options.version ?? "0.1.0";
+  const version = options.version ?? readRunningVersion();
   const staticDir = options.staticDir ?? defaultStaticDir;
   const setup = options.setupService ?? setupService;
   const model = options.modelService ?? modelService;
@@ -791,6 +806,35 @@ export function createStardustServer(options: AppOptions = {}): Server {
       return;
     }
 
+    if (pathname === "/api/v1/software-update/status") {
+      if (request.method !== "GET") { sendJson(response,405,{error:"METHOD_NOT_ALLOWED"}); return; }
+      try { if (!setup.getInitializationState().initialized) { sendJson(response,403,{error:"SETUP_REQUIRED"}); return; } sendJson(response,200,{enabled:webUpdate.enabled,job:await webUpdate.status(),runningSha:activeSha}); }
+      catch { sendJson(response,503,{error:"UPDATE_STATUS_UNAVAILABLE",message:"无法读取更新状态。"}); }
+      return;
+    }
+    if (pathname === "/api/v1/software-update/install") {
+      if (request.method !== "POST") { sendJson(response,405,{error:"METHOD_NOT_ALLOWED"}); return; }
+      if (!request.headers.origin || !trusted(true) || !/^application\/json(?:\s*;|\s*$)/i.test(request.headers["content-type"] ?? "")) { sendJson(response,403,{error:"INVALID_ORIGIN"}); return; }
+      try {
+        if (!setup.getInitializationState().initialized || !webUpdate.enabled) { sendJson(response,403,{error:"UPDATE_DISABLED",message:"WebUI 更新未启用。"}); return; }
+        const body=await readSetupBody(request,1024);
+        if (!body || typeof body!=="object" || Array.isArray(body) || Object.keys(body).length) { sendJson(response,400,{error:"INVALID_INPUT"}); return; }
+        const previous=await webUpdate.status();
+        if (previous?.running) { sendJson(response,409,{error:"UPDATE_IN_PROGRESS",message:"更新正在进行。"}); return; }
+        await webUpdate.start(); sendJson(response,202,{accepted:true,previousJobId:previous?.jobId ?? null});
+      } catch (error) { sendJson(response,503,{error:"UPDATE_START_FAILED",message:error instanceof Error ? error.message : "无法启动更新服务。"}); }
+      return;
+    }
+
+    if (pathname === "/api/v1/software-update/check") {
+      if (request.method !== "GET") { sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+      try {
+        if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED" }); return; }
+        sendJson(response, 200, await (options.updateCheckForTest ?? checkSoftwareUpdate)(version));
+      } catch (error) { sendJson(response, 502, { error: "UPDATE_CHECK_FAILED", message: error instanceof Error && /^远程版本/.test(error.message) ? error.message : "无法连接更新来源，请稍后重试。" }); }
+      return;
+    }
+
     if (pathname === "/api/v1/server/settings") {
       try {
         if (!setup.getInitializationState().initialized) { sendJson(response, 403, { error: "SETUP_REQUIRED", message: "请先完成初始化。" }); return; }
@@ -970,7 +1014,7 @@ export function createStardustServer(options: AppOptions = {}): Server {
         status: "ok",
         service: "Stardust",
         version,
-        runningSha,
+        runningSha: activeSha,
         startedAt: startedAt.toISOString(),
         uptimeMs: Math.max(0, Date.now() - startedAt.getTime()),
         checkedAt: new Date().toISOString(),
