@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, chown, lstat, mkdir, mkdtemp, readdir, readlink, realpath, rename, rm, rmdir, symlink, unlink } from 'node:fs/promises';
+import { chmod, chown, lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, symlink, unlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { promisify } from 'node:util';
 import { archiveLimit, atomicJson, capture, digest, digestPattern, idPattern, missing, openFile, readJson, releases, shaPattern, syncDirectory, version } from './files.mjs';
@@ -38,7 +38,31 @@ export async function directory(path,owner=0,groupWritable=false){
 export function retainedVersions(versions,current,retain){
   return versions.filter(v=>v.sha!==current).sort((a,b)=>b.sequence-a.sequence).slice(retain-1);
 }
-export async function lifecycle({root=systemRoot,config,remote=releases(config.token),control=systemctl,extract=python,verifyHealth}){
+const managerFiles=['manage.mjs','files.mjs','running-port.mjs','archive.py'];
+export async function prepareManager(source,code){
+  const parent=dirname(code);
+  await directory(parent);await directory(code);await directory(source);
+  const stage=await mkdtemp(join(parent,'.stardust-lifecycle-'));
+  try{
+    await chmod(stage,0o755);
+    for(const name of managerFiles){
+      const input=await openFile(join(source,name),1024*1024,0);
+      try{
+        const output=await open(join(stage,name),'wx',0o600);
+        try{await output.writeFile(await input.readFile());await output.chmod(0o644);await output.sync();}finally{await output.close();}
+      }finally{await input.close();}
+    }
+    for(const name of managerFiles.filter(name=>name.endsWith('.mjs')))await command(process.execPath,['--check',join(stage,name)],{timeout:30000});
+    await command(process.execPath,['--input-type=module','-e','import {pathToFileURL} from "node:url"; import {join} from "node:path"; await import(pathToFileURL(join(process.argv[1],"manage.mjs")).href)',stage],{timeout:30000});
+    await command('/usr/bin/python3',['-I','-c','import runpy,sys; assert callable(runpy.run_path(sys.argv[1])["exchange"])',join(stage,'archive.py')],{timeout:30000});
+    await syncDirectory(stage);await syncDirectory(parent);
+    return stage;
+  }catch(error){await rm(stage,{recursive:true,force:true});throw error;}
+}
+export async function exchangeManager(stage,code){
+  await command('/usr/bin/python3',['-I',helper,'exchange',code,stage,'-'],{timeout:30000});
+}
+export async function lifecycle({root=systemRoot,config,remote=releases(config.token),control=systemctl,extract=python,verifyHealth,managerCode=root===systemRoot?'/usr/local/lib/stardust-lifecycle':null}){
   const releasesDir=join(root,'releases'), backupsDir=join(root,'backups'), shared=join(root,'shared');
   const management=join(root,'management'),inbox=join(management,'inbox'),privateDir=join(management,'private');
   const statusPath=join(management,'status.json');
@@ -197,7 +221,7 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
     const {id,operation}=request;
     status.job={id,operation,phase:'CHECK',result:'running',reason:null,targetSha:null,bootId};
     await persist();
-    let work,keepWork=false;
+    let work,keepWork=false,managerStage,managerExchangeAttempted=false;
     try{
       const active=await current();
       if(operation==='check'){status.latest=await remote.latest();delete status.latest.assetId;delete status.latest.sha256;delete status.latest.size;}
@@ -226,6 +250,11 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
           else{
             if(active&&(latest.sequence<=active.sequence||latest.dataFormat<(active.dataFormat??1)))throw Error('INCOMPATIBLE_RELEASE');
             const target=await prepareRelease(work,latest);
+            if(managerCode){
+              await stage('MANAGER');
+              try{managerStage=await prepareManager(join(releasesDir,target.sha,'lifecycle'),managerCode);}
+              catch(error){throw Error('MANAGER_PREPARE_FAILED',{cause:error});}
+            }
             if(!active){await switchTo(target.sha);await stage('START');await start(target.sha);}
             else await withStopped(async changed=>{
               await stage('BACKUP');await saveBackup(work,active,'automatic');
@@ -268,6 +297,15 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
         for(const entry of automatic.slice(config.retainAutomaticBackups))await deleteBackup(entry.id);
         await inventory(now);
       }
+      if(managerStage){
+        await stage('MANAGER');
+        // Once exchange starts, its result may be ambiguous if the helper exits unexpectedly.
+        // Retain the stage in all cases: after an exchange it contains the previous manager.
+        managerExchangeAttempted=true;
+        try{await exchangeManager(managerStage,managerCode);}
+        catch(error){throw Error('MANAGER_SWITCH_FAILED',{cause:error});}
+        await syncDirectory(dirname(managerCode));
+      }
       if(status.job.result==='running')status.job.result='success';
       keepWork=false;
     }catch(error){
@@ -277,6 +315,7 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
       status.job.reason=archiveError??(/^[A-Z][A-Z0-9_]{1,80}$/.test(error.message)?error.message:error.code==='ENOENT'?'FILE_MISSING':'OPERATION_FAILED');
       await inventory(await current().catch(()=>null)).catch(()=>{});
     }finally{
+      if(managerStage&&!managerExchangeAttempted)await rm(managerStage,{recursive:true,force:true}).catch(()=>{});
       if(work&&!keepWork)await rm(work,{recursive:true,force:true}).catch(()=>{});
       if(operation==='upload')await unlink(join(inbox,id+'.tar.gz')).catch(()=>{});
       if(['update','install','restore','rollback'].includes(operation)) status.lastDeployment=status.job;

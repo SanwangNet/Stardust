@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readlink, realpath, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canRollback, lifecycle, parseSystemdProperties, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
+import { canRollback, exchangeManager, lifecycle, parseSystemdProperties, prepareManager, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
 import { releases } from '../scripts/lifecycle/files.mjs';
 import { createManagement } from '../apps/server/dist/management.js';
 import { createStardustServer } from '../apps/server/dist/app.js';
@@ -157,6 +157,48 @@ test('archive helper preserves ordinary backups and rejects escaping paths and l
   }
 });
 
+test('package extraction accepts only the four lifecycle manager files', {skip:!python}, async t=>{
+  const root=await temp(t), archive=join(root,'package.tar.gz'), output=join(root,'out');await mkdir(output);
+  const create="import io,sys,tarfile; f=tarfile.open(sys.argv[1],'w:gz'); n='lifecycle/'+sys.argv[2]; i=tarfile.TarInfo(n); i.size=1; f.addfile(i,io.BytesIO(b'x')); f.close()";
+  execFileSync(python,['-I','-c',create,archive,'manage.mjs']);
+  execFileSync(python,['-I',archiveHelper,'extract',archive,output,'package']);
+  assert.equal(await readFile(join(output,'lifecycle','manage.mjs'),'utf8'),'x');
+  await rm(archive);await rm(output,{recursive:true});await mkdir(output);
+  execFileSync(python,['-I','-c',create,archive,'extra.mjs']);
+  assert.throws(()=>execFileSync(python,['-I',archiveHelper,'extract',archive,output,'package'],{stdio:'pipe'}));
+});
+
+test('release archive includes its matching lifecycle manager', async t=>{
+  const root=await temp(t),stage=join(root,'stage'),output=join(root,'output');
+  await mkdir(join(stage,'apps','server'),{recursive:true});await mkdir(join(stage,'node_modules'),{recursive:true});
+  await writeFile(join(stage,'apps','server','fixture'),'fixture');await writeFile(join(stage,'node_modules','fixture'),'fixture');
+  await writeFile(join(stage,'package.json'),JSON.stringify({version:'0.1.0'}));
+  const sha=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+  execFileSync(process.execPath,[fileURLToPath(new URL('../scripts/package-release.mjs',import.meta.url)),stage,output],{env:{...process.env,GITHUB_SHA:sha,GITHUB_RUN_NUMBER:'1'}});
+  const entries=execFileSync('tar',['-tzf',join(output,'stardust-linux-x64.tar.gz')],{encoding:'utf8'}).split(/\r?\n/);
+  for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py']){
+    assert.ok(entries.includes('lifecycle/'+name));
+    assert.deepEqual(execFileSync('tar',['-xOzf',join(output,'stardust-linux-x64.tar.gz'),'lifecycle/'+name]),await readFile(new URL('../scripts/lifecycle/'+name,import.meta.url)));
+  }
+});
+
+test('real Linux files: failed manager preparation or exchange keeps the active manager', {skip:process.platform!=='linux'||process.getuid()!==0}, async t=>{
+  const root=await temp(t),source=join(root,'source'),active=join(root,'active');
+  await mkdir(source);await mkdir(active);await writeFile(join(active,'marker'),'running');
+  for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py'])await copyFile(new URL('../scripts/lifecycle/'+name,import.meta.url),join(source,name));
+  await writeFile(join(source,'files.mjs'),'export {');
+  await assert.rejects(prepareManager(source,active));
+  assert.equal(await readFile(join(active,'marker'),'utf8'),'running');
+  assert.deepEqual((await readdir(root)).sort(),['active','source']);
+  await copyFile(new URL('../scripts/lifecycle/files.mjs',import.meta.url),join(source,'files.mjs'));
+  const stage=await prepareManager(source,active);
+  await assert.rejects(exchangeManager(stage,join(root,'missing')));
+  assert.equal(await readFile(join(active,'marker'),'utf8'),'running');
+  await exchangeManager(stage,active);
+  assert.equal(await readFile(join(stage,'marker'),'utf8'),'running');
+  assert.match(await readFile(join(active,'manage.mjs'),'utf8'),/prepareManager/);
+});
+
 test('real Linux files: update backs up shared, switches versions, and restores matching data',{skip:process.platform!=='linux'||process.getuid()!==0},async t=>{
   const root=await temp(t);
   for(const path of ['releases','backups','shared','management','management/private','management/inbox'])await mkdir(join(root,path),{mode:0o700});
@@ -164,6 +206,7 @@ test('real Linux files: update backs up shared, switches versions, and restores 
   await writeFile(shared,'original');
   await mkdir(join(root,'releases',a),{mode:0o755});
   await writeFile(join(root,'releases',a,'version.json'),JSON.stringify(release(a,1)));
+  const managerCode=join(root,'manager');await mkdir(managerCode);await writeFile(join(managerCode,'old-marker'),'old');
   await symlink('releases/'+a,join(root,'current'));
   const operations=[],archive=(...args)=>execFileSync(python,['-I',archiveHelper,...args]);
   let active=true, newest=release(b,2,2);
@@ -173,18 +216,24 @@ test('real Linux files: update backs up shared, switches versions, and restores 
       await mkdir(join(staging,item,'..'),{recursive:true});
       await writeFile(join(staging,item),'fixture');
     }
+    await mkdir(join(staging,'lifecycle'));
+    for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py'])await copyFile(new URL('../scripts/lifecycle/'+name,import.meta.url),join(staging,'lifecycle',name));
     await writeFile(join(staging,'version.json'),JSON.stringify(target));
     await writeFile(join(staging,'package.json'),JSON.stringify({version:target.version}));
-    execFileSync('tar',['-czf',path,'-C',staging,'apps','node_modules','version.json','package.json']);
+    execFileSync('tar',['-czf',path,'-C',staging,'apps','node_modules','lifecycle','version.json','package.json']);
   }};
   const control=async(command)=>{
     if(command==='stop'){active=false;operations.push('stop');return {stdout:''};}
     if(command==='start'){active=true;operations.push('start');return {stdout:''};}
     return {stdout:[`WorkingDirectory=${root}/current`,`Environment=STARDUST_STORAGE_ROOT=${root}/shared`,'User=stardust','Group=stardust','KillMode=control-group','Delegate=no','ActiveState=inactive','MainPID=0'].join('\n')};
   };
-  const manager=await lifecycle({root,config:{uid:0,gid:0,enabled:true,retainVersions:3,retainAutomaticBackups:3},remote,control,
-    extract:(...args)=>{if(args[0]==='backup')assert.equal(active,false);return archive(...args);},verifyHealth:async sha=>assert.equal(await readlink(join(root,'current')),'releases/'+sha)});
+  const manager=await lifecycle({root,managerCode,config:{uid:0,gid:0,enabled:true,retainVersions:3,retainAutomaticBackups:3},remote,control,
+    extract:(...args)=>{if(args[0]==='backup')assert.equal(active,false);return archive(...args);},verifyHealth:async sha=>{assert.equal(await readlink(join(root,'current')),'releases/'+sha);if(sha===b)assert.equal(await readFile(join(managerCode,'old-marker'),'utf8'),'old');}});
   assert.equal((await manager.run({id,operation:'update',target:b})).result,'success');
+  assert.match(await readFile(join(managerCode,'manage.mjs'),'utf8'),/prepareManager/);
+  const retained=(await readdir(root)).filter(name=>name.startsWith('.stardust-lifecycle-'));
+  assert.equal(retained.length,1);
+  assert.equal(await readFile(join(root,retained[0],'old-marker'),'utf8'),'old');
   assert.equal(await readFile(shared,'utf8'),'original');
   assert.deepEqual(operations,['stop','start']);
   assert.equal((await manager.run({id,operation:'rollback',target:a})).reason,'INCOMPATIBLE_ROLLBACK');
@@ -192,6 +241,8 @@ test('real Linux files: update backs up shared, switches versions, and restores 
   assert.equal(status.backups[0].kind,'automatic');
   await writeFile(shared,'later');
   assert.equal((await manager.run({id,operation:'restore',backup:status.backups[0].id})).result,'success');
+  assert.match(await readFile(join(managerCode,'manage.mjs'),'utf8'),/prepareManager/);
+  assert.equal((await readdir(root)).filter(name=>name.startsWith('.stardust-lifecycle-')).length,1);
   assert.equal(await readFile(shared,'utf8'),'original');
   assert.equal(await readlink(join(root,'current')),'releases/'+a);
   const after=JSON.parse(await readFile(join(root,'management','status.json'),'utf8'));

@@ -40,16 +40,16 @@ if $refresh; then
   for p in "$root" "$root/management" "$root/management/private" "$code"; do safe_dir "$p" || fail "安装路径不安全：$p"; done
   exec 8>"$root/management/private/lock"
   flock -n 8 || fail '软件管理操作正在进行，请稍后重试。'
-  stage=$(mktemp -d /usr/local/lib/.stardust-lifecycle.XXXXXXXX)
+  stage=$(mktemp -d /usr/local/lib/.stardust-lifecycle-XXXXXXXX)
   write_manager "$stage"
-  for file in manage.mjs files.mjs running-port.mjs archive.py; do
-    install -o root -g root -m 0644 "$stage/$file" "$code/$file.new"
-  done
-  for file in manage.mjs files.mjs running-port.mjs archive.py; do
-    mv -f -- "$code/$file.new" "$code/$file"
-    unlink "$stage/$file"
-  done
-  rmdir -- "$stage"
+  chmod 0755 "$stage"
+  for file in manage.mjs files.mjs running-port.mjs; do "$node" --check "$stage/$file"; done
+  "$node" --input-type=module -e 'import {pathToFileURL} from "node:url"; import {join} from "node:path"; await import(pathToFileURL(join(process.argv[1],"manage.mjs")).href)' "$stage"
+  /usr/bin/python3 -I -c 'import runpy,sys; assert callable(runpy.run_path(sys.argv[1])["exchange"])' "$stage/archive.py"
+  /usr/bin/python3 -I -c 'import os,sys; p=sys.argv[1]; names=("manage.mjs","files.mjs","running-port.mjs","archive.py"); [(lambda fd: (os.fsync(fd),os.close(fd)))(os.open(os.path.join(p,n),os.O_RDONLY)) for n in names]; fd=os.open(p,os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)' "$stage"
+  # Exchange whole directories; stage becomes the retained previous manager.
+  /usr/bin/python3 -I "$stage/archive.py" exchange "$code" "$stage" -
+  /usr/bin/python3 -I -c 'import os; fd=os.open("/usr/local/lib",os.O_RDONLY|os.O_DIRECTORY); os.fsync(fd); os.close(fd)'
   # Repair status written by older managers under UMask=0077, while holding the lock.
   status_file=$root/management/status.json
   if [[ -e $status_file || -L $status_file ]]; then

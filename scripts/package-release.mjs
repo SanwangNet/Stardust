@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { digest, packageName, shaPattern, version } from './lifecycle/files.mjs';
@@ -11,9 +11,11 @@ const sha=process.env.GITHUB_SHA, sequence=Number(process.env.GITHUB_RUN_NUMBER)
 if(!shaPattern.test(sha))throw Error('INVALID_COMMIT');
 const meta=version({format:1,sha,sequence,version:pkg.version,dataFormat:pkg.stardustDataFormat??1,manager:pkg.stardustManagerContract??1,platform:'linux-x64',node:24});
 await mkdir(output,{recursive:true});
+await mkdir(join(staging,'lifecycle'),{recursive:true});
+for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py'])await copyFile(new URL('./lifecycle/'+name,import.meta.url),join(staging,'lifecycle',name));
 await writeFile(join(staging,'version.json'),JSON.stringify(meta)+'\n');
 const archive=join(output,packageName);
-execFileSync('tar',['--format=ustar','--exclude=node_modules/.bin','-czf',archive,'-C',staging,'apps','node_modules','package.json','version.json'],{stdio:'inherit'});
+execFileSync('tar',['--format=ustar','--exclude=node_modules/.bin','-czf',archive,'-C',staging,'apps','node_modules','lifecycle','package.json','version.json'],{stdio:'inherit'});
 const {size}=await import('node:fs/promises').then(fs=>fs.stat(archive));
 const sha256=await digest(archive);
 const message=execFileSync('git',['log','-1','--format=%B',sha],{encoding:'utf8'}).trim().slice(0,4096);

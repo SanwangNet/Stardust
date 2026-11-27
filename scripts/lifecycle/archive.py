@@ -7,7 +7,7 @@ from pathlib import Path
 
 LIMIT = 8 * 1024**3
 COUNT = 250_000
-PACKAGE = {"apps", "node_modules", "package.json", "version.json"}
+PACKAGE = {"apps", "node_modules", "lifecycle", "package.json", "version.json"}
 UNSAFE = {".git", ".env", "shared", "backups", "config.toml"}
 
 
@@ -40,6 +40,7 @@ def extract(archive, destination, kind):
                     or not (item.isdir() or item.isreg()) or item.sparse is not None):
                 raise ValueError("UNSAFE_ARCHIVE")
             if kind == "package" and (any(p in UNSAFE for p in parts)
+                    or (parts[0] == "lifecycle" and not (len(parts) == 1 and item.isdir() or len(parts) == 2 and item.isreg() and parts[1] in {"manage.mjs", "files.mjs", "running-port.mjs", "archive.py"}))
                     or (parts[0] == "apps" and parts[:3] not in
                         [["apps"], ["apps", "server"], ["apps", "web"],
                          ["apps", "server", "dist"], ["apps", "web", "dist"]])):
@@ -79,6 +80,16 @@ def backup(archive, shared, metadata):
         output.add(metadata, arcname="backup.json", recursive=False)
 
 
+def exchange(first, second):
+    # Linux renameat2 atomically exchanges a directory and a symlink as well as two symlinks.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.renameat2(-100, os.fsencode(first), -100, os.fsencode(second), 2)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
 if __name__ == "__main__":
     try:
         operation, first, second, third = sys.argv[1:]
@@ -86,6 +97,8 @@ if __name__ == "__main__":
             extract(first, second, third)
         elif operation == "backup":
             backup(first, second, third)
+        elif operation == "exchange":
+            exchange(first, second)
         else:
             raise ValueError("INVALID_OPERATION")
     except (OSError, ValueError, tarfile.TarError) as error:

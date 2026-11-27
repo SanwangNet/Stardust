@@ -6,10 +6,12 @@ const stages: Record<string,string> = {
   CHECK: "正在检查已发布的软件包…", DOWNLOAD: "正在下载软件包…", EXTRACT: "正在验证并解压软件包…",
   STOP: "正在停止服务…", BACKUP: "正在备份数据…", SWITCH: "正在切换版本…",
   START: "正在启动并核对版本…", RESTORE: "正在恢复数据…", VALIDATE: "正在验证备份…",
+  MANAGER: "正在准备软件更新…",
 };
 const reasons: Record<string,string> = {
   MANAGEMENT_BUSY:"已有操作正在进行。", MANAGEMENT_DISABLED:"软件管理未启用。", MANAGEMENT_UNAVAILABLE:"无法读取软件管理状态。",
   RELEASE_CHANGED:"发布版本已改变，请重新检查。", MANAGER_UPGRADE_REQUIRED:"此版本要求管理员更新生命周期管理器。",
+  MANAGER_PREPARE_FAILED:"无法准备软件更新，请检查服务日志。", MANAGER_SWITCH_FAILED:"程序已切换，但软件管理器更新失败，请由部署者检查日志并修复。",
   INCOMPATIBLE_ROLLBACK:"旧版本与当前数据不兼容，需要恢复对应备份。", INCOMPATIBLE_RELEASE:"软件包与当前版本或数据不兼容。",
   PACKAGE_CHECKSUM_MISMATCH:"软件包校验失败。", BACKUP_CHECKSUM_MISMATCH:"备份校验失败。",
   HEALTH_CHECK_FAILED:"服务启动后未通过版本健康检查。", UPLOAD_TOO_LARGE:"备份超过 2 GiB。",
