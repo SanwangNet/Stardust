@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canRollback, lifecycle, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
+import { canRollback, lifecycle, parseSystemdProperties, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
 import { releases } from '../scripts/lifecycle/files.mjs';
 import { createManagement } from '../apps/server/dist/management.js';
 import { createStardustServer } from '../apps/server/dist/app.js';
@@ -15,6 +15,11 @@ const id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', a='a'.repeat(40), b='b'.repeat(
 const release=(sha,sequence,dataFormat=1)=>({format:1,sha,sequence,version:'0.1.0',dataFormat,platform:'linux-x64',node:24,manager:1});
 const archiveHelper=fileURLToPath(new URL('../scripts/lifecycle/archive.py',import.meta.url));
 const python=process.env.STARDUST_TEST_PYTHON ?? (process.platform==='linux'?'/usr/bin/python3':null);
+test('systemd properties retain equals signs in environment values',()=>{
+  assert.deepEqual(parseSystemdProperties('User=stardust\r\nEnvironment=STARDUST_STORAGE_ROOT=/opt/stardust/shared OTHER=a=b\r\nEnvironmentFiles=\r\n'),{
+    User:'stardust',Environment:'STARDUST_STORAGE_ROOT=/opt/stardust/shared OTHER=a=b',EnvironmentFiles:''
+  });
+});
 async function temp(t){
   const root=await realpath(await mkdtemp(join(tmpdir(),'stardust-lifecycle-')));
   t.after(()=>rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));

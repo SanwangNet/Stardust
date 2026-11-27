@@ -14,6 +14,9 @@ const python=(...args)=>command('/usr/bin/python3',['-I',helper,...args],{timeou
 const systemctl=(...args)=>command('/usr/bin/systemctl',[...args,service],{timeout:90000,env:{PATH:'/usr/bin:/bin',LANG:'C'}});
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const absent=error=>{if(!missing(error))throw error;return null;};
+export function parseSystemdProperties(stdout){
+  return Object.fromEntries(stdout.trim().split(/\r?\n/).map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+}
 export function validateRequest(value){
   if(!value||typeof value.id!=='string'||!idPattern.test(value.id)||!['check','update','backup','restore','rollback','upload','delete'].includes(value.operation))throw Error('INVALID_REQUEST');
   const key={update:'target',rollback:'target',restore:'backup',delete:'backup'}[value.operation];
@@ -87,7 +90,7 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
   async function stage(phase){status.job={...status.job,phase};await persist();}
   async function stop(){
     const {stdout}=await control('show','--property=User,Group,WorkingDirectory,KillMode,Delegate,Environment,EnvironmentFiles');
-    const properties=Object.fromEntries(stdout.trim().split(/\r?\n/).map(line=>line.split('=')));
+    const properties=parseSystemdProperties(stdout);
     if(properties.User!=='stardust'||!['','stardust'].includes(properties.Group)||properties.WorkingDirectory!==join(root,'current')||properties.KillMode!=='control-group'||properties.Delegate!=='no'||properties.EnvironmentFiles||!properties.Environment?.split(' ').includes('STARDUST_STORAGE_ROOT='+shared))throw Error('SERVICE_CONFIGURATION_INVALID');
     // systemctl stop waits for the control group. shared is reserved for this service.
     await control('stop');
