@@ -22,7 +22,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: Verify lifecycle with isolated Linux files
-        run: sudo "$(command -v node)" --experimental-sqlite --test --test-name-pattern="real Linux files" tests/lifecycle.test.mjs
+        run: sudo "$(command -v node)" --experimental-sqlite --test --test-name-pattern="real Linux files|atomic JSON" tests/lifecycle.test.mjs
       - name: Package production files
         run: |
           stage="$RUNNER_TEMP/stardust-package"

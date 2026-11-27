@@ -65,6 +65,8 @@ sudo flock --no-fork /opt/stardust/management/private/lock "$(command -v node)" 
 
 Core 通过固定请求文件提交预定义操作，systemd.path 启动独立 oneshot。管理器使用 flock 串行处理请求。Core 可读取筛选后的状态及被授权下载的备份，本身没有系统服务启动授权。用户请求不携带命令、服务名、路径、仓库地址或下载 URL。管理器安装在管理员控制的 `/usr/local/lib/stardust-lifecycle`，普通 Core 更新只更换运行包。不兼容管理器契约的包需要管理员从审核过的发布下载安装入口，执行 `sudo bash install.sh --refresh-manager`。若发布说明要求修改 systemd 单元或其他部署契约，还需按该发布的说明手动迁移。没有自动调度、原生 HTTPS、ACME 或自动回滚。
 
+修复状态文件权限的管理器版本需要执行上述 `--refresh-manager`：刷新时会在管理器锁保护下修复已有 `status.json` 的组读权限，后续状态写入也会保留该权限。服务仍使用 `UMask=0077`。
+
 状态和故障检查：
 
 ```sh

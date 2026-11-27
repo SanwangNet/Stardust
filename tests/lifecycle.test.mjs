@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,26 @@ async function temp(t){
   t.after(()=>rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
   return root;
 }
+
+test('atomic JSON preserves explicit modes under umask 0077, including replacements', {skip:process.platform!=='linux'}, async t=>{
+  const root=await temp(t), moduleUrl=new URL('../scripts/lifecycle/files.mjs',import.meta.url).href;
+  await chmod(root,0o750);
+  const script=`import {atomicJson} from ${JSON.stringify(moduleUrl)};
+    process.umask(0o077);
+    const gid=process.getuid()===0?process.getgid():undefined;
+    await atomicJson(process.argv[1],{format:1,revision:1},0o640,gid);
+    await atomicJson(process.argv[1],{format:1,revision:2},0o640,gid);
+    await atomicJson(process.argv[2],{private:true},0o600);`;
+  const status=join(root,'status.json'), config=join(root,'config.json');
+  execFileSync(process.execPath,['--input-type=module','-e',script,status,config]);
+  assert.equal((await stat(status)).mode&0o777,0o640);
+  assert.equal((await stat(config)).mode&0o777,0o600);
+  assert.equal(JSON.parse(await readFile(status,'utf8')).revision,2);
+  if(process.getuid()===0){
+    const bytes=execFileSync(process.execPath,['-e','process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))',status],{uid:65534,gid:process.getgid()});
+    assert.equal(JSON.parse(bytes.toString()).revision,2);
+  }
+});
 
 test('management accepts only fixed operations with typed immutable identifiers',()=>{
   assert.deepEqual(validateRequest({id,operation:'rollback',target:a}),{id,operation:'rollback',target:a});

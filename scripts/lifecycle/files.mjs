@@ -35,7 +35,7 @@ export async function syncDirectory(path){
 export async function atomicJson(path,value,mode=0o640,gid){
   const temp=path+'.'+randomUUID()+'.tmp',file=await open(temp,'wx',mode);
   try {
-    try{if(gid!==undefined)await file.chown(0,gid);await file.writeFile(JSON.stringify(value)+'\n');await file.sync();}
+    try{if(gid!==undefined)await file.chown(0,gid);await file.chmod(mode);await file.writeFile(JSON.stringify(value)+'\n');await file.sync();}
     finally{await file.close();}
     await rename(temp,path);
     await syncDirectory(dirname(path));

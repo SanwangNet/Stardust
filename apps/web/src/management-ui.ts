@@ -88,8 +88,19 @@ export function initManagement(): void {
     if (fetching || (sending && !pending)) return;
     fetching = true;
     try {
-      const response = await fetch("/api/v1/management/status", {cache:"no-store", signal:AbortSignal.timeout(4500)});
-      if (!response.ok) throw new Error();
+      let response: Response;
+      try {
+        response = await fetch("/api/v1/management/status", {cache:"no-store", signal:AbortSignal.timeout(4500)});
+      } catch {
+        const text = blocking() ? "连接暂时中断，正在等待服务恢复…" : "网络连接中断，无法读取软件管理状态。";
+        feedback.textContent = text; backupFeedback.textContent = text;
+        return;
+      }
+      if (!response.ok) {
+        const text = response.status === 503 ? "软件管理服务暂不可用（HTTP 503），请检查管理器状态和文件权限。" : `无法读取软件管理状态（HTTP ${response.status}）。`;
+        feedback.textContent = text; backupFeedback.textContent = text;
+        return;
+      }
       state = await response.json() as State;
       if (pending && !sending && !state.pending) {
         const job = state.job;
@@ -103,7 +114,7 @@ export function initManagement(): void {
       }
       render();
     } catch {
-      const text = blocking() ? "连接暂时中断，正在等待服务恢复…" : "暂时无法读取软件管理状态。";
+      const text = "软件管理状态响应无效，请检查服务日志。";
       feedback.textContent = text; backupFeedback.textContent = text;
     } finally { fetching = false; }
   }
@@ -121,8 +132,13 @@ export function initManagement(): void {
         body:archive ?? JSON.stringify({operation,...args}),
         signal:AbortSignal.timeout(archive ? 30 * 60 * 1000 : 8000),
       });
+      if (!response.ok) {
+        rejected = true;
+        const result = await response.json().catch(() => ({})) as {error?:string};
+        throw new Error(reasons[result.error ?? ""] ?? `请求未被接受（HTTP ${response.status}）。`);
+      }
       const result = await response.json() as {id?:string;error?:string};
-      if (!response.ok || !result.id) { rejected = true; throw new Error(reasons[result.error ?? ""] ?? "请求未被接受。"); }
+      if (!result.id) { rejected = true; throw new Error("请求响应无效，请检查软件管理状态。"); }
       pending.id = result.id; pending.time = Date.now(); remember();
       if (archive) file.value = "";
       message = "";

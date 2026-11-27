@@ -52,6 +52,13 @@ if $refresh; then
     unlink "$stage/$file"
   done
   rmdir -- "$stage"
+  # Repair status written by older managers under UMask=0077, while holding the lock.
+  status_file=$root/management/status.json
+  if [[ -e $status_file || -L $status_file ]]; then
+    [[ ! -L $status_file && -f $status_file && $(stat -c '%u:%h' "$status_file") == 0:1 ]] || fail '状态文件不安全，请检查后重试。'
+    chgrp stardust "$status_file"
+    chmod 0640 "$status_file"
+  fi
   printf '生命周期管理器已更新，现有 Core 及数据保持原样。\n'
   exit 0
 fi
