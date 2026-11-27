@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { promisify } from 'node:util';
-import { archiveLimit, atomicJson, capture, digest, digestPattern, idPattern, missing, openFile, readJson, releases, shaPattern, syncDirectory, version } from './files.mjs';
+import { archiveLimit, atomicJson, capture, digest, digestPattern, idPattern, missing, openFile, packageName, readJson, releases, shaPattern, syncDirectory, version } from './files.mjs';
 import { runningEndpoints } from './running-port.mjs';
 
 const systemRoot='/opt/stardust', command=promisify(execFile), service='stardust.service';
@@ -37,6 +37,19 @@ export async function directory(path,owner=0,groupWritable=false){
 }
 export function retainedVersions(versions,current,retain){
   return versions.filter(v=>v.sha!==current).sort((a,b)=>b.sequence-a.sequence).slice(retain-1);
+}
+export async function localRelease(path,identity){
+  const manifest=await readJson(join(path,'stardust-release.json'),32768,0),meta=version(manifest);
+  if(meta.sha!==identity.sha||meta.sequence!==identity.sequence||manifest.archive!==packageName||manifest.sha256!==identity.sha256||
+    !digestPattern.test(manifest.sha256)||!Number.isSafeInteger(manifest.size)||manifest.size<1||manifest.size>archiveLimit||manifest.size!==identity.size)throw Error('INVALID_LOCAL_RELEASE');
+  return {
+    async latest(){return {...meta,size:manifest.size,sha256:manifest.sha256};},
+    async download(target,destination){
+      const file=await openFile(join(path,packageName),archiveLimit,0);
+      const result=await capture(file.createReadStream(),destination,target.size);
+      if(result.size!==target.size||result.sha256!==target.sha256)throw Error('PACKAGE_CHECKSUM_MISMATCH');
+    },
+  };
 }
 const managerFiles=['manage.mjs','files.mjs','running-port.mjs','archive.py'];
 export async function prepareManager(source,code){
@@ -361,8 +374,15 @@ if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
     !Number.isSafeInteger(config.retainAutomaticBackups)||config.retainAutomaticBackups<1||config.retainAutomaticBackups>50 ||
     (config.token!==undefined&&!/^[A-Za-z0-9_]{20,256}$/.test(config.token)))throw Error('INVALID_LOCAL_CONFIGURATION');
   for(const path of [systemRoot,join(systemRoot,'releases'),join(systemRoot,'backups'),join(systemRoot,'management'),join(systemRoot,'management','private')])await directory(path);
-  const manager=await lifecycle({config});
   const operation=process.argv[2];
+  let remote;
+  if(operation==='install'&&process.env.STARDUST_INSTALL_LOCAL==='1'){
+    remote=await localRelease(join(systemRoot,'management','private','install-release'),{
+      sha:process.env.STARDUST_INSTALL_SHA,sequence:Number(process.env.STARDUST_INSTALL_SEQUENCE),
+      sha256:process.env.STARDUST_INSTALL_DIGEST,size:Number(process.env.STARDUST_INSTALL_SIZE),
+    });
+  }
+  const manager=await lifecycle({config,...(remote?{remote}:{})});
   if(operation==='consume')await manager.consume();
   else if(operation==='interrupted')await manager.interrupted();
   else if(operation==='enable'){const local=await readJson(join(systemRoot,'management','config.json'),4096,0);await atomicJson(join(systemRoot,'management','config.json'),{...local,enabled:true},0o600);}

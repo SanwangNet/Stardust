@@ -22,7 +22,7 @@ const message=execFileSync('git',['log','-1','--format=%B',sha],{encoding:'utf8'
 await writeFile(join(output,'stardust-release.json'),JSON.stringify({...meta,archive:packageName,size,sha256,message},null,2)+'\n');
 await writeFile(join(output,'SHA256SUMS'),sha256+'  '+basename(archive)+'\n');
 let installer=await readFile(new URL('./install.sh',import.meta.url),'utf8');
-let embedded='install_manager(){\n';
+let embedded=`STARDUST_INSTALLER_SHA=${sha}\nSTARDUST_INSTALLER_SEQUENCE=${sequence}\nSTARDUST_INSTALLER_DIGEST=${sha256}\nSTARDUST_INSTALLER_SIZE=${size}\ninstall_manager(){\n`;
 for(const name of ['manage.mjs','files.mjs','running-port.mjs','archive.py']){
   const content=(await readFile(new URL('./lifecycle/'+name,import.meta.url),'utf8')).replaceAll('\r\n','\n');
   if(/^STARDUST_EMBEDDED_SOURCE$/m.test(content))throw Error('INSTALLER_HEREDOC_COLLISION');

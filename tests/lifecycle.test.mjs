@@ -6,7 +6,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readlink, realpath, readdir,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canRollback, exchangeManager, lifecycle, parseSystemdProperties, prepareManager, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
+import { canRollback, exchangeManager, lifecycle, localRelease, parseSystemdProperties, prepareManager, retainedVersions, validateRequest } from '../scripts/lifecycle/manage.mjs';
 import { releases } from '../scripts/lifecycle/files.mjs';
 import { createManagement } from '../apps/server/dist/management.js';
 import { createStardustServer } from '../apps/server/dist/app.js';
@@ -180,6 +180,25 @@ test('release archive includes its matching lifecycle manager', async t=>{
     assert.ok(entries.includes('lifecycle/'+name));
     assert.deepEqual(execFileSync('tar',['-xOzf',join(output,'stardust-linux-x64.tar.gz'),'lifecycle/'+name]),await readFile(new URL('../scripts/lifecycle/'+name,import.meta.url)));
   }
+  const manifest=JSON.parse(await readFile(join(output,'stardust-release.json'),'utf8'));
+  const installer=await readFile(join(output,'install.sh'),'utf8');
+  assert.match(installer,new RegExp('STARDUST_INSTALLER_SHA='+sha));
+  assert.match(installer,new RegExp('STARDUST_INSTALLER_DIGEST='+manifest.sha256));
+});
+
+test('real Linux files: local release validates installer identity, size and content before installation',{skip:process.platform==='linux'&&process.getuid()!==0},async t=>{
+  const root=await temp(t),archive=join(root,'stardust-linux-x64.tar.gz');
+  const {createHash}=await import('node:crypto');
+  const sha256=createHash('sha256').update('fixture').digest('hex');
+  const meta={...release(a,2),archive:'stardust-linux-x64.tar.gz',size:7,sha256};
+  const identity={sha:a,sequence:2,sha256,size:7};
+  await writeFile(archive,'fixture');await writeFile(join(root,'stardust-release.json'),JSON.stringify(meta));
+  const remote=await localRelease(root,identity);
+  const target=await remote.latest();await remote.download(target,join(root,'copied'));
+  assert.equal(await readFile(join(root,'copied'),'utf8'),'fixture');
+  await assert.rejects(localRelease(root,{...identity,sequence:3}),/INVALID_LOCAL_RELEASE/);
+  await writeFile(archive,'invalid');
+  await assert.rejects(remote.download(target,join(root,'bad')),/PACKAGE_CHECKSUM_MISMATCH/);
 });
 
 test('real Linux files: failed manager preparation or exchange keeps the active manager', {skip:process.platform!=='linux'||process.getuid()!==0}, async t=>{

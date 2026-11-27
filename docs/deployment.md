@@ -1,26 +1,24 @@
 # 安装、更新与备份
 
-Stardust 发布包面向 Debian 13、Linux x86_64 和 Node.js 24。生产机器还需要 Python 3、systemd 和 util-linux。可以先安装 Debian 依赖，再通过可信的软件源安装 Node.js 24：
-
-```sh
-sudo apt update
-sudo apt install python3 systemd util-linux passwd coreutils ca-certificates
-node --version
-```
-
-在 [GitHub Releases](https://github.com/SanwangNet/Stardust/releases) 下载已发布版本的 `install.sh`，核对仓库来源并审核后执行：
+在受支持的 Debian 13 x86_64 系统中，从 [GitHub Releases](https://github.com/SanwangNet/Stardust/releases) 下载 `install.sh`，核对发布来源后执行：
 
 ```sh
 sudo bash install.sh
 ```
 
-若希望首次安装同时启用 WebUI 软件管理，使用 `sudo bash install.sh --enable-management`。使用新架构安装后，也可以用同一个脚本和选项启用。安装器会获取最新完整发布，校验软件包 SHA256，解压到 `/opt/stardust/releases/<SHA>`，并启动独立非 root 用户的服务。Core 默认在 `0.0.0.0:80` 监听，低端口绑定权限仍由它的 systemd 单元提供。通过可信网络打开服务器 IP 完成初始化。已有端口覆盖优先，页面保存的端口在下次重启时生效。
+安装器会检查并安装缺少的依赖，复用兼容的 Node.js 24；若未找到，则从 nodejs.org 下载到 Stardust 专用目录，不覆盖现有 Node.js。安装器下载并校验正式发布包，创建运行用户、安装并启动服务，默认启用软件管理。系统须以 systemd 启动，且能够访问所需的软件源。安装完成后会显示版本、服务状态、WebUI 地址和数据位置。默认使用 80 端口；端口被占用时安装器会退出，不会停止其他服务。
+
+安装会信任 Debian 软件源、nodejs.org 和 Stardust 官方 GitHub Releases。软件管理由 root 运行，所有能访问 WebUI 的用户都可执行管理操作，因此请仅在受控网络中开放 WebUI。
+
+高级选项：`sudo bash install.sh --port 8080` 使用其他端口；`sudo bash install.sh --disable-management` 在首次安装时关闭软件管理。重复运行会识别现有安装并退出，不更改数据、备份或配置；正常升级请使用 WebUI。
+
+若同目录有该安装器对应的 `stardust-linux-x64.tar.gz`、`stardust-release.json` 和 `SHA256SUMS`，安装器优先校验并使用它们。包、清单和校验值必须匹配安装器内的发布身份；运行依赖缺失时仍需要联网。若没有完整的一组文件，则在线获取发行包。
 
 私有仓库需要先用有权访问该仓库的账号下载安装入口。若服务器也需要凭据，请将只读、仅该仓库的 GitHub Contents 凭据以 root 所有、`0600` 权限保存在 `/etc/stardust/github-token`。例如先执行 `sudo install -d -m 0700 /etc/stardust`，再执行 `sudo install -m 0600 /dev/null /etc/stardust/github-token` 并使用 `sudoedit` 填写。公开仓库无需凭据。凭据由管理器读取，不进入 Core、浏览器或软件包。下载重定向不携带凭据。
 
 ## WebUI 与可信代理
 
-软件管理默认关闭。启用后，所有能够访问该 WebUI 的用户都能更新、下载包含凭据和私人历史的备份，以及恢复或删除数据。请仅在受控网络中启用。Host、Origin、跨站检查和可信代理配置继续生效，这些检查不识别用户身份。
+软件管理默认启用。所有能够访问该 WebUI 的用户都能更新、下载包含凭据和私人历史的备份，以及恢复或删除数据。Host、Origin、跨站检查和可信代理配置不识别用户身份。
 
 独立 Caddy 需要保留原始 Host 并发送 `X-Forwarded-Proto`。若 Caddy 到 Core 的实际 TCP 源地址为 `192.168.30.23`，可以通过已有服务 drop-in 配置：
 
@@ -31,11 +29,7 @@ Environment=STARDUST_TRUSTED_PROXIES=192.168.30.23
 
 执行 `sudo systemctl daemon-reload && sudo systemctl restart stardust.service` 生效。已有可信代理设置会原样保留。Caddy 与 Stardust 部署在不同主机时可以分别监听各自的 80 端口。
 
-若首次安装已配置 systemd 单元但下载或部署失败，检查日志并解决问题后，可重试安装：
-
-```sh
-sudo flock --no-fork /opt/stardust/management/private/lock "$(command -v node)" /usr/local/lib/stardust-lifecycle/manage.mjs install
-```
+若首次安装中途失败，请检查安装输出和服务日志。安装器发现不完整的现有文件时会停止，避免覆盖数据；排查时保留现场，不要直接删除已有数据。
 
 ## 软件更新、备份与回滚
 
