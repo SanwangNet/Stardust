@@ -4,6 +4,7 @@ import { open, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const shaPattern=/^[a-f0-9]{40}$/;
 export const digestPattern=/^[a-f0-9]{64}$/;
@@ -67,8 +68,28 @@ export function version(value){
   return {format:1,sha:value.sha,sequence:value.sequence,version:value.version,dataFormat:value.dataFormat,platform:value.platform,node:value.node,manager:value.manager};
 }
 export function releases(token,fetcher=fetch){
-  async function request(url,accept){
-    const options={redirect:'manual',signal:AbortSignal.timeout(120000),headers:{Accept:accept,'User-Agent':'Stardust-Lifecycle',...(token?{Authorization:'Bearer '+token}:{})}};
+  const transient=new Set(['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EAI_AGAIN','ENETUNREACH','EHOSTUNREACH','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT','UND_ERR_SOCKET']);
+  function networkReason(error,signal){
+    if(signal.aborted || error?.name==='TimeoutError' || error?.name==='AbortError')return 'NETWORK_TIMEOUT';
+    for(let current=error;current;current=current.cause){
+      if(transient.has(current.code))return current.code==='ECONNRESET'||current.code==='UND_ERR_SOCKET'?'NETWORK_RESET':current.code.includes('TIMEOUT')||current.code==='ETIMEDOUT'?'NETWORK_TIMEOUT':'NETWORK_UNAVAILABLE';
+    }
+    return null;
+  }
+  async function retry(action){
+    const signal=AbortSignal.timeout(120000);
+    for(let attempt=0;attempt<3;attempt++){
+      try{return await action(signal);}
+      catch(error){
+        const reason=networkReason(error,signal);
+        if(!reason){if(error instanceof TypeError && error.message==='fetch failed')throw Error('NETWORK_REQUEST_FAILED',{cause:error});throw error;}
+        if(attempt===2||signal.aborted)throw Error(reason,{cause:error});
+        try{await delay(250*(attempt+1),undefined,{signal});}catch{throw Error('NETWORK_TIMEOUT',{cause:error});}
+      }
+    }
+  }
+  async function request(url,accept,signal){
+    const options={redirect:'manual',signal,headers:{Accept:accept,'User-Agent':'Stardust-Lifecycle',...(token?{Authorization:'Bearer '+token}:{})}};
     let response=await fetcher(url,options);
     if(accept==='application/octet-stream' && [301,302,303,307,308].includes(response.status)){
       const location=new URL(response.headers.get('location'));
@@ -79,11 +100,13 @@ export function releases(token,fetcher=fetch){
     return response.body;
   }
   async function json(url,limit,accept='application/vnd.github+json'){
-    let size=0;const chunks=[];
-    for await(const chunk of await request(url,accept)){
-      size+=chunk.length;if(size>limit)throw Error('RELEASE_METADATA_TOO_LARGE');chunks.push(chunk);
-    }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return retry(async signal=>{
+      let size=0;const chunks=[];
+      for await(const chunk of await request(url,accept,signal)){
+        size+=chunk.length;if(size>limit)throw Error('RELEASE_METADATA_TOO_LARGE');chunks.push(chunk);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    });
   }
   const asset=(release,name)=>release.assets?.find(item=>item.name===name&&item.state==='uploaded'&&Number.isSafeInteger(item.id)&&item.id>0);
   async function fromRelease(release){
@@ -115,8 +138,14 @@ export function releases(token,fetcher=fetch){
       return found;
     },
     async download(target,path){
-      const result=await capture(Readable.fromWeb(await request(api+'/releases/assets/'+target.assetId,'application/octet-stream')),path,target.size);
-      if(result.size!==target.size||result.sha256!==target.sha256)throw Error('PACKAGE_CHECKSUM_MISMATCH');
+      await retry(async signal=>{
+        const temp=path+'.'+randomUUID()+'.tmp';
+        try{
+          const result=await capture(Readable.fromWeb(await request(api+'/releases/assets/'+target.assetId,'application/octet-stream',signal)),temp,target.size);
+          if(result.size!==target.size||result.sha256!==target.sha256)throw Error('PACKAGE_CHECKSUM_MISMATCH');
+          await rename(temp,path);
+        }finally{await unlink(temp).catch(error=>{if(!missing(error))throw error;});}
+      });
     },
   };
 }

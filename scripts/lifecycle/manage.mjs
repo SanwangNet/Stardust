@@ -52,11 +52,8 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
     if(!shaPattern.test(sha))throw Error('INVALID_VERSION');
     const path=join(releasesDir,sha);
     await directory(path);
-    const meta=await readJson(join(path,'version.json'),4096,0).catch(absent);
-    if(meta){const release=version(meta);if(release.sha!==sha)throw Error('INVALID_VERSION');return release;}
-    const legacy=await readJson(join(path,'.stardust-candidate.json'),65536,0);
-    if(legacy.sha!==sha||legacy.status!=='prepared')throw Error('INVALID_VERSION');
-    return {sha,version:'旧版',dataFormat:null,sequence:0};
+    const release=version(await readJson(join(path,'version.json'),4096,0));
+    if(release.sha!==sha)throw Error('INVALID_VERSION');return release;
   }
   async function current(){
     const pointer=await readlink(join(root,'current')).catch(absent);
@@ -132,7 +129,6 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
   }
   async function saveBackup(work,active,kind){
     const id=randomUUID(),meta={format:2,kind,version:active.sha,dataFormat:active.dataFormat??1,sequence:active.sequence,createdAt:new Date().toISOString()};
-    if(active.dataFormat===null){meta.format=1;delete meta.dataFormat;}
     const archive=join(work,id+'.tar.gz'),metadata=join(work,id+'.json');
     await directory(shared,uid);
     await atomicJson(metadata,meta,0o600);
@@ -146,7 +142,7 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
   async function prepareRelease(work,target){
     if(target.manager>1)throw Error('MANAGER_UPGRADE_REQUIRED');
     const found=await installed(target.sha).catch(absent);
-    if(found?.dataFormat!==null&&found){
+    if(found){
       if(JSON.stringify(version(found))!==JSON.stringify(version(target)))throw Error('VERSION_CONFLICT');
       return found;
     }
@@ -267,8 +263,7 @@ export async function lifecycle({root=systemRoot,config,remote=releases(config.t
       const now=await current();
       await inventory(now);
       if(['install','update','restore'].includes(operation)){
-        const candidates=status.versions.filter(v=>operation!=='install'||v.sequence>0 || v.sha===now?.sha);
-        for(const entry of retainedVersions(candidates,now.sha,config.retainVersions))await rm(join(releasesDir,entry.sha),{recursive:true});
+        for(const entry of retainedVersions(status.versions,now.sha,config.retainVersions))await rm(join(releasesDir,entry.sha),{recursive:true});
         const automatic=status.backups.filter(b=>b.kind==='automatic');
         for(const entry of automatic.slice(config.retainAutomaticBackups))await deleteBackup(entry.id);
         await inventory(now);

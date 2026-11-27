@@ -80,6 +80,36 @@ test('release checks use published assets and keep tokens off redirected downloa
   assert.equal(download,true);
 });
 
+test('release requests retry temporary network failures but not HTTP errors',async()=>{
+  const reset=()=>new TypeError('fetch failed',{cause:Object.assign(new Error('reset'),{code:'ECONNRESET'})});
+  let calls=0;
+  const recovered=releases(null,async()=>{if(++calls<3)throw reset();return Response.json([]);});
+  await assert.rejects(recovered.latest(),/NO_PUBLISHED_RELEASE/);
+  assert.equal(calls,3);
+  calls=0;
+  await assert.rejects(releases(null,async()=>{calls++;throw reset();}).latest(),/NETWORK_RESET/);
+  assert.equal(calls,3);
+  calls=0;
+  await assert.rejects(releases(null,async()=>{calls++;return new Response('',{status:403});}).latest(),/GITHUB_HTTP_403/);
+  assert.equal(calls,1);
+  await assert.rejects(releases(null,async()=>{throw new TypeError('fetch failed',{cause:Object.assign(new Error('TLS'),{code:'CERT_HAS_EXPIRED'})});}).latest(),/NETWORK_REQUEST_FAILED/);
+});
+
+test('download retries a broken response body and removes partial data',async t=>{
+  const root=await temp(t),target=join(root,'package');
+  const {createHash}=await import('node:crypto');
+  let calls=0;
+  const remote=releases(null,async()=>{
+    calls++;
+    if(calls===1)return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('partial'));controller.error(Object.assign(new Error('reset'),{code:'ECONNRESET'}));}}));
+    return new Response('fixture');
+  });
+  await remote.download({assetId:1,size:7,sha256:createHash('sha256').update('fixture').digest('hex')},target);
+  assert.equal(calls,2);
+  assert.equal(await readFile(target,'utf8'),'fixture');
+  assert.deepEqual(await import('node:fs/promises').then(fs=>fs.readdir(root)),['package']);
+});
+
 test('Core queues fixed requests through the filesystem, rejects cross-origin writes and gates downloads',async t=>{
   const root=await temp(t);
   await mkdir(join(root,'management','inbox'),{recursive:true});

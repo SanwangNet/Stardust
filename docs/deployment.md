@@ -31,32 +31,20 @@ Environment=STARDUST_TRUSTED_PROXIES=192.168.30.23
 
 执行 `sudo systemctl daemon-reload && sudo systemctl restart stardust.service` 生效。已有可信代理设置会原样保留。Caddy 与 Stardust 部署在不同主机时可以分别监听各自的 80 端口。
 
-## 现有 Debian 实例迁移
-
-在 [GitHub Releases](https://github.com/SanwangNet/Stardust/releases) 下载包含新架构的 `install.sh`，确认旧更新没有运行后执行：
-
-```sh
-sudo bash install.sh --migrate --enable-management
-```
-
-如果希望继续关闭 WebUI 软件管理，省略 `--enable-management`。迁移复用现有 `stardust.service` 和服务用户，保留 `shared`、端口、低端口权限、可信代理、已有备份和旧版本目录。新包在旧服务运行期间下载并校验，停机后先备份，再切换。标准旧 oneshot、sudoers 规则和旧启用 drop-in 会移到管理员私有目录，便于核对。自定义文件保持原样，请由部署者检查。旧构建账号、源码 release、旧 Updater 文件和构建残留不会自动清理，避免删除实验性或仍有价值的文件。
-
-若迁移已配置新单元但下载或部署失败，先查阅 `sudo journalctl -u stardust.service -e` 和终端错误。解决问题后，可以用同一套管理器重试安装：
+若首次安装已配置 systemd 单元但下载或部署失败，检查日志并解决问题后，可重试安装：
 
 ```sh
 sudo flock --no-fork /opt/stardust/management/private/lock "$(command -v node)" /usr/local/lib/stardust-lifecycle/manage.mjs install
 ```
 
-重试前确认当前部署和备份状态。如果安装器中途退出且尚未写齐单元，请先检查创建到哪一步。切换后的健康检查失败会保留失败状态和更新前备份，由部署者决定如何恢复。
-
 ## 软件更新、备份与回滚
 
 - 软件更新页面检查已发布的软件包。选中更新后，管理器再次确认目标 SHA、验证包并解压。旧服务继续运行到准备完成。服务停止后创建自动备份，再原子切换 `current`，启动并核对运行 SHA。
-- 版本清理默认保留当前版本和最近两个可用版本。编辑 root 专用的 `/opt/stardust/management/config.json` 可将 `retainVersions` 和 `retainAutomaticBackups` 分别设置为 1–50。迁移首次运行会额外保留旧源码版本。未知目录由部署者自行检查。
-- 回滚程序仅在两个发布版本声明相同数据兼容代数时开放。未来若修改数据兼容性，发布者须提高 `package.json` 的 `stardustDataFormat`。旧源码版本没有这个声明，必须通过对应的数据备份一起恢复。不提供 SQLite 逆向迁移。
+- 版本清理默认保留当前版本和最近两个可用版本。编辑 root 专用的 `/opt/stardust/management/config.json` 可将 `retainVersions` 和 `retainAutomaticBackups` 分别设置为 1–50。未知目录由部署者自行检查。
+- 回滚程序仅在两个发布版本声明相同数据兼容代数时开放。未来若修改数据兼容性，发布者须提高 `package.json` 的 `stardustDataFormat`。不提供 SQLite 逆向迁移。
 - 备份页面可手动创建、下载、上传、恢复和删除备份。创建备份时短暂停止服务，`shared` 由 Stardust 独占管理。正常更新继续使用原有 `shared`。下载走受控接口，归档包含配置、凭据和所有持久化数据。
 - 手动备份、上传备份和恢复前的安全副本不会随自动备份或程序版本清理。恢复会校验内容并先保存当前数据的安全副本，再替换 `shared`，启动备份对应程序。端口、代理设置及备份之后写入的数据都可能改变，WebUI 会要求确认。若发布版已从本机清理，管理器尝试按备份中的发布身份重新下载。
-- 旧 UUID 命名的 tar.gz 和独立 JSON 清单可读取及下载。仅在校验匹配且对应旧程序仍存在时可恢复。单独上传旧 tar.gz 可以保留和下载，但缺少可信版本关联，不能从 WebUI 恢复。包含链接或特殊文件的归档不支持自动恢复。恢复到不包含管理页面的旧版后，请在服务器侧核对结果，状态仍在 `/opt/stardust/management/status.json`。所有旧归档会保留，直到用户明确删除。
+- 旧 UUID 命名的 tar.gz 和独立 JSON 清单可读取及下载。仅在校验匹配且对应旧程序仍存在时可恢复。单独上传旧 tar.gz 可以保留和下载，但缺少可信版本关联，不能从 WebUI 恢复。包含链接或特殊文件的归档不支持自动恢复。所有旧归档会保留，直到用户明确删除。
 - 备份上传和下载上限为 2 GiB，归档解压上限为 8 GiB。若通过代理上传，代理也需允许相应大小和请求时间。
 
 ## 发布和运行边界
@@ -64,6 +52,10 @@ sudo flock --no-fork /opt/stardust/management/private/lock "$(command -v node)" 
 `main` 推送触发 GitHub Actions。构建工作只读检查源码，执行 npm 安装、类型检查、编译和测试，再单独安装生产依赖。工作流将编译后的程序、静态资源、生产依赖、版本元数据和 SHA256 归档，并从解压目录独立启动验证。发布工作使用最小写权限，先创建草稿并上传完整产物，随后公开发布。发布身份包含工作流序号和完整 Commit SHA。已有发布产物不覆盖。失败留下草稿时，可由维护者检查并移除该草稿后重试同一运行。
 
 Core 通过固定请求文件提交预定义操作，systemd.path 启动独立 oneshot。管理器使用 flock 串行处理请求。Core 可读取筛选后的状态及被授权下载的备份，本身没有系统服务启动授权。用户请求不携带命令、服务名、路径、仓库地址或下载 URL。管理器安装在管理员控制的 `/usr/local/lib/stardust-lifecycle`，普通 Core 更新只更换运行包。不兼容管理器契约的包需要管理员从审核过的发布下载安装入口，执行 `sudo bash install.sh --refresh-manager`。若发布说明要求修改 systemd 单元或其他部署契约，还需按该发布的说明手动迁移。没有自动调度、原生 HTTPS、ACME 或自动回滚。
+
+**管理器更新的信任边界：**正式发布的 `install.sh` 包含与该版本配套的管理器代码。管理员必须从可信渠道核对并审核安装入口后，手动执行 `--refresh-manager`；Core 更新不会替换 root 管理器。当前没有独立配置的签名验证密钥或可验证的发布者身份，同一 GitHub 来源提供的 SHA256 只能检验传输完整性，不能证明特权代码真实性。自动升级需要先建立独立信任根、密钥轮换和防回退策略，以及可恢复的整组原子切换；目前不增加这套部署机制。刷新与任务共用锁，任务运行时刷新会拒绝执行。现有手动刷新按文件替换，若中途失败应重新运行审核过的安装脚本完成修复，不能视为具备断电原子性。
+
+检查与下载发布资源时，管理器对临时连接故障最多尝试三次，每个资源共用 120 秒期限；认证、发布元数据及校验错误不会作为临时网络故障重试。管理器自身更新仍须手动刷新。
 
 修复状态文件权限的管理器版本需要执行上述 `--refresh-manager`：刷新时会在管理器锁保护下修复已有 `status.json` 的组读权限，后续状态写入也会保留该权限。服务仍使用 `UMask=0077`。
 

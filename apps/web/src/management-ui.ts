@@ -14,6 +14,8 @@ const reasons: Record<string,string> = {
   PACKAGE_CHECKSUM_MISMATCH:"软件包校验失败。", BACKUP_CHECKSUM_MISMATCH:"备份校验失败。",
   HEALTH_CHECK_FAILED:"服务启动后未通过版本健康检查。", UPLOAD_TOO_LARGE:"备份超过 2 GiB。",
   INTERRUPTED:"操作中断，请由部署者检查日志。", NO_PUBLISHED_RELEASE:"还没有可安装的发布包。",
+  NETWORK_RESET:"连接发布服务时被重置，已重试，请检查代理或网络。", NETWORK_TIMEOUT:"连接发布服务超时，已重试，请检查代理或网络。",
+  NETWORK_UNAVAILABLE:"发布服务网络暂不可用，已重试，请检查代理或网络。", NETWORK_REQUEST_FAILED:"无法连接发布服务，请检查网络和代理配置。",
   INVALID_BACKUP_METADATA:"备份缺少有效的版本信息。", UNSAFE_ARCHIVE:"归档包含不支持的文件或链接。", ARCHIVE_LIMIT:"归档解压超过大小限制。", VERSION_NOT_AVAILABLE:"备份对应的程序版本已不可用。", SHARED_RESTORE_INCOMPLETE:"恢复中断，原数据和备份已保留，请联系部署者。",
 };
 const completed: Record<string,string> = {check:"检查完成。",update:"更新成功。",backup:"备份已创建。",restore:"恢复成功。",rollback:"回滚成功。",upload:"备份已上传。",delete:"备份已删除。"};
@@ -25,14 +27,28 @@ export function initManagement(): void {
   const file = element<HTMLInputElement>("backup-file"), feedback = element("update-feedback"), backupFeedback = element("backup-feedback");
   const versions = element("managed-versions"), backups = element("managed-backups");
   const jobKey = "stardust.management.pending";
-  let state: State | undefined, fetching = false, sending = false, message = "", rendered = "";
-  let pending: {previous: string | null; id?: string; time: number} | undefined;
+  type Page = "update" | "backup";
+  const messages: Record<Page,string> = {update:"", backup:""}, results: Record<Page,string> = {update:"暂无记录", backup:"暂无记录"};
+  let state: State | undefined, fetching = false, sending = false, rendered = "", transportPage: Page | undefined;
+  let pending: {previous: string | null; id?: string; time: number; operation?: string} | undefined;
   try { pending = JSON.parse(sessionStorage.getItem(jobKey) ?? "null") ?? undefined; } catch { /* The server also publishes the active job. */ }
 
   function remember(): void {
     try { if (pending) sessionStorage.setItem(jobKey, JSON.stringify(pending)); else sessionStorage.removeItem(jobKey); } catch { /* Storage is optional. */ }
   }
   function blocking(): boolean { return sending || !!pending || !!state?.pending || state?.job?.result === "running"; }
+  function pageFor(operation?: string): Page { return ["backup","restore","upload","delete"].includes(operation ?? "") ? "backup" : "update"; }
+  function activePage(): Page { return pending?.operation ? pageFor(pending.operation) : state?.job?.result === "running" ? pageFor(state.job.operation) : location.hash === "#/settings/backups" ? "backup" : "update"; }
+  function expectedStop(): boolean {
+    const operation = pending?.operation ?? (state?.job?.result === "running" ? state.job.operation : undefined);
+    return !!operation && ["backup","restore","update","rollback"].includes(operation);
+  }
+  function showError(text: string): void {
+    const page = activePage();
+    messages[page] = text;
+    transportPage = page;
+    (page === "update" ? feedback : backupFeedback).textContent = text;
+  }
   function button(label: string, action: () => void, disabled: boolean): HTMLButtonElement {
     const result = document.createElement("button");
     result.type = "button"; result.className = "setup-secondary"; result.textContent = label; result.disabled = disabled;
@@ -65,8 +81,10 @@ export function initManagement(): void {
     element("update-current").textContent = `${state.version} · ${state.runningSha}`;
     element("update-latest").textContent = latest ? `${latest.version} · ${latest.sha}` : "尚未检查";
     element("update-message").textContent = (latest?.message || "—") + ((latest?.manager ?? 1) > 1 ? " 此版本需要部署者先更新生命周期管理器。" : "");
-    const text = message || (!state.enabled ? "请由部署者启用软件管理。" : resultText(state));
-    feedback.textContent = text; backupFeedback.textContent = text;
+    if (state.job && (!pending || state.job.id !== pending.previous)) results[pageFor(state.job.operation)] = resultText(state, state.job, false);
+    if (pending?.operation && (state.pending || !state.job || state.job.id === pending.previous)) results[pageFor(pending.operation)] = state.pending ? "等待服务处理请求…" : "正在确认请求是否已受理…";
+    feedback.textContent = messages.update || (!state.enabled ? "请由部署者启用软件管理。" : results.update);
+    backupFeedback.textContent = messages.backup || (!state.enabled ? "请由部署者启用软件管理。" : results.backup);
     const deployment = state.job && ["update","install","rollback","restore"].includes(state.job.operation) ? state.job : state.lastDeployment;
     element("update-result").textContent = resultText(state, deployment, false);
     const signature = JSON.stringify([state.versions,state.backups,state.runningSha,busy]);
@@ -92,38 +110,39 @@ export function initManagement(): void {
       try {
         response = await fetch("/api/v1/management/status", {cache:"no-store", signal:AbortSignal.timeout(4500)});
       } catch {
-        const text = blocking() ? "连接暂时中断，正在等待服务恢复…" : "网络连接中断，无法读取软件管理状态。";
-        feedback.textContent = text; backupFeedback.textContent = text;
+        showError(expectedStop() ? "连接暂时中断，正在等待服务恢复…" : "网络连接中断，无法读取软件管理状态。");
         return;
       }
       if (!response.ok) {
-        const text = response.status === 503 ? "软件管理服务暂不可用（HTTP 503），请检查管理器状态和文件权限。" : `无法读取软件管理状态（HTTP ${response.status}）。`;
-        feedback.textContent = text; backupFeedback.textContent = text;
+        const text = expectedStop() && [502,504].includes(response.status) ? "连接暂时中断，正在等待服务恢复…" : response.status === 503 ? "软件管理服务暂不可用（HTTP 503），请检查管理器状态和文件权限。" : `无法读取软件管理状态（HTTP ${response.status}）。`;
+        showError(text);
         return;
       }
       state = await response.json() as State;
+      if (transportPage) { messages[transportPage] = ""; transportPage = undefined; }
       if (pending && !sending && !state.pending) {
         const job = state.job;
         const matches = job && (pending.id ? job.id === pending.id : job.id !== pending.previous);
         if (matches && job.result !== "running") {
-          pending = undefined; remember(); message = "";
+          pending = undefined; remember();
           if (job.result === "success" && job.targetSha === state.runningSha && ["update","rollback","restore"].includes(job.operation)) setTimeout(() => location.reload(), 1500);
         } else if ((!matches && job?.result !== "running") && Date.now() - pending.time > 20000) {
-          pending = undefined; remember(); message = "暂时无法确认任务是否已受理。";
+          messages[pageFor(pending.operation)] = "暂时无法确认任务是否已受理。"; pending = undefined; remember();
         }
       }
       render();
     } catch {
       const text = "软件管理状态响应无效，请检查服务日志。";
-      feedback.textContent = text; backupFeedback.textContent = text;
+      showError(text);
     } finally { fetching = false; }
   }
 
   async function submit(operation: string, args: Record<string,string> = {}, archive?: File): Promise<void> {
     if (blocking() || !state?.enabled) return;
     sending = true;
-    message = archive ? "正在上传备份…" : "";
-    pending = {previous:state.job?.id ?? null,time:Date.now()};
+    const page = pageFor(operation);
+    messages[page] = archive ? "正在上传备份…" : "";
+    pending = {previous:state.job?.id ?? null,time:Date.now(),operation};
     remember(); render();
     let rejected = false;
     try {
@@ -133,6 +152,7 @@ export function initManagement(): void {
         signal:AbortSignal.timeout(archive ? 30 * 60 * 1000 : 8000),
       });
       if (!response.ok) {
+        if (expectedStop() && [502,504].includes(response.status)) throw new Error("RESPONSE_INTERRUPTED");
         rejected = true;
         const result = await response.json().catch(() => ({})) as {error?:string};
         throw new Error(reasons[result.error ?? ""] ?? `请求未被接受（HTTP ${response.status}）。`);
@@ -141,10 +161,10 @@ export function initManagement(): void {
       if (!result.id) { rejected = true; throw new Error("请求响应无效，请检查软件管理状态。"); }
       pending.id = result.id; pending.time = Date.now(); remember();
       if (archive) file.value = "";
-      message = "";
+      messages[page] = "";
     } catch (error) {
-      if (rejected) { pending = undefined; remember(); message = (error as Error).message; }
-      else { if (pending) pending.time = Date.now(); remember(); message = ""; }
+      if (rejected) { pending = undefined; remember(); messages[page] = (error as Error).message; }
+      else { if (pending) pending.time = Date.now(); remember(); messages[page] = ""; }
     } finally { sending = false; render(); void poll(); }
   }
   check.addEventListener("click", () => void submit("check"));
